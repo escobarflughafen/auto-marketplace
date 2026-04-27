@@ -1,0 +1,4 @@
+# One query per line
+pentax 67
+nikon sp
+mamiya 645af

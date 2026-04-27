@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "marketplace": "node marketplace.js",
+    "marketplace:help": "node marketplace.js --help",
+    "marketplace:poll": "node scripts/poll-marketplace-keywords.js",
+    "marketplace:collect": "node scripts/collect-marketplace-keyword.js",
+    "marketplace:capture": "node scripts/capture-marketplace-posts.js",
+    "marketplace:home:collect": "node scripts/collect-marketplace-homepage.js",
+    "marketplace:home:process": "node scripts/process-marketplace-homepage-backlog.js",
+    "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}

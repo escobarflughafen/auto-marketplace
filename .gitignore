@@ -1,0 +1,22 @@
+.DS_Store
+
+# Secrets and local auth
+credentials.json
+playwright/.auth/
+profiles/
+
+# Generated runtime data
+artifacts/
+reviews/
+facebook-marketplace.png
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Dependencies
+node_modules/
+
+# Local editor / OS noise
+.vscode/
+.idea/

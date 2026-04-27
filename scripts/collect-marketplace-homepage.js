@@ -1,0 +1,448 @@
+const fs = require('fs');
+const path = require('path');
+const { chromium } = require('playwright');
+const {
+  createLogger,
+  ensureDir,
+  safeGoto,
+  waitForMarketplaceResults,
+  scrollMarketplaceResults,
+  cleanText,
+} = require('./marketplace-utils');
+const {
+  DEFAULT_DB_PATH,
+  canonicalizeListingUrl,
+  extractListingId,
+  openMarketplaceHomepageDatabase,
+  closeMarketplaceHomepageDatabase,
+  upsertHomepageListingWithStatus,
+  getHomepageListingCounts,
+} = require('./marketplace-homepage-db');
+const {
+  DEFAULT_CREDENTIALS_PATH,
+  DEFAULT_LOGIN_TIMEOUT_MS,
+  ensureFacebookMarketplaceLogin,
+  describeFacebookMarketplaceSession,
+} = require('./marketplace-profile-auth');
+
+const DEFAULT_HOME_URL = 'https://www.facebook.com/marketplace/';
+const log = createLogger('collect-marketplace-homepage');
+
+function readFlagValue(argv, index, flagName) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`Missing value for ${flagName}`);
+  }
+
+  return value;
+}
+
+function parseIntegerFlag(value, flagName, minimum = 0) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < minimum) {
+    throw new Error(`Expected ${flagName} to be an integer >= ${minimum}`);
+  }
+
+  return parsed;
+}
+
+function parseArgs(argv) {
+  const options = {
+    startUrl: DEFAULT_HOME_URL,
+    userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
+    dbPath: DEFAULT_DB_PATH,
+    logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'homepage-collector.log'),
+    snapshotFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'latest-cycle.json'),
+    maxItems: 10,
+    collectAll: false,
+    firstLoadOnly: false,
+    initialLoadWaitMs: 5000,
+    maxRuntimeSeconds: 120,
+    stablePasses: 3,
+    refreshSeconds: 5 * 60,
+    refreshJitterMin: 0.25,
+    refreshJitterMax: 1.5,
+    once: false,
+    headless: true,
+    useCredentials: false,
+    credentialsPath: DEFAULT_CREDENTIALS_PATH,
+    loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case '--start-url':
+        options.startUrl = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--user-data-dir':
+        options.userDataDir = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--db-path':
+        options.dbPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--log-file':
+        options.logFile = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--snapshot-file':
+        options.snapshotFile = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--max-items':
+        options.maxItems = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--collect-all':
+        options.collectAll = true;
+        break;
+      case '--first-load-only':
+      case '--no-scroll':
+        options.firstLoadOnly = true;
+        break;
+      case '--initial-load-wait-ms':
+        options.initialLoadWaitMs = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--max-runtime-seconds':
+        options.maxRuntimeSeconds = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--stable-passes':
+        options.stablePasses = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--refresh-seconds':
+        options.refreshSeconds = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--refresh-jitter-min':
+        options.refreshJitterMin = Number.parseFloat(readFlagValue(argv, index, arg));
+        if (!Number.isFinite(options.refreshJitterMin) || options.refreshJitterMin < 0) {
+          throw new Error(`Expected ${arg} to be a number >= 0`);
+        }
+        index += 1;
+        break;
+      case '--refresh-jitter-max':
+        options.refreshJitterMax = Number.parseFloat(readFlagValue(argv, index, arg));
+        if (!Number.isFinite(options.refreshJitterMax) || options.refreshJitterMax < 0) {
+          throw new Error(`Expected ${arg} to be a number >= 0`);
+        }
+        index += 1;
+        break;
+      case '--once':
+        options.once = true;
+        break;
+      case '--use-credentials':
+        options.useCredentials = true;
+        break;
+      case '--credentials-path':
+        options.credentialsPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--login-timeout-seconds':
+        options.loginTimeoutMs = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1) * 1000;
+        index += 1;
+        break;
+      case '--headed':
+        options.headless = false;
+        break;
+      case '--headless':
+        options.headless = true;
+        break;
+      default:
+        throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  if (options.refreshJitterMax < options.refreshJitterMin) {
+    throw new Error('Expected --refresh-jitter-max to be >= --refresh-jitter-min');
+  }
+
+  return options;
+}
+
+async function appendLog(logFile, message) {
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  process.stdout.write(line);
+  await ensureDir(path.dirname(logFile));
+  await fs.promises.appendFile(logFile, line, 'utf8');
+}
+
+async function readHomepageItems(page) {
+  return page.evaluate(() => {
+    const seenListingIds = new Set();
+    return Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'))
+      .map((anchor) => {
+        const href = anchor.href || '';
+        const idMatch = href.match(/\/marketplace\/item\/(\d+)/);
+        const listingId = idMatch ? idMatch[1] : href;
+        if (!listingId || seenListingIds.has(listingId)) {
+          return null;
+        }
+
+        const rawText = anchor.innerText || anchor.parentElement?.innerText || '';
+        const lines = rawText
+          .split('\n')
+          .map((line) => line.replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+
+        seenListingIds.add(listingId);
+        return {
+          listingId,
+          href,
+          title: lines[0] || '',
+          text: lines.join(' | '),
+        };
+      })
+      .filter(Boolean);
+  });
+}
+
+async function collectHomepageItems(page, options) {
+  const startedAt = Date.now();
+  const itemsByListingId = new Map();
+  let stableCount = 0;
+  const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
+  let firstPass = true;
+
+  while (
+    (options.collectAll || itemsByListingId.size < options.maxItems)
+    && (Date.now() - startedAt) < (options.maxRuntimeSeconds * 1000)
+  ) {
+    const visibleItems = await readHomepageItems(page);
+    for (const item of visibleItems) {
+      const href = canonicalizeListingUrl(item.href);
+      const listingId = item.listingId || extractListingId(href) || href;
+      if (!itemsByListingId.has(listingId)) {
+        itemsByListingId.set(listingId, {
+          listingId,
+          href,
+          title: cleanText(item.title),
+          text: cleanText(item.text),
+        });
+      }
+    }
+
+    log(`collect_progress items=${itemsByListingId.size}/${targetLabel} stable_passes=${stableCount}/${options.stablePasses} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly}`);
+    if (!options.collectAll && itemsByListingId.size >= options.maxItems) {
+      break;
+    }
+
+    if (options.firstLoadOnly) {
+      if (firstPass && options.initialLoadWaitMs > 0) {
+        log(`collect_wait_initial_load ms=${options.initialLoadWaitMs}`);
+        await page.waitForTimeout(options.initialLoadWaitMs);
+        firstPass = false;
+        continue;
+      }
+
+      log('collect_stop reason=first_load_only');
+      break;
+    }
+
+    const beforeCount = itemsByListingId.size;
+    await scrollMarketplaceResults(page, {
+      scrolls: 1,
+      wheelDelta: 1600,
+      timeoutMs: 5000,
+      settleTimeMs: 900,
+      maxStableIterations: 1,
+      logger: log,
+    });
+
+    const afterScrollItems = await readHomepageItems(page);
+    for (const item of afterScrollItems) {
+      const href = canonicalizeListingUrl(item.href);
+      const listingId = item.listingId || extractListingId(href) || href;
+      if (!itemsByListingId.has(listingId)) {
+        itemsByListingId.set(listingId, {
+          listingId,
+          href,
+          title: cleanText(item.title),
+          text: cleanText(item.text),
+        });
+      }
+    }
+
+    stableCount = itemsByListingId.size > beforeCount ? 0 : stableCount + 1;
+    if (stableCount >= options.stablePasses) {
+      log(`collect_stop reason=stable_results stable_passes=${stableCount}`);
+      break;
+    }
+  }
+
+  const collectedItems = Array.from(itemsByListingId.values());
+  const limitedItems = options.collectAll
+    ? collectedItems
+    : collectedItems.slice(0, options.maxItems);
+
+  return limitedItems.map((item, index) => ({
+      ...item,
+      rank: index + 1,
+    }));
+}
+
+function summarizeUpsertOutcomes(results) {
+  return results.reduce((summary, result) => {
+    summary[result.outcome] += 1;
+    return summary;
+  }, {
+    new: 0,
+    existing_same: 0,
+    existing_updated: 0,
+  });
+}
+
+async function writeCycleSnapshot(snapshotFile, cycleSummary) {
+  const resolvedPath = path.isAbsolute(snapshotFile)
+    ? snapshotFile
+    : path.join(process.cwd(), snapshotFile);
+  await ensureDir(path.dirname(resolvedPath));
+  await fs.promises.writeFile(resolvedPath, JSON.stringify(cycleSummary, null, 2), 'utf8');
+  return resolvedPath;
+}
+
+async function runCycle(page, db, options) {
+  const countsBefore = getHomepageListingCounts(db);
+  const sessionSummary = await describeFacebookMarketplaceSession(page.context(), page, {
+    credentialsPath: options.credentialsPath,
+  });
+  const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
+  await appendLog(
+    options.logFile,
+    `cycle_start url=${options.startUrl} max_items=${targetLabel} collect_all=${options.collectAll} max_runtime_seconds=${options.maxRuntimeSeconds} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
+  );
+
+  const activePage = await safeGoto(page.context(), page, options.startUrl);
+  await waitForMarketplaceResults(activePage, {
+    timeoutMs: 20000,
+    settleTimeMs: 1200,
+  });
+
+  const items = await collectHomepageItems(activePage, options);
+  const seenAt = new Date().toISOString();
+  const storedResults = items.map((item) => upsertHomepageListingWithStatus(db, item, { seenAt }));
+  const outcomeCounts = summarizeUpsertOutcomes(storedResults);
+  const counts = getHomepageListingCounts(db);
+  const cycleSummary = {
+    capturedAt: seenAt,
+    source: 'homepage',
+    collectAll: options.collectAll,
+    session: sessionSummary,
+    dbCountsBefore: countsBefore,
+    totalCollected: items.length,
+    maxItemsTarget: targetLabel,
+    outcomeCounts,
+    counts,
+    items: storedResults.map((result) => {
+      const row = result.row;
+      return {
+        outcome: result.outcome,
+        listingId: row.listing_id,
+        href: row.href,
+        cardTitle: row.card_title,
+        cardText: row.card_text,
+        detailStatus: row.detail_status,
+        lastSeenRank: row.last_seen_rank,
+      };
+    }),
+  };
+
+  const snapshotPath = await writeCycleSnapshot(options.snapshotFile, cycleSummary);
+  await appendLog(
+    options.logFile,
+    `cycle_done collected=${items.length} new=${outcomeCounts.new} existing_same=${outcomeCounts.existing_same} existing_updated=${outcomeCounts.existing_updated} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${counts.pending} db_processing=${counts.processing} db_done=${counts.done} db_error=${counts.error} snapshot=${snapshotPath}`,
+  );
+
+  return {
+    page: activePage,
+    cycleSummary,
+  };
+}
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function computeJitteredRefreshMs(refreshSeconds, jitterMin, jitterMax) {
+  const baseMs = refreshSeconds * 1000;
+  const multiplier = jitterMin + (Math.random() * (jitterMax - jitterMin));
+  return {
+    multiplier,
+    refreshMs: Math.max(0, Math.round(baseMs * multiplier)),
+  };
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  await ensureDir(path.dirname(options.logFile));
+  await appendLog(
+    options.logFile,
+    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} use_credentials=${options.useCredentials}`,
+  );
+
+  const { db } = openMarketplaceHomepageDatabase(options.dbPath);
+  const resolvedUserDataDir = path.isAbsolute(options.userDataDir)
+    ? options.userDataDir
+    : path.join(process.cwd(), options.userDataDir);
+
+  const context = await chromium.launchPersistentContext(resolvedUserDataDir, {
+    headless: options.headless,
+    viewport: { width: 1440, height: 1200 },
+  });
+
+  try {
+    let page = await ensureFacebookMarketplaceLogin(context, {
+      startUrl: options.startUrl,
+      useCredentials: options.useCredentials,
+      credentialsPath: options.credentialsPath,
+      loginTimeoutMs: options.loginTimeoutMs,
+      logger: log,
+    });
+    const initialSessionSummary = await describeFacebookMarketplaceSession(context, page, {
+      credentialsPath: options.credentialsPath,
+    });
+    const initialCounts = getHomepageListingCounts(db);
+    await appendLog(
+      options.logFile,
+      `collector_session_ready loaded_email=${initialSessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${initialSessionSummary.signedInUserId || 'n/a'} logged_in=${initialSessionSummary.loggedIn} current_url=${initialSessionSummary.currentUrl || 'n/a'} db_pending=${initialCounts.pending} db_processing=${initialCounts.processing} db_done=${initialCounts.done} db_error=${initialCounts.error}`,
+    );
+    do {
+      const cycleStartedAt = Date.now();
+      const result = await runCycle(page, db, options);
+      page = result.page;
+      console.log(JSON.stringify(result.cycleSummary, null, 2));
+
+      if (options.once) {
+        await appendLog(options.logFile, 'collector_exit mode=once');
+        break;
+      }
+
+      const { multiplier, refreshMs } = computeJitteredRefreshMs(
+        options.refreshSeconds,
+        options.refreshJitterMin,
+        options.refreshJitterMax,
+      );
+      const waitMs = Math.max(0, refreshMs - (Date.now() - cycleStartedAt));
+      await appendLog(
+        options.logFile,
+        `collector_sleep seconds=${Math.ceil(waitMs / 1000)} base_refresh_seconds=${options.refreshSeconds} jitter_multiplier=${multiplier.toFixed(3)}`,
+      );
+      await sleep(waitMs);
+    } while (true);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+    await context.close();
+  }
+}
+
+main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`[${new Date().toISOString()}] collect_marketplace_homepage_error ${message}\n`);
+  console.error(message);
+  process.exit(1);
+});
