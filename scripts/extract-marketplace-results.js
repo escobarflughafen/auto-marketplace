@@ -15,6 +15,9 @@ const {
   extractListingContent,
   writeListingSnapshot,
 } = require('./marketplace-utils');
+const {
+  warnDeprecatedModule,
+} = require('./marketplace-deprecation');
 
 const log = createLogger('extract-marketplace-results');
 
@@ -222,6 +225,11 @@ async function captureItemScreenshots(context, items, captureDir, visitLimit, qu
 }
 
 async function main() {
+  warnDeprecatedModule({
+    command: 'node scripts/extract-marketplace-results.js',
+    replacement: 'npm run marketplace:search:explore -- --query "<seed keyword>"',
+    note: 'This script emits ad hoc JSON only and is retained for compatibility with legacy wrappers.',
+  });
   const options = parseArgs(process.argv.slice(2));
   const {
     query,

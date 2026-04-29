@@ -5,6 +5,9 @@ const {
   ensureDir,
   slugify,
 } = require('./marketplace-utils');
+const {
+  warnDeprecatedModule,
+} = require('./marketplace-deprecation');
 
 function readFlagValue(argv, index, flagName) {
   const value = argv[index + 1];
@@ -144,6 +147,10 @@ function runNodeScript(scriptPath, args) {
     cwd: process.cwd(),
     encoding: 'utf8',
     maxBuffer: 50 * 1024 * 1024,
+    env: {
+      ...process.env,
+      MARKETPLACE_SUPPRESS_DEPRECATION_WARNING: '1',
+    },
   });
 
   if (result.status !== 0) {
@@ -271,6 +278,11 @@ async function sleep(ms) {
 }
 
 async function main() {
+  warnDeprecatedModule({
+    command: 'npm run marketplace:collect',
+    replacement: 'npm run marketplace:search:explore -- --query "<keyword>"',
+    note: 'Use the DB-backed search explorer for persistent storage, keyword indexing, and backlog processing.',
+  });
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(options.captureRoot);
   await appendLog(

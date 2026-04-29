@@ -13,10 +13,15 @@ const {
   DEFAULT_DB_PATH,
   canonicalizeListingUrl,
   extractListingId,
+  normalizeKeyword,
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   upsertHomepageListingWithStatus,
   getHomepageListingCounts,
+  upsertListingSearchKeyword,
+  upsertSearchTitleBagKeyword,
+  pickRandomSearchTitleBagKeyword,
+  getSearchTitleBagCounts,
 } = require('./marketplace-homepage-db');
 const {
   DEFAULT_CREDENTIALS_PATH,
@@ -25,8 +30,9 @@ const {
   describeFacebookMarketplaceSession,
 } = require('./marketplace-profile-auth');
 
-const DEFAULT_HOME_URL = 'https://www.facebook.com/marketplace/';
-const log = createLogger('collect-marketplace-homepage');
+const DEFAULT_AREA = 'vancouver';
+const DEFAULT_SEARCH_URL_TEMPLATE = 'https://www.facebook.com/marketplace/%AREA%/search/?query=%QUERY%';
+const log = createLogger('collect-marketplace-search-explorer');
 
 function readFlagValue(argv, index, flagName) {
   const value = argv[index + 1];
@@ -48,16 +54,18 @@ function parseIntegerFlag(value, flagName, minimum = 0) {
 
 function parseArgs(argv) {
   const options = {
-    startUrl: DEFAULT_HOME_URL,
+    query: '',
+    area: DEFAULT_AREA,
+    searchUrlTemplate: DEFAULT_SEARCH_URL_TEMPLATE,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     dbPath: DEFAULT_DB_PATH,
-    logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'homepage-collector.log'),
-    snapshotFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'latest-cycle.json'),
-    maxItems: 10,
-    collectAll: false,
+    logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'search-explorer.log'),
+    snapshotFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'search-explorer-latest-cycle.json'),
+    maxItems: 250,
+    collectAll: true,
     firstLoadOnly: false,
     initialLoadWaitMs: 5000,
-    maxRuntimeSeconds: 120,
+    maxRuntimeSeconds: 180,
     stablePasses: 3,
     refreshSeconds: 5 * 60,
     refreshJitterMin: 0.25,
@@ -67,13 +75,27 @@ function parseArgs(argv) {
     useCredentials: false,
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
     loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
+    reseedRoundMin: 10,
+    reseedRoundMax: 20,
+    bagMinKeywordLength: 5,
+    bagMaxKeywordLength: 160,
+    bagMinTimesSeen: 1,
+    includeSeedInBag: true,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
-      case '--start-url':
-        options.startUrl = readFlagValue(argv, index, arg);
+      case '--query':
+        options.query = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--area':
+        options.area = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--search-url-template':
+        options.searchUrlTemplate = readFlagValue(argv, index, arg);
         index += 1;
         break;
       case '--user-data-dir':
@@ -94,10 +116,14 @@ function parseArgs(argv) {
         break;
       case '--max-items':
         options.maxItems = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        options.collectAll = false;
         index += 1;
         break;
       case '--collect-all':
         options.collectAll = true;
+        break;
+      case '--no-collect-all':
+        options.collectAll = false;
         break;
       case '--first-load-only':
       case '--no-scroll':
@@ -153,13 +179,54 @@ function parseArgs(argv) {
       case '--headless':
         options.headless = true;
         break;
+      case '--reseed-round-min':
+        options.reseedRoundMin = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--reseed-round-max':
+        options.reseedRoundMax = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--bag-min-keyword-length':
+        options.bagMinKeywordLength = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--bag-max-keyword-length':
+        options.bagMaxKeywordLength = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--bag-min-times-seen':
+        options.bagMinTimesSeen = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--exclude-seed-from-bag':
+        options.includeSeedInBag = false;
+        break;
       default:
+        if (!arg.startsWith('--') && !options.query) {
+          options.query = arg;
+          break;
+        }
+
         throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
+  options.query = normalizeKeyword(options.query);
+  if (!options.query) {
+    throw new Error('Missing required search keyword. Pass --query "<keyword>".');
+  }
+
   if (options.refreshJitterMax < options.refreshJitterMin) {
     throw new Error('Expected --refresh-jitter-max to be >= --refresh-jitter-min');
+  }
+
+  if (options.reseedRoundMax < options.reseedRoundMin) {
+    throw new Error('Expected --reseed-round-max to be >= --reseed-round-min');
+  }
+
+  if (options.bagMaxKeywordLength < options.bagMinKeywordLength) {
+    throw new Error('Expected --bag-max-keyword-length to be >= --bag-min-keyword-length');
   }
 
   return options;
@@ -172,7 +239,26 @@ async function appendLog(logFile, message) {
   await fs.promises.appendFile(logFile, line, 'utf8');
 }
 
-async function readHomepageItems(page) {
+function buildSearchUrl(area, query, template = DEFAULT_SEARCH_URL_TEMPLATE) {
+  return String(template)
+    .replace('%AREA%', encodeURIComponent(String(area || DEFAULT_AREA)))
+    .replace('%QUERY%', encodeURIComponent(String(query || '')));
+}
+
+function isPriceLine(line) {
+  return /^(?:CA\$|\$)\s?[\d,]+(?:\.\d{2})?$/.test(line);
+}
+
+function isFreshnessLine(line) {
+  return /^(?:just listed|new listing|today|yesterday|刚刚上架|刚刚发布|listed .* ago)$/i.test(line);
+}
+
+function pickSearchCardTitle(lines) {
+  const preferred = lines.find((line) => !isPriceLine(line) && !isFreshnessLine(line));
+  return preferred || lines[0] || '';
+}
+
+async function readSearchResultItems(page) {
   return page.evaluate(() => {
     const seenListingIds = new Set();
     return Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'))
@@ -194,7 +280,7 @@ async function readHomepageItems(page) {
         return {
           listingId,
           href,
-          title: lines[0] || '',
+          lines,
           text: lines.join(' | '),
         };
       })
@@ -202,14 +288,14 @@ async function readHomepageItems(page) {
   });
 }
 
-async function collectHomepageItems(page, options) {
+async function collectSearchItems(page, options) {
   const startedAt = Date.now();
   const itemsByListingId = new Map();
   let stableCount = 0;
-  const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
   let firstPass = true;
   let scrollPasses = 0;
   let readPasses = 0;
+  const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
   let stopReason = 'unknown';
 
   while (
@@ -217,7 +303,7 @@ async function collectHomepageItems(page, options) {
     && (Date.now() - startedAt) < (options.maxRuntimeSeconds * 1000)
   ) {
     readPasses += 1;
-    const visibleItems = await readHomepageItems(page);
+    const visibleItems = await readSearchResultItems(page);
     for (const item of visibleItems) {
       const href = canonicalizeListingUrl(item.href);
       const listingId = item.listingId || extractListingId(href) || href;
@@ -225,7 +311,7 @@ async function collectHomepageItems(page, options) {
         itemsByListingId.set(listingId, {
           listingId,
           href,
-          title: cleanText(item.title),
+          title: cleanText(pickSearchCardTitle(item.lines || [])),
           text: cleanText(item.text),
         });
       }
@@ -261,7 +347,7 @@ async function collectHomepageItems(page, options) {
       logger: log,
     });
 
-    const afterScrollItems = await readHomepageItems(page);
+    const afterScrollItems = await readSearchResultItems(page);
     for (const item of afterScrollItems) {
       const href = canonicalizeListingUrl(item.href);
       const listingId = item.listingId || extractListingId(href) || href;
@@ -269,7 +355,7 @@ async function collectHomepageItems(page, options) {
         itemsByListingId.set(listingId, {
           listingId,
           href,
-          title: cleanText(item.title),
+          title: cleanText(pickSearchCardTitle(item.lines || [])),
           text: cleanText(item.text),
         });
       }
@@ -330,6 +416,34 @@ function summarizeUpsertOutcomes(results) {
   });
 }
 
+function filterBagKeywordsFromItems(items, options) {
+  return items
+    .map((item) => normalizeKeyword(item.title))
+    .filter((title) => title.length >= options.bagMinKeywordLength)
+    .filter((title) => title.length <= options.bagMaxKeywordLength);
+}
+
+function randomIntegerBetween(minimum, maximum) {
+  if (maximum <= minimum) {
+    return minimum;
+  }
+
+  return minimum + Math.floor(Math.random() * ((maximum - minimum) + 1));
+}
+
+function computeNextSeedRound(currentRound, reseedRoundMin, reseedRoundMax) {
+  return currentRound + randomIntegerBetween(reseedRoundMin, reseedRoundMax);
+}
+
+function computeJitteredRefreshMs(refreshSeconds, jitterMin, jitterMax) {
+  const baseMs = refreshSeconds * 1000;
+  const multiplier = jitterMin + (Math.random() * (jitterMax - jitterMin));
+  return {
+    multiplier,
+    refreshMs: Math.max(0, Math.round(baseMs * multiplier)),
+  };
+}
+
 async function writeCycleSnapshot(snapshotFile, cycleSummary) {
   const resolvedPath = path.isAbsolute(snapshotFile)
     ? snapshotFile
@@ -352,7 +466,7 @@ function renderCycleSummaryForConsole(cycleSummary) {
   const stats = cycleSummary.collectionStats || {};
   const lines = [
     '',
-    `Homepage cycle | source=${cycleSummary.source}`,
+    `Search round ${cycleSummary.roundNumber} | query="${cycleSummary.sourceKeyword}" | query_source=${cycleSummary.querySource}`,
     `Stats: collected=${cycleSummary.totalCollected} stop_reason=${stats.stopReason || 'n/a'} elapsed_seconds=${stats.elapsedSeconds ?? 'n/a'} scroll_passes=${stats.scrollPasses ?? 'n/a'} stable_passes=${stats.stablePassesReached ?? 'n/a'}/${stats.stablePassesTarget ?? 'n/a'} new=${cycleSummary.outcomeCounts?.new ?? 0} existing_same=${cycleSummary.outcomeCounts?.existing_same ?? 0} existing_updated=${cycleSummary.outcomeCounts?.existing_updated ?? 0}`,
     'Card Text:',
   ];
@@ -368,59 +482,129 @@ function renderCycleSummaryForConsole(cycleSummary) {
   return `${lines.join('\n')}\n`;
 }
 
-async function runCycle(page, db, options) {
+async function chooseRoundQuery(db, state, options) {
+  if (state.roundNumber === 1 || state.roundNumber >= state.nextSeedRound) {
+    const reseedRound = computeNextSeedRound(
+      state.roundNumber,
+      options.reseedRoundMin,
+      options.reseedRoundMax,
+    );
+    return {
+      query: options.query,
+      querySource: 'seed',
+      nextSeedRound: reseedRound,
+      bagKeyword: null,
+    };
+  }
+
+  const bagKeyword = pickRandomSearchTitleBagKeyword(db, {
+    minTimesSeen: options.bagMinTimesSeen,
+  });
+
+  if (!bagKeyword) {
+    return {
+      query: options.query,
+      querySource: 'seed_fallback',
+      nextSeedRound: state.nextSeedRound,
+      bagKeyword: null,
+    };
+  }
+
+  return {
+    query: bagKeyword.keyword,
+    querySource: 'bag',
+    nextSeedRound: state.nextSeedRound,
+    bagKeyword,
+  };
+}
+
+async function runRound(page, db, options, state) {
   const countsBefore = getHomepageListingCounts(db);
+  const bagCountsBefore = getSearchTitleBagCounts(db);
   const sessionSummary = await describeFacebookMarketplaceSession(page.context(), page, {
     credentialsPath: options.credentialsPath,
   });
+  const queryPlan = await chooseRoundQuery(db, state, options);
+  const searchUrl = buildSearchUrl(options.area, queryPlan.query, options.searchUrlTemplate);
   const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
+
   await appendLog(
     options.logFile,
-    `cycle_start url=${options.startUrl} max_items=${targetLabel} collect_all=${options.collectAll} max_runtime_seconds=${options.maxRuntimeSeconds} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
+    `round_start round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" next_seed_round=${queryPlan.nextSeedRound} area=${options.area} max_items=${targetLabel} collect_all=${options.collectAll} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} bag_keywords=${bagCountsBefore.totalKeywords} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
   );
 
-  const activePage = await safeGoto(page.context(), page, options.startUrl);
+  const activePage = await safeGoto(page.context(), page, searchUrl);
   await waitForMarketplaceResults(activePage, {
     timeoutMs: 20000,
     settleTimeMs: 1200,
   });
 
-  const collection = await collectHomepageItems(activePage, options);
+  const collection = await collectSearchItems(activePage, options);
   const { items, stats: collectionStats } = collection;
   const seenAt = new Date().toISOString();
-  const storedResults = items.map((item) => upsertHomepageListingWithStatus(db, item, { seenAt }));
+  const storedResults = items.map((item) => {
+    const result = upsertHomepageListingWithStatus(db, item, {
+      seenAt,
+      source: 'search',
+      sourceKeyword: queryPlan.query,
+    });
+    upsertListingSearchKeyword(db, result.row.listing_id, queryPlan.query, { seenAt });
+    return result;
+  });
+
+  const bagKeywords = filterBagKeywordsFromItems(items, options);
+  if (options.includeSeedInBag) {
+    bagKeywords.push(queryPlan.query);
+  }
+  for (const keyword of bagKeywords) {
+    upsertSearchTitleBagKeyword(db, keyword, {
+      seenAt,
+      sourceKeyword: queryPlan.query,
+    });
+  }
+
   const outcomeCounts = summarizeUpsertOutcomes(storedResults);
   const counts = getHomepageListingCounts(db);
+  const bagCounts = getSearchTitleBagCounts(db);
   const cycleSummary = {
     capturedAt: seenAt,
-    source: 'homepage',
+    source: 'search',
+    sourceKeyword: queryPlan.query,
+    querySource: queryPlan.querySource,
+    roundNumber: state.roundNumber,
+    nextSeedRound: queryPlan.nextSeedRound,
+    area: options.area,
     collectAll: options.collectAll,
     session: sessionSummary,
     dbCountsBefore: countsBefore,
+    dbCountsAfter: counts,
+    titleBagCountsBefore: bagCountsBefore,
+    titleBagCountsAfter: bagCounts,
     totalCollected: items.length,
     collectionStats,
     maxItemsTarget: targetLabel,
     outcomeCounts,
-    counts,
-    items: storedResults.map((result) => {
-      const row = result.row;
-      return {
-        outcome: result.outcome,
-        listingId: row.listing_id,
-        href: row.href,
-        cardTitle: row.card_title,
-        cardText: row.card_text,
-        detailStatus: row.detail_status,
-        lastSeenRank: row.last_seen_rank,
-      };
-    }),
+    items: storedResults.map((result) => ({
+      outcome: result.outcome,
+      listingId: result.row.listing_id,
+      href: result.row.href,
+      source: result.row.source,
+      sourceKeyword: result.row.source_keyword,
+      cardTitle: result.row.card_title,
+      cardText: result.row.card_text,
+      detailStatus: result.row.detail_status,
+      lastSeenRank: result.row.last_seen_rank,
+    })),
   };
 
   const snapshotPath = await writeCycleSnapshot(options.snapshotFile, cycleSummary);
   await appendLog(
     options.logFile,
-    `cycle_done collected=${items.length} stop_reason=${collectionStats.stopReason} elapsed_seconds=${collectionStats.elapsedSeconds} scroll_passes=${collectionStats.scrollPasses} stable_passes=${collectionStats.stablePassesReached}/${collectionStats.stablePassesTarget} runtime_limit_reached=${collectionStats.runtimeLimitReached} new=${outcomeCounts.new} existing_same=${outcomeCounts.existing_same} existing_updated=${outcomeCounts.existing_updated} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${counts.pending} db_processing=${counts.processing} db_done=${counts.done} db_error=${counts.error} snapshot=${snapshotPath}`,
+    `round_done round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" collected=${items.length} stop_reason=${collectionStats.stopReason} elapsed_seconds=${collectionStats.elapsedSeconds} scroll_passes=${collectionStats.scrollPasses} stable_passes=${collectionStats.stablePassesReached}/${collectionStats.stablePassesTarget} runtime_limit_reached=${collectionStats.runtimeLimitReached} bag_added=${bagKeywords.length} new=${outcomeCounts.new} existing_same=${outcomeCounts.existing_same} existing_updated=${outcomeCounts.existing_updated} bag_keywords=${bagCounts.totalKeywords} db_pending=${counts.pending} db_processing=${counts.processing} db_done=${counts.done} db_error=${counts.error} snapshot=${snapshotPath}`,
   );
+
+  state.nextSeedRound = queryPlan.nextSeedRound;
+  state.lastQuery = queryPlan.query;
 
   return {
     page: activePage,
@@ -432,28 +616,18 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function computeJitteredRefreshMs(refreshSeconds, jitterMin, jitterMax) {
-  const baseMs = refreshSeconds * 1000;
-  const multiplier = jitterMin + (Math.random() * (jitterMax - jitterMin));
-  return {
-    multiplier,
-    refreshMs: Math.max(0, Math.round(baseMs * multiplier)),
-  };
-}
-
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} use_credentials=${options.useCredentials}`,
+    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" area=${options.area} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} use_credentials=${options.useCredentials}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
   const resolvedUserDataDir = path.isAbsolute(options.userDataDir)
     ? options.userDataDir
     : path.join(process.cwd(), options.userDataDir);
-
   const context = await chromium.launchPersistentContext(resolvedUserDataDir, {
     headless: options.headless,
     viewport: { width: 1440, height: 1200 },
@@ -461,7 +635,7 @@ async function main() {
 
   try {
     let page = await ensureFacebookMarketplaceLogin(context, {
-      startUrl: options.startUrl,
+      startUrl: buildSearchUrl(options.area, options.query, options.searchUrlTemplate),
       useCredentials: options.useCredentials,
       credentialsPath: options.credentialsPath,
       loginTimeoutMs: options.loginTimeoutMs,
@@ -471,30 +645,39 @@ async function main() {
       credentialsPath: options.credentialsPath,
     });
     const initialCounts = getHomepageListingCounts(db);
+    const initialBagCounts = getSearchTitleBagCounts(db);
     await appendLog(
       options.logFile,
-      `collector_session_ready loaded_email=${initialSessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${initialSessionSummary.signedInUserId || 'n/a'} logged_in=${initialSessionSummary.loggedIn} current_url=${initialSessionSummary.currentUrl || 'n/a'} db_pending=${initialCounts.pending} db_processing=${initialCounts.processing} db_done=${initialCounts.done} db_error=${initialCounts.error}`,
+      `search_explorer_session_ready loaded_email=${initialSessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${initialSessionSummary.signedInUserId || 'n/a'} logged_in=${initialSessionSummary.loggedIn} current_url=${initialSessionSummary.currentUrl || 'n/a'} bag_keywords=${initialBagCounts.totalKeywords} db_pending=${initialCounts.pending} db_processing=${initialCounts.processing} db_done=${initialCounts.done} db_error=${initialCounts.error}`,
     );
+
+    const state = {
+      roundNumber: 1,
+      nextSeedRound: 1,
+      lastQuery: '',
+    };
+
     do {
-      const cycleStartedAt = Date.now();
-      const result = await runCycle(page, db, options);
+      const roundStartedAt = Date.now();
+      const result = await runRound(page, db, options, state);
       page = result.page;
       process.stdout.write(renderCycleSummaryForConsole(result.cycleSummary));
 
       if (options.once) {
-        await appendLog(options.logFile, 'collector_exit mode=once');
+        await appendLog(options.logFile, 'search_explorer_exit mode=once');
         break;
       }
 
+      state.roundNumber += 1;
       const { multiplier, refreshMs } = computeJitteredRefreshMs(
         options.refreshSeconds,
         options.refreshJitterMin,
         options.refreshJitterMax,
       );
-      const waitMs = Math.max(0, refreshMs - (Date.now() - cycleStartedAt));
+      const waitMs = Math.max(0, refreshMs - (Date.now() - roundStartedAt));
       await appendLog(
         options.logFile,
-        `collector_sleep seconds=${Math.ceil(waitMs / 1000)} base_refresh_seconds=${options.refreshSeconds} jitter_multiplier=${multiplier.toFixed(3)}`,
+        `search_explorer_sleep seconds=${Math.ceil(waitMs / 1000)} base_refresh_seconds=${options.refreshSeconds} jitter_multiplier=${multiplier.toFixed(3)} next_round=${state.roundNumber} next_seed_round=${state.nextSeedRound}`,
       );
       await sleep(waitMs);
     } while (true);
@@ -504,9 +687,20 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`[${new Date().toISOString()}] collect_marketplace_homepage_error ${message}\n`);
-  console.error(message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[${new Date().toISOString()}] collect_marketplace_search_explorer_error ${message}\n`);
+    console.error(message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseArgs,
+  buildSearchUrl,
+  pickSearchCardTitle,
+  filterBagKeywordsFromItems,
+  computeNextSeedRound,
+  chooseRoundQuery,
+};

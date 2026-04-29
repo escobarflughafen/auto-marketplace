@@ -38,6 +38,12 @@ function serializeJson(value) {
   return JSON.stringify(value ?? {}, null, 2);
 }
 
+function normalizeKeyword(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function summarizeHomepageListingComparable(listing) {
   return {
     href: canonicalizeListingUrl(listing.href),
@@ -52,6 +58,7 @@ function ensureSchema(db) {
       listing_id TEXT PRIMARY KEY,
       href TEXT NOT NULL,
       source TEXT NOT NULL DEFAULT 'homepage',
+      source_keyword TEXT NOT NULL DEFAULT '',
       card_title TEXT NOT NULL DEFAULT '',
       card_text TEXT NOT NULL DEFAULT '',
       raw_card_json TEXT NOT NULL DEFAULT '{}',
@@ -76,15 +83,65 @@ function ensureSchema(db) {
     );
   `);
 
+  ensureColumn(db, 'homepage_listings', 'source', "TEXT NOT NULL DEFAULT 'homepage'");
+  ensureColumn(db, 'homepage_listings', 'source_keyword', "TEXT NOT NULL DEFAULT ''");
+
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_listings_href
     ON homepage_listings (href);
   `);
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_source_keyword
+    ON homepage_listings (source_keyword, last_seen_at DESC);
+  `);
+
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_homepage_listings_backlog
     ON homepage_listings (detail_status, last_seen_rank, last_seen_at);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS search_title_bag (
+      normalized_keyword TEXT PRIMARY KEY,
+      keyword TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      times_seen INTEGER NOT NULL DEFAULT 1,
+      last_source_keyword TEXT NOT NULL DEFAULT ''
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_search_title_bag_last_seen
+    ON search_title_bag (last_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS listing_search_keywords (
+      listing_id TEXT NOT NULL,
+      normalized_keyword TEXT NOT NULL,
+      keyword TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      times_seen INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (listing_id, normalized_keyword)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_search_keywords_keyword
+    ON listing_search_keywords (normalized_keyword, last_seen_at DESC);
+  `);
+}
+
+function ensureColumn(db, tableName, columnName, definitionSql) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definitionSql}`);
 }
 
 function openMarketplaceHomepageDatabase(dbPath = DEFAULT_DB_PATH) {
@@ -110,6 +167,12 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
   const rank = Number.isFinite(listing.rank) ? listing.rank : null;
   const cardTitle = String(listing.title || '').trim();
   const cardText = String(listing.text || '').trim();
+  const source = normalizeKeyword(options.source || listing.source || 'homepage') || 'homepage';
+  const sourceKeyword = normalizeKeyword(
+    options.sourceKeyword
+    || listing.sourceKeyword
+    || listing.source_keyword,
+  );
   const previousRow = getHomepageListing(db, listingId);
   const previousComparable = previousRow
     ? summarizeHomepageListingComparable(previousRow)
@@ -124,6 +187,8 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
     href,
     listingId,
     rank,
+    source,
+    sourceKeyword,
   });
 
   const statement = db.prepare(`
@@ -131,6 +196,7 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
       listing_id,
       href,
       source,
+      source_keyword,
       card_title,
       card_text,
       raw_card_json,
@@ -142,7 +208,8 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
     ) VALUES (
       ?,
       ?,
-      'homepage',
+      ?,
+      ?,
       ?,
       ?,
       ?,
@@ -154,6 +221,8 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
     )
     ON CONFLICT(listing_id) DO UPDATE SET
       href = excluded.href,
+      source = excluded.source,
+      source_keyword = excluded.source_keyword,
       card_title = excluded.card_title,
       card_text = excluded.card_text,
       raw_card_json = excluded.raw_card_json,
@@ -174,6 +243,8 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
   statement.run(
     listingId,
     href,
+    source,
+    sourceKeyword,
     cardTitle,
     cardText,
     rawCardJson,
@@ -339,11 +410,137 @@ function getHomepageListingCounts(db) {
   });
 }
 
+function upsertListingSearchKeyword(db, listingId, keyword, options = {}) {
+  const normalizedKeyword = normalizeKeyword(keyword).toLowerCase();
+  if (!listingId || !normalizedKeyword) {
+    return null;
+  }
+
+  const now = options.seenAt || new Date().toISOString();
+  const canonicalKeyword = normalizeKeyword(keyword);
+  db.prepare(`
+    INSERT INTO listing_search_keywords (
+      listing_id,
+      normalized_keyword,
+      keyword,
+      first_seen_at,
+      last_seen_at,
+      times_seen
+    ) VALUES (?, ?, ?, ?, ?, 1)
+    ON CONFLICT(listing_id, normalized_keyword) DO UPDATE SET
+      keyword = excluded.keyword,
+      last_seen_at = excluded.last_seen_at,
+      times_seen = listing_search_keywords.times_seen + 1
+  `).run(
+    String(listingId),
+    normalizedKeyword,
+    canonicalKeyword,
+    now,
+    now,
+  );
+
+  return db.prepare(`
+    SELECT *
+    FROM listing_search_keywords
+    WHERE listing_id = ?
+      AND normalized_keyword = ?
+  `).get(String(listingId), normalizedKeyword);
+}
+
+function upsertSearchTitleBagKeyword(db, keyword, options = {}) {
+  const normalizedKeyword = normalizeKeyword(keyword).toLowerCase();
+  if (!normalizedKeyword) {
+    return null;
+  }
+
+  const now = options.seenAt || new Date().toISOString();
+  const canonicalKeyword = normalizeKeyword(keyword);
+  const sourceKeyword = normalizeKeyword(options.sourceKeyword || '');
+  db.prepare(`
+    INSERT INTO search_title_bag (
+      normalized_keyword,
+      keyword,
+      first_seen_at,
+      last_seen_at,
+      times_seen,
+      last_source_keyword
+    ) VALUES (?, ?, ?, ?, 1, ?)
+    ON CONFLICT(normalized_keyword) DO UPDATE SET
+      keyword = excluded.keyword,
+      last_seen_at = excluded.last_seen_at,
+      times_seen = search_title_bag.times_seen + 1,
+      last_source_keyword = excluded.last_source_keyword
+  `).run(
+    normalizedKeyword,
+    canonicalKeyword,
+    now,
+    now,
+    sourceKeyword,
+  );
+
+  return getSearchTitleBagKeyword(db, canonicalKeyword);
+}
+
+function getSearchTitleBagKeyword(db, keyword) {
+  const normalizedKeyword = normalizeKeyword(keyword).toLowerCase();
+  if (!normalizedKeyword) {
+    return null;
+  }
+
+  return db.prepare(`
+    SELECT *
+    FROM search_title_bag
+    WHERE normalized_keyword = ?
+  `).get(normalizedKeyword);
+}
+
+function pickRandomSearchTitleBagKeyword(db, options = {}) {
+  const excludeKeywords = Array.isArray(options.excludeKeywords)
+    ? options.excludeKeywords
+        .map((value) => normalizeKeyword(value).toLowerCase())
+        .filter(Boolean)
+    : [];
+  const minTimesSeen = Number.isFinite(options.minTimesSeen)
+    ? Math.max(1, options.minTimesSeen)
+    : 1;
+  const params = [minTimesSeen];
+  let exclusionSql = '';
+
+  if (excludeKeywords.length > 0) {
+    exclusionSql = `AND normalized_keyword NOT IN (${excludeKeywords.map(() => '?').join(', ')})`;
+    params.push(...excludeKeywords);
+  }
+
+  return db.prepare(`
+    SELECT *
+    FROM search_title_bag
+    WHERE times_seen >= ?
+      ${exclusionSql}
+    ORDER BY RANDOM()
+    LIMIT 1
+  `).get(...params) || null;
+}
+
+function getSearchTitleBagCounts(db) {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total_keywords,
+      COALESCE(SUM(times_seen), 0) AS total_seen
+    FROM search_title_bag
+  `).get();
+
+  return {
+    totalKeywords: row?.total_keywords || 0,
+    totalSeen: row?.total_seen || 0,
+  };
+}
+
 module.exports = {
   DEFAULT_DB_PATH,
   resolveDbPath,
   extractListingId,
   canonicalizeListingUrl,
+  normalizeKeyword,
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   upsertHomepageListingWithStatus,
@@ -353,4 +550,9 @@ module.exports = {
   markHomepageListingProcessed,
   markHomepageListingFailed,
   getHomepageListingCounts,
+  upsertListingSearchKeyword,
+  upsertSearchTitleBagKeyword,
+  getSearchTitleBagKeyword,
+  pickRandomSearchTitleBagKeyword,
+  getSearchTitleBagCounts,
 };

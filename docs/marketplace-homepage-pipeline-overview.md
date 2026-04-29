@@ -10,6 +10,7 @@ This project now includes a Facebook Marketplace homepage collection pipeline th
 - stores homepage discoveries in a SQLite-backed queue
 - processes queued listing URLs asynchronously in a separate browser worker
 - captures listing details, screenshots, and markdown snapshots
+- provides a small local web server for browsing and querying collected rows
 
 The design is intentionally minimal:
 
@@ -107,6 +108,16 @@ Collector poll intervals are randomized by default between:
 
 This reduces highly regular poll timing and makes the runtime schedule less deterministic.
 
+### 8. Local browser UI with KQL-style query
+
+The project also includes a lightweight local web server that reads the same SQLite DB and provides:
+
+- browser-based row browsing
+- queue summary counts
+- pagination
+- KQL-style filtering
+- direct links to listing pages and captured artifacts
+
 ## Main Commands
 
 ### Homepage collector
@@ -139,6 +150,12 @@ One-pass processing:
 
 ```bash
 npm run marketplace:home:process -- --once
+```
+
+### Homepage browser UI
+
+```bash
+npm run marketplace:home:serve
 ```
 
 ## Coding Logic and Implementation
@@ -247,6 +264,11 @@ The collector can run in two ways:
 The signed-in runtime identity is inferred from:
 
 - the `c_user` Facebook cookie
+
+The browsing/query layer is implemented in:
+
+- `scripts/marketplace-homepage-query.js`
+- `scripts/serve-marketplace-homepage.js`
 
 ## Safety Evaluation
 

@@ -5,10 +5,13 @@ Playwright-based Facebook Marketplace automation.
 This repo has two main modes:
 
 - `marketplace`: interactive browser workflow, headed by default
-- `marketplace:collect`: continuous keyword collector, headless by default
-- `marketplace:poll`: continuous multi-keyword collector, headless by default
+- `marketplace:doctor`: headless readiness and DB preflight check
+- `marketplace:collect`: deprecated legacy keyword collector, headless by default
+- `marketplace:poll`: deprecated legacy multi-keyword collector, headless by default
 - `marketplace:home:collect`: homepage collector backed by a SQLite queue
+- `marketplace:search:explore`: search collector that reseeds from discovered titles
 - `marketplace:home:process`: backlog worker that visits queued listings for details
+- `marketplace:home:serve`: local web server for browsing homepage DB rows
 
 ## Requirements
 
@@ -45,7 +48,7 @@ Run the same query continuously in the visible browser:
 npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace --query "zeiss ze 50 1.4" --scrolls 5 --loop-seconds 60
 ```
 
-Continuous headless collection for one keyword:
+Deprecated legacy: continuous headless collection for one keyword:
 
 ```bash
 npm run marketplace:collect -- --query "zeiss ze 50 1.4" --area vancouver --max-items-per-cycle 100 --refresh-minutes 30
@@ -57,13 +60,13 @@ Continuous headless collection plus listing detail capture:
 npm run marketplace:collect -- --query "zeiss ze 50 1.4" --area vancouver --max-items-per-cycle 100 --refresh-minutes 30 --detail-limit 20
 ```
 
-Continuous multi-keyword collection with repeated query flags:
+Deprecated legacy: continuous multi-keyword collection with repeated query flags:
 
 ```bash
 npm run marketplace:poll -- --query "zeiss ze 50 1.4" --query "contax 645" --query "pentax 67" --area vancouver --max-items-per-query-cycle 100 --refresh-minutes 30 --detail-limit 20
 ```
 
-Continuous multi-keyword collection from a file:
+Deprecated legacy: continuous multi-keyword collection from a file:
 
 ```bash
 npm run marketplace:poll -- --keywords-file keywords.marketplace.example.txt --area vancouver --max-items-per-query-cycle 100 --refresh-minutes 30 --detail-limit 20
@@ -93,21 +96,68 @@ Homepage collection for just the first loaded homepage content, with no active s
 npm run marketplace:home:collect -- --use-credentials --first-load-only --initial-load-wait-ms 5000 --max-items 15
 ```
 
+Search-driven exploration starting from one seed keyword, collecting all visible results, then re-querying from discovered titles:
+
+```bash
+npm run marketplace:search:explore -- --use-credentials --query "leica m6" --collect-all
+```
+
+Search-driven exploration with bounded results and configurable reseed cadence:
+
+```bash
+npm run marketplace:search:explore -- --use-credentials --query "nikon d850" --max-items 100 --refresh-seconds 90 --reseed-round-min 10 --reseed-round-max 20
+```
+
+Run a local preflight for the DB-backed headless pipeline:
+
+```bash
+npm run marketplace:doctor
+```
+
 Backlog processing for homepage-found listings:
 
 ```bash
 npm run marketplace:home:process -- --once
 ```
 
+Browse the homepage database in a local web UI:
+
+```bash
+npm run marketplace:home:serve
+```
+
+Export all homepage DB rows to JSON:
+
+```bash
+npm run marketplace:home:export
+```
+
 ## Headed vs Headless
 
 - `npm run marketplace` is headed by default unless you pass `--headless`
+- `npm run marketplace:doctor` is local-only and checks headless Chromium startup unless you pass `--skip-browser-launch`
 - `npm run marketplace:collect` is headless by default
 - `npm run marketplace:poll` is headless by default
 - `npm run marketplace:home:collect` is headless by default
+- `npm run marketplace:search:explore` is headless by default
 - `npm run marketplace:home:process` is headless by default
 - `scripts/extract-marketplace-results.js` is headless by default
 - `scripts/capture-marketplace-posts.js` is headless by default
+
+## Deprecated Legacy Modules
+
+These commands are still available for compatibility, but they are now deprecated because they are file-based and do not write into the shared SQLite system:
+
+- `npm run marketplace:collect`
+- `npm run marketplace:poll`
+- `node scripts/extract-marketplace-results.js`
+- `npm run marketplace:poll:mamiya-645af`
+
+Preferred DB-backed replacements:
+
+- one seed keyword with iterative exploration: `npm run marketplace:search:explore -- --query "<seed keyword>"`
+- homepage-only discovery: `npm run marketplace:home:collect`
+- async detail processing: `npm run marketplace:home:process`
 
 ## What The Collector Does
 
@@ -155,6 +205,20 @@ The homepage pipeline is split into two small pieces so detail capture can run a
 - `marketplace:home:process` claims pending rows from the same database
 - opens each listing URL in the browser, expands the page, captures details, and writes the results back into the database
 - collector sleep between polls is jittered by default between `25%` and `150%` of `--refresh-seconds`
+- `marketplace:home:serve` exposes the same SQLite DB in a local browser UI with lightweight KQL-style filtering
+
+## What The Search Explorer Does
+
+The search explorer uses the same SQLite DB and browser profile, but changes how discovery happens:
+
+- `marketplace:search:explore` starts from a required seed query via `--query`
+- collects visible Marketplace search-result cards into the shared SQLite DB with `source='search'`
+- stores the active search term on each row as `source_keyword`
+- records listing-to-keyword associations in a separate keyword index table
+- adds collected result titles into a reusable search-title bag
+- on later rounds, picks a random bag entry as the next query
+- automatically falls back to the seed query again every `--reseed-round-min` to `--reseed-round-max` rounds
+- keeps all timing, scrolling, bag, and reseed behavior configurable through CLI arguments
 
 Run them in separate terminals if you want continuous collection and continuous detail processing at the same time:
 
@@ -202,8 +266,55 @@ Homepage pipeline files:
 - `marketplace-homepage.db`
 - `latest-cycle.json`
 - `homepage-collector.log`
+- `search-explorer.log`
 - `homepage-backlog.log`
 - `details/`
+
+## Homepage Browser
+
+Start the local browser UI with:
+
+```bash
+npm run marketplace:home:serve
+```
+
+Default address:
+
+```text
+http://127.0.0.1:3080
+```
+
+Supported server flags:
+
+- `--host <host>`
+- `--port <port>`
+- `--db-path <file>`
+
+Query examples:
+
+- `nikon`
+- `status:pending leica`
+- `title:"m6 classic"`
+- `location:vancouver`
+- `price:>500`
+- `price:500-1500`
+- `rank:1`
+- `before:2026-04-27T09:00:00Z`
+- `after:2026-04-27T08:00:00Z`
+- `sort:rank`
+
+Supported query fields:
+
+- `status:`
+- `title:`
+- `text:`
+- `seller:`
+- `location:`
+- `price:`
+- `rank:`
+- `before:`
+- `after:`
+- `sort:`
 
 ## Data Format
 
@@ -276,7 +387,17 @@ For `marketplace`:
 - `--headless`
 - `--exit-after-setup`
 
+For `marketplace:doctor`:
+
+- `--db-path <file>`
+- `--user-data-dir <dir>`
+- `--credentials-path <file>`
+- `--skip-browser-launch`
+- `--json`
+
 For `marketplace:collect`:
+
+- deprecated; prefer `marketplace:search:explore`
 
 - `--query "<text>"`
 - `--area <area>`
@@ -286,6 +407,8 @@ For `marketplace:collect`:
 - `--once`
 
 For `marketplace:poll`:
+
+- deprecated; prefer `marketplace:search:explore`
 
 - `--query "<text>"` repeated as needed
 - `--keywords-file <file>`
@@ -322,6 +445,20 @@ For `marketplace:home:process`:
 - `--db-path <file>`
 - `--capture-dir <dir>`
 - `--headed`
+
+For `marketplace:home:serve`:
+
+- `--host <host>`
+- `--port <port>`
+- `--db-path <file>`
+
+For `marketplace:home:export`:
+
+- `--db-path <file>`
+- `--output <file>`
+- `--stdout`
+- `--pretty`
+- `--compact`
 
 ## Notes
 
