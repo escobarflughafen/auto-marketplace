@@ -248,6 +248,252 @@ Use at least two labeling stages:
 - `collection_guess`: fast, conservative, based on listing card data
 - `detail_confirmed`: stronger label after detail page enrichment
 
+## Tiered Collector And Escalation Playbook
+
+The collector should behave like a staged decision system rather than a single scraper. Each level spends more compute and attention only on listings that are worth it.
+
+```text
+L0 collector
+  -> L1 classifier
+  -> L2 verifier
+  -> L3 human escalation
+```
+
+### L0: Broad Discovery
+
+Goal: collect broadly and cheaply.
+
+Responsibilities:
+
+- scan source pages
+- capture raw card data
+- store source keyword and page provenance
+- emit `listing.raw_observed`
+- avoid expensive detail-page visits unless a listing passes L1
+
+Output:
+
+- raw title
+- raw price text
+- raw location text
+- listing URL
+- source keyword
+- rank
+- first seen and last seen timestamps
+
+### L1: Candidate Classifier
+
+Goal: normalize and score whether a listing deserves detail-page verification.
+
+Responsibilities:
+
+- parse price, location, brand, model, mount, focal length, and aperture
+- assign product family
+- estimate market price band from historical observations
+- compare against personal buy/sell records when available
+- calculate early opportunity score
+
+L1 should promote a listing to L2 when:
+
+- model confidence is moderate or high
+- asking price is below the observed market band
+- expected resale value is high enough to justify inspection
+- listing is fresh or highly ranked
+- the item belongs to a watchlist family
+
+Example L1 output:
+
+```json
+{
+  "decision": "promote_to_l2",
+  "model_guess": "Nikon AF-S 85mm f/1.4G",
+  "confidence": 0.78,
+  "ask_price": 650,
+  "market_median": 925,
+  "expected_margin": 180,
+  "reasons": ["below observed floor", "watchlist product", "fresh listing"]
+}
+```
+
+### L2: Detail Verifier
+
+Goal: open the detail page, verify authenticity and risk, then decide whether to escalate to the user.
+
+Responsibilities:
+
+- visit the detail page
+- capture full title, description, price, seller info, location, photos, and condition fields
+- verify the exact model and mount
+- detect condition warnings
+- detect scam or seller-risk signals
+- detect bundle value
+- estimate net margin after fees, travel, tax, shipping, and repair risk
+- decide `escalate`, `watch`, or `skip`
+
+L2 should inspect:
+
+- exact model text
+- image evidence, including front element, rear element, mount, serial plate, box, hood, caps, and included accessories
+- description quality
+- seller profile signals
+- listing age
+- price changes
+- location friction
+- shipping or pickup constraints
+
+### L2 Escalation Indicators
+
+L2 should escalate to the user when the listing has a strong combination of margin, confidence, and acceptable risk.
+
+Primary indicators:
+
+- `expected_net_margin`: projected profit after all costs
+- `model_identity_confidence`: confidence that the listing is the intended model
+- `condition_risk`: likelihood of fungus, haze, scratches, broken autofocus, impact damage, or missing parts
+- `sell_through_speed`: expected resale time based on personal trade history
+- `seller_risk`: scam, copied text, suspicious profile, deposit pressure, shipping-only behavior, or inconsistent details
+- `listing_freshness`: newly listed, high rank, or recently updated
+- `location_friction`: travel time, pickup complexity, or shipping friction
+
+Secondary indicators:
+
+- price below observed clean-market floor
+- bundle value from hood, caps, box, filters, tripod collar, pouch, or adapter
+- rare model or known fast-moving model
+- exact match to a personal watchlist
+- recent successful resale history for the same model
+- seller appears responsive and local
+
+### L2 Non-Escalation Indicators
+
+L2 should avoid escalating when:
+
+- product identity is ambiguous
+- mount or version is unclear
+- the listing is actually a third-party lens when the target is first-party
+- price is only average
+- expected profit is small after travel, fees, tax, or repair risk
+- photos or description suggest damage
+- title includes `for parts`, `as-is`, `broken`, `repair`, `fungus`, `haze`, or `not tested`
+- seller behavior looks risky
+- model has slow sell-through in personal records
+
+### Decision Scores
+
+Start with conservative thresholds:
+
+- `escalate`: score `>= 80`
+- `watch`: score `60-79`
+- `skip`: score `< 60`
+
+Example score components:
+
+- `+25`: price below clean market floor
+- `+20`: strong expected net margin
+- `+15`: high model identity confidence
+- `+10`: fast sell-through from personal records
+- `+10`: fresh listing
+- `+10`: nearby or easy pickup
+- `+10`: valuable extras included
+- `-15`: mount or version uncertainty
+- `-20`: vague title or weak photos
+- `-20`: slow sell-through
+- `-25`: condition red flags
+- `-30`: scam or seller-risk signals
+
+The score should be explainable. Store every positive and negative reason in `decision_evidence_json`.
+
+### L2 Decision Card
+
+Every L2-reviewed candidate should produce a compact decision card.
+
+```text
+Decision: escalate
+Model: Nikon AF-S 85mm f/1.4G
+Ask: CA$650
+Market floor: CA$800
+Expected resale: CA$950-1,050
+Expected net margin: CA$220-300
+Confidence: 0.86
+Risk: medium
+Reasons:
+- exact model likely from title and detail text
+- ask is below observed clean-market floor
+- fresh listing
+- needs glass condition confirmation from photos
+```
+
+### Human Alert Policy
+
+The system should alert the user only when:
+
+- expected net margin is above the configured threshold
+- model identity confidence is high enough
+- condition and seller risk are acceptable
+- the item is fresh or competitive enough that delay matters
+
+Recommended default thresholds:
+
+- minimum expected net margin: `CA$150`
+- minimum expected margin percentage: `20%`
+- minimum model confidence: `0.80`
+- maximum condition risk: `medium`
+- maximum seller risk: `medium`
+
+Cheap but ambiguous listings should go to `watch`, not direct alert.
+
+### Personal Trade Records
+
+Personal buy/sell history should feed the L1 and L2 decision engine.
+
+Suggested table:
+
+```text
+personal_trades
+  id
+  normalized_model
+  brand
+  mount
+  focal_length
+  aperture
+  buy_price
+  sold_price
+  fees
+  shipping_cost
+  tax
+  repair_cost
+  travel_cost
+  net_profit
+  days_to_sell
+  condition
+  included_items_json
+  bought_source
+  sold_platform
+  bought_at
+  sold_at
+  notes
+```
+
+Use this data to calculate:
+
+- expected resale price
+- expected net margin
+- expected days to sell
+- historical win rate by model
+- minimum buy price threshold
+- maximum acceptable risk
+
+The best alerts should combine market observations with personal outcomes:
+
+```text
+Canon EF 85mm f/1.4L IS
+Ask: CA$1,000
+Historical net resale median: CA$1,350
+Expected net margin: CA$250-300
+Decision: inspect / buy if clean
+Confidence: 0.82
+```
+
 ## Product Labeling Rules
 
 Rules should be product-family based, not raw keyword based.
