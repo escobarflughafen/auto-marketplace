@@ -9,6 +9,10 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   getHomepageListingCounts,
+  insertWorkflowRun,
+  updateWorkflowRun,
+  getWorkflowRun,
+  listWorkflowRuns,
 } = require('./marketplace-homepage-db');
 const {
   buildListingsQuery,
@@ -142,6 +146,21 @@ const WORKFLOWS = {
   },
 };
 
+const QUERY_FIELDS = [
+  { value: 'id', label: 'Listing ID', type: 'text' },
+  { value: 'status', label: 'Status', type: 'enum', values: ['pending', 'processing', 'done', 'error'] },
+  { value: 'title', label: 'Title', type: 'text' },
+  { value: 'text', label: 'Card/detail text', type: 'text' },
+  { value: 'seller', label: 'Seller', type: 'text' },
+  { value: 'location', label: 'Location', type: 'text' },
+  { value: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search'] },
+  { value: 'keyword', label: 'Source keyword', type: 'text' },
+  { value: 'price', label: 'Price', type: 'number' },
+  { value: 'rank', label: 'Rank', type: 'number' },
+  { value: 'before', label: 'Seen before', type: 'date' },
+  { value: 'after', label: 'Seen after', type: 'date' },
+];
+
 const managedProcesses = new Map();
 
 function buildDefaultArgsFromFields(fields = []) {
@@ -169,6 +188,23 @@ function buildDefaultArgsFromFields(fields = []) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function isManagedStatusActive(status) {
+  return status === 'starting' || status === 'running' || status === 'stopping';
+}
+
+function pidIsAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function appendProcessLog(record, chunk) {
@@ -203,6 +239,23 @@ function buildManagedProcessRecord(workflowId, args) {
   };
 }
 
+function syncWorkflowRun(db, record, changes = {}) {
+  updateWorkflowRun(db, record.id, {
+    workflowId: record.workflowId,
+    label: record.label,
+    script: record.script,
+    args: record.args,
+    pid: record.pid,
+    status: record.status,
+    exitedAt: record.exitedAt,
+    exitCode: record.exitCode,
+    signal: record.signal,
+    osAlive: pidIsAlive(record.pid),
+    logs: record.logs,
+    ...changes,
+  });
+}
+
 function publicProcessRecord(record) {
   return {
     id: record.id,
@@ -216,18 +269,73 @@ function publicProcessRecord(record) {
     exitedAt: record.exitedAt,
     exitCode: record.exitCode,
     signal: record.signal,
+    osCheckedAt: record.osCheckedAt || '',
+    osAlive: Boolean(record.osAlive),
+    managed: record.managed !== false,
     logs: record.logs.slice(-120),
   };
 }
 
-function listManagedProcesses() {
-  return Array.from(managedProcesses.values()).map(publicProcessRecord);
+function publicWorkflowRunRecord(run) {
+  return {
+    id: run.run_id,
+    workflowId: run.workflow_id,
+    label: run.label,
+    script: run.script,
+    args: run.args,
+    pid: run.pid,
+    status: run.status,
+    startedAt: run.started_at,
+    exitedAt: run.exited_at,
+    exitCode: run.exit_code,
+    signal: run.signal,
+    osCheckedAt: run.os_checked_at,
+    osAlive: run.os_alive,
+    managed: managedProcesses.has(run.run_id),
+    logs: run.logs.slice(-120),
+  };
 }
 
-function getRunningManagedProcesses() {
-  return Array.from(managedProcesses.values()).filter((record) => (
-    record.status === 'starting' || record.status === 'running' || record.status === 'stopping'
-  ));
+function reconcileWorkflowRuns(db) {
+  const now = nowIso();
+  const runs = listWorkflowRuns(db, { limit: 50 });
+  for (const run of runs) {
+    const active = isManagedStatusActive(run.status);
+    const alive = pidIsAlive(run.pid);
+    const managed = managedProcesses.get(run.run_id);
+
+    if (managed) {
+      managed.osAlive = alive;
+      managed.osCheckedAt = now;
+      syncWorkflowRun(db, managed, { osCheckedAt: now, osAlive: alive });
+      continue;
+    }
+
+    if (active && !alive) {
+      updateWorkflowRun(db, run.run_id, {
+        status: 'lost',
+        exitedAt: now,
+        osCheckedAt: now,
+        osAlive: false,
+      });
+    } else {
+      updateWorkflowRun(db, run.run_id, {
+        osCheckedAt: now,
+        osAlive: alive,
+      });
+    }
+  }
+
+  return listWorkflowRuns(db, { limit: 50 }).map(publicWorkflowRunRecord);
+}
+
+function listManagedProcesses(db) {
+  return reconcileWorkflowRuns(db);
+}
+
+function getRunningManagedProcesses(db) {
+  const runs = reconcileWorkflowRuns(db);
+  return runs.filter((record) => isManagedStatusActive(record.status) && (record.osAlive || record.managed));
 }
 
 function normalizeWorkflowArgs(value) {
@@ -244,7 +352,7 @@ function normalizeWorkflowArgs(value) {
     .filter(Boolean) || [];
 }
 
-function startManagedWorkflow(workflowId, extraArgs = []) {
+function startManagedWorkflow(db, workflowId, extraArgs = []) {
   const workflow = WORKFLOWS[workflowId];
   if (!workflow) {
     const error = new Error(`Unknown workflow: ${workflowId}`);
@@ -252,7 +360,7 @@ function startManagedWorkflow(workflowId, extraArgs = []) {
     throw error;
   }
 
-  const running = getRunningManagedProcesses();
+  const running = getRunningManagedProcesses(db);
   if (running.length > 0) {
     const error = new Error(`A workflow is already running: ${running[0].label}`);
     error.statusCode = 409;
@@ -272,13 +380,36 @@ function startManagedWorkflow(workflowId, extraArgs = []) {
   record.pid = child.pid;
   record.status = 'running';
   appendProcessLog(record, `started ${workflow.script} ${args.join(' ')}`);
+  record.osAlive = pidIsAlive(record.pid);
+  record.osCheckedAt = nowIso();
 
-  child.stdout.on('data', (chunk) => appendProcessLog(record, chunk));
-  child.stderr.on('data', (chunk) => appendProcessLog(record, chunk));
+  insertWorkflowRun(db, {
+    runId: record.id,
+    workflowId: record.workflowId,
+    label: record.label,
+    script: record.script,
+    args: record.args,
+    pid: record.pid,
+    status: record.status,
+    startedAt: record.startedAt,
+    updatedAt: record.osCheckedAt,
+    osAlive: record.osAlive,
+    logs: record.logs,
+  });
+
+  child.stdout.on('data', (chunk) => {
+    appendProcessLog(record, chunk);
+    syncWorkflowRun(db, record);
+  });
+  child.stderr.on('data', (chunk) => {
+    appendProcessLog(record, chunk);
+    syncWorkflowRun(db, record);
+  });
   child.on('error', (error) => {
     record.status = 'error';
     record.exitedAt = nowIso();
     appendProcessLog(record, `process_error ${error.message}`);
+    syncWorkflowRun(db, record, { osAlive: false });
   });
   child.on('exit', (code, signal) => {
     record.status = code === 0 ? 'exited' : 'failed';
@@ -287,21 +418,51 @@ function startManagedWorkflow(workflowId, extraArgs = []) {
     record.signal = signal || '';
     record.child = null;
     appendProcessLog(record, `process_exit code=${code} signal=${signal || ''}`);
+    syncWorkflowRun(db, record, { osAlive: false, osCheckedAt: nowIso() });
   });
 
   managedProcesses.set(record.id, record);
   return publicProcessRecord(record);
 }
 
-function stopManagedWorkflow(processId) {
+function stopManagedWorkflow(db, processId) {
   const record = managedProcesses.get(processId);
-  if (!record) {
+  const run = getWorkflowRun(db, processId);
+  if (!record && !run) {
     const error = new Error(`Unknown process: ${processId}`);
     error.statusCode = 404;
     throw error;
   }
 
+  if (!record) {
+    const alive = pidIsAlive(run.pid);
+    if (alive && isManagedStatusActive(run.status)) {
+      try {
+        if (process.platform === 'win32') {
+          process.kill(run.pid, 'SIGTERM');
+        } else {
+          process.kill(-run.pid, 'SIGTERM');
+        }
+      } catch (error) {
+        updateWorkflowRun(db, processId, {
+          status: 'stop_failed',
+          osCheckedAt: nowIso(),
+          osAlive: pidIsAlive(run.pid),
+          logs: [...run.logs, `[${nowIso()}] stop_signal_error ${error.message}`],
+        });
+        return publicWorkflowRunRecord(getWorkflowRun(db, processId));
+      }
+    }
+    updateWorkflowRun(db, processId, {
+      status: alive ? 'stopping' : 'lost',
+      osCheckedAt: nowIso(),
+      osAlive: alive,
+    });
+    return publicWorkflowRunRecord(getWorkflowRun(db, processId));
+  }
+
   if (!record.child || (record.status !== 'running' && record.status !== 'starting')) {
+    syncWorkflowRun(db, record);
     return publicProcessRecord(record);
   }
 
@@ -316,6 +477,7 @@ function stopManagedWorkflow(processId) {
   } catch (error) {
     appendProcessLog(record, `stop_signal_error ${error.message}`);
   }
+  syncWorkflowRun(db, record);
   return publicProcessRecord(record);
 }
 
@@ -469,6 +631,37 @@ function buildIndexHtml() {
       align-items: center;
       color: var(--muted);
       margin: 16px 0;
+    }
+    .query-tools {
+      display: grid;
+      grid-template-columns: minmax(280px, 1fr) minmax(260px, 360px);
+      gap: 12px;
+      margin: 16px 0;
+      align-items: start;
+    }
+    .builder-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(110px, 150px) minmax(120px, 1fr) minmax(80px, 110px);
+      gap: 8px;
+    }
+    .builder-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .query-helper {
+      display: grid;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .query-helper button {
+      text-align: left;
+      color: var(--ink);
+      background: #fff;
+      border-color: var(--line);
+      padding: 8px 10px;
     }
     .tablewrap {
       overflow: auto;
@@ -654,6 +847,8 @@ function buildIndexHtml() {
       .shell { padding: 12px; }
       .hero { padding: 16px; }
       .querybar { grid-template-columns: 1fr; }
+      .query-tools { grid-template-columns: 1fr; }
+      .builder-row { grid-template-columns: 1fr; }
       .ops-grid { grid-template-columns: 1fr; }
       .workflow-form { grid-template-columns: 1fr; }
       .process-header { align-items: stretch; flex-direction: column; }
@@ -672,12 +867,12 @@ function buildIndexHtml() {
       <h1>Marketplace Monitor</h1>
       <div class="sub">Browse collected rows, watch queue state, and start one managed Marketplace workflow on the server.</div>
       <form class="querybar" id="queryForm">
-        <input id="queryInput" name="q" placeholder='Try: nikon source:search keyword:leica status:pending location:vancouver price:>500 sort:recent'>
+        <input id="queryInput" name="q" placeholder='Try: title contains "pentax 67" and price >= 2000 or status =~ pending sort:recent'>
         <button type="submit">Search</button>
         <button type="button" class="secondary" id="clearButton">Clear</button>
       </form>
       <div class="tips">
-        Fields: <code>status:</code> <code>source:</code> <code>keyword:</code> <code>title:</code> <code>text:</code> <code>seller:</code> <code>location:</code> <code>price:</code> <code>rank:</code> <code>before:</code> <code>after:</code> <code>sort:</code>.
+        KQL-style search: <code>title contains "pentax"</code> <code>status != done</code> <code>price >= 2000</code> <code>source_keyword in ("nikon","leica")</code> with <code>and</code>, <code>or</code>, and parentheses. Existing <code>field:value</code> filters still work.
       </div>
     </section>
     <section class="summary" id="summary"></section>
@@ -686,6 +881,30 @@ function buildIndexHtml() {
       <button type="button" class="tab" data-panel="opsPanel">Workflows</button>
     </nav>
     <section class="panel active" id="listingsPanel">
+      <div class="query-tools">
+        <div class="card">
+          <div class="label">Query Builder</div>
+          <div class="builder-row">
+            <select id="queryFieldSelect"></select>
+            <select id="queryOperatorSelect"></select>
+            <input id="queryValueInput" type="text" placeholder="Value">
+            <select id="queryJoinSelect">
+              <option value="and">AND</option>
+              <option value="or">OR</option>
+            </select>
+          </div>
+          <div class="builder-actions">
+            <button type="button" id="addClauseButton">Add Clause</button>
+            <button type="button" class="secondary" id="wrapQueryButton">Wrap</button>
+          </div>
+        </div>
+        <div class="card query-helper">
+          <div class="label">Helper</div>
+          <button type="button" class="example-query" data-query='title contains "pentax" and price >= 2000'>Pentax over 2000</button>
+          <button type="button" class="example-query" data-query='status != done and source == search'>Search backlog</button>
+          <button type="button" class="example-query" data-query='source_keyword in ("nikon","leica") or seller contains "camera"'>Keyword group</button>
+        </div>
+      </div>
       <div class="results-meta" id="resultsMeta"></div>
       <div class="tablewrap">
       <table>
@@ -722,6 +941,7 @@ function buildIndexHtml() {
             <textarea id="workflowArgsPreview" readonly></textarea>
             <button type="button" id="startWorkflowButton">Start</button>
             <button type="button" class="secondary" id="refreshWorkflowsButton">Refresh</button>
+            <button type="button" class="secondary" id="reconcileWorkflowsButton">OS Check</button>
           </div>
           <div class="tips">Only one workflow is allowed from this page right now to avoid browser profile locks. Use separate profiles before enabling parallel workers.</div>
         </div>
@@ -741,6 +961,11 @@ function buildIndexHtml() {
     const workflowSelectEl = document.getElementById('workflowSelect');
     const workflowFormEl = document.getElementById('workflowForm');
     const workflowArgsPreviewEl = document.getElementById('workflowArgsPreview');
+    const queryFieldSelectEl = document.getElementById('queryFieldSelect');
+    const queryOperatorSelectEl = document.getElementById('queryOperatorSelect');
+    const queryValueInputEl = document.getElementById('queryValueInput');
+    const queryJoinSelectEl = document.getElementById('queryJoinSelect');
+    let queryFields = [];
     let workflowsState = [];
     let workflowsInitialized = false;
 
@@ -799,6 +1024,67 @@ function buildIndexHtml() {
     function updatePager() {
       prevButtonEl.disabled = state.offset < state.limit;
       nextButtonEl.disabled = (state.offset + state.limit) >= state.total;
+    }
+
+    function quoteQueryValue(value) {
+      const text = String(value || '').trim();
+      if (!text) return '';
+      if (/^[0-9.:-]+$/.test(text)) return text;
+      return '"' + text.replace(/"/g, '\\"') + '"';
+    }
+
+    function operatorsForField(field) {
+      if (field?.type === 'number' || field?.type === 'date') {
+        return ['==', '!=', '>', '>=', '<', '<='];
+      }
+      if (field?.type === 'enum') {
+        return ['==', '!=', '=~', 'in', '!in'];
+      }
+      return ['contains', '!contains', '==', '!=', '=~', '!~', 'startswith', 'endswith', 'in', '!in'];
+    }
+
+    function renderQueryBuilder() {
+      queryFieldSelectEl.innerHTML = queryFields.map((field) => (
+        '<option value="' + html(field.value) + '">' + html(field.label) + '</option>'
+      )).join('');
+      updateQueryOperatorOptions();
+    }
+
+    function updateQueryOperatorOptions() {
+      const field = queryFields.find((item) => item.value === queryFieldSelectEl.value);
+      queryOperatorSelectEl.innerHTML = operatorsForField(field).map((operator) => (
+        '<option value="' + html(operator) + '">' + html(operator) + '</option>'
+      )).join('');
+      if (field?.values?.length) {
+        queryValueInputEl.placeholder = field.values.join(', ');
+      } else if (field?.type === 'date') {
+        queryValueInputEl.placeholder = '2026-05-08';
+      } else {
+        queryValueInputEl.placeholder = 'Value';
+      }
+    }
+
+    function addQueryClause() {
+      const field = queryFieldSelectEl.value;
+      const operator = queryOperatorSelectEl.value;
+      const rawValue = queryValueInputEl.value.trim();
+      if (!field || !operator || !rawValue) return;
+
+      const values = rawValue.split(',').map((item) => item.trim()).filter(Boolean);
+      const value = operator === 'in' || operator === '!in'
+        ? '(' + values.map(quoteQueryValue).join(', ') + ')'
+        : quoteQueryValue(rawValue);
+      const clause = field + ' ' + operator + ' ' + value;
+      const current = queryInputEl.value.trim();
+      queryInputEl.value = current ? current + ' ' + queryJoinSelectEl.value + ' ' + clause : clause;
+      queryValueInputEl.value = '';
+    }
+
+    async function loadQueryFields() {
+      const response = await fetch('/api/query-fields');
+      const payload = await response.json();
+      queryFields = payload.fields || [];
+      renderQueryBuilder();
     }
 
     function activeWorkflow() {
@@ -900,11 +1186,11 @@ function buildIndexHtml() {
         const logs = (proc.logs || []).slice(-80).join('\\n');
         return '<div class="card process-card">'
           + '<div class="process-header">'
-          + '<div class="process-title"><strong>' + html(proc.label) + '</strong><div class="process-meta">' + html(proc.id) + ' · pid=' + html(proc.pid) + ' · ' + html(proc.status) + '</div></div>'
+          + '<div class="process-title"><strong>' + html(proc.label) + '</strong><div class="process-meta">' + html(proc.id) + ' · pid=' + html(proc.pid) + ' · ' + html(proc.status) + ' · os=' + (proc.osAlive ? 'alive' : 'not running') + (proc.managed ? ' · managed' : ' · recovered') + '</div></div>'
           + (running ? '<button type="button" class="danger stop-button" data-id="' + html(proc.id) + '">Stop</button>' : '')
           + '</div>'
           + '<div class="process-meta process-command">npm run ' + html(proc.script) + ' -- ' + html((proc.args || []).join(' ')) + '</div>'
-          + '<div class="process-meta">started ' + html(proc.startedAt) + (proc.exitedAt ? ' · exited ' + html(proc.exitedAt) : '') + '</div>'
+          + '<div class="process-meta">started ' + html(proc.startedAt) + (proc.exitedAt ? ' · exited ' + html(proc.exitedAt) : '') + (proc.osCheckedAt ? ' · checked ' + html(proc.osCheckedAt) : '') + '</div>'
           + '<pre class="logs">' + html(logs) + '</pre>'
           + '</div>';
       }).join('');
@@ -935,11 +1221,19 @@ function buildIndexHtml() {
       });
       const response = await fetch('/api/listings?' + params.toString());
       const payload = await response.json();
+      if (!response.ok) {
+        resultsMetaEl.textContent = 'Query error: ' + (payload.error || response.statusText);
+        resultsBodyEl.innerHTML = '';
+        return;
+      }
       state.total = payload.total;
       renderRows(payload.rows);
+      const stats = payload.stats || {};
       resultsMetaEl.textContent = 'Showing ' + payload.rows.length + ' of ' + payload.total + ' rows'
         + (payload.query ? ' for query: ' + payload.query : '')
-        + ' · sort: ' + payload.sort;
+        + ' · sort: ' + payload.sort
+        + ' · query: ' + (stats.elapsedMs ?? 0) + 'ms'
+        + ' · scanned result window: ' + (stats.limit ?? state.limit);
       updatePager();
     }
 
@@ -976,6 +1270,21 @@ function buildIndexHtml() {
       state.offset = 0;
       await loadRows();
     });
+
+    queryFieldSelectEl.addEventListener('change', updateQueryOperatorOptions);
+    document.getElementById('addClauseButton').addEventListener('click', addQueryClause);
+    document.getElementById('wrapQueryButton').addEventListener('click', () => {
+      const current = queryInputEl.value.trim();
+      if (current) queryInputEl.value = '(' + current + ')';
+    });
+    for (const button of document.querySelectorAll('.example-query')) {
+      button.addEventListener('click', async () => {
+        queryInputEl.value = button.dataset.query;
+        state.q = queryInputEl.value;
+        state.offset = 0;
+        await loadRows();
+      });
+    }
 
     prevButtonEl.addEventListener('click', async () => {
       state.offset = Math.max(0, state.offset - state.limit);
@@ -1014,9 +1323,13 @@ function buildIndexHtml() {
     });
 
     document.getElementById('refreshWorkflowsButton').addEventListener('click', loadWorkflows);
+    document.getElementById('reconcileWorkflowsButton').addEventListener('click', async () => {
+      await fetch('/api/workflows/reconcile', { method: 'POST' });
+      await loadWorkflows();
+    });
     workflowSelectEl.addEventListener('change', () => renderWorkflowForm(activeWorkflow()));
 
-    loadSummary().then(loadRows).then(loadWorkflows);
+    loadSummary().then(loadQueryFields).then(loadRows).then(loadWorkflows);
     setInterval(loadSummary, 10000);
     setInterval(loadWorkflows, 5000);
   </script>
@@ -1072,25 +1385,48 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/query-fields') {
+      writeJson(response, 200, {
+        fields: QUERY_FIELDS,
+      });
+      return;
+    }
+
     if (requestUrl.pathname === '/api/listings') {
       const query = requestUrl.searchParams.get('q') || '';
       const limit = requestUrl.searchParams.get('limit') || '50';
       const offset = requestUrl.searchParams.get('offset') || '0';
 
-      const listingsQuery = buildListingsQuery({ query, limit, offset });
-      const countQuery = buildCountQuery({ query });
-      const rows = db.prepare(listingsQuery.sql).all(...listingsQuery.params).map(enrichRowPaths);
-      const total = db.prepare(countQuery.sql).get(...countQuery.params).total;
+      try {
+        const startedAt = process.hrtime.bigint();
+        const listingsQuery = buildListingsQuery({ query, limit, offset });
+        const countQuery = buildCountQuery({ query });
+        const rows = db.prepare(listingsQuery.sql).all(...listingsQuery.params).map(enrichRowPaths);
+        const total = db.prepare(countQuery.sql).get(...countQuery.params).total;
+        const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
 
-      writeJson(response, 200, {
-        query,
-        parsedQuery: listingsQuery.parsedQuery,
-        sort: listingsQuery.parsedQuery.sort,
-        limit: listingsQuery.limit,
-        offset: listingsQuery.offset,
-        total,
-        rows,
-      });
+        writeJson(response, 200, {
+          query,
+          parsedQuery: listingsQuery.parsedQuery,
+          sort: listingsQuery.parsedQuery.sort,
+          limit: listingsQuery.limit,
+          offset: listingsQuery.offset,
+          total,
+          rows,
+          stats: {
+            elapsedMs,
+            returnedRows: rows.length,
+            totalRows: total,
+            limit: listingsQuery.limit,
+            offset: listingsQuery.offset,
+          },
+        });
+      } catch (error) {
+        writeJson(response, 400, {
+          error: error.message,
+          query,
+        });
+      }
       return;
     }
 
@@ -1103,7 +1439,14 @@ function createServer(options) {
           fields: workflow.fields,
           defaultArgs: buildDefaultArgsFromFields(workflow.fields),
         })),
-        processes: listManagedProcesses(),
+        processes: listManagedProcesses(db),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/workflows/reconcile' && request.method === 'POST') {
+      writeJson(response, 200, {
+        processes: reconcileWorkflowRuns(db),
       });
       return;
     }
@@ -1111,7 +1454,7 @@ function createServer(options) {
     if (requestUrl.pathname === '/api/workflows/start' && request.method === 'POST') {
       try {
         const body = await readRequestJson(request);
-        const started = startManagedWorkflow(body.workflowId, normalizeWorkflowArgs(body.args));
+        const started = startManagedWorkflow(db, body.workflowId, normalizeWorkflowArgs(body.args));
         writeJson(response, 201, { process: started });
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });
@@ -1122,7 +1465,7 @@ function createServer(options) {
     if (requestUrl.pathname === '/api/workflows/stop' && request.method === 'POST') {
       try {
         const body = await readRequestJson(request);
-        const stopped = stopManagedWorkflow(body.processId);
+        const stopped = stopManagedWorkflow(db, body.processId);
         writeJson(response, 200, { process: stopped });
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });

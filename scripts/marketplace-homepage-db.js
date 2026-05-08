@@ -170,6 +170,31 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_listing_events_type_time
     ON listing_events (event_type, event_at DESC);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+      run_id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      script TEXT NOT NULL,
+      args_json TEXT NOT NULL DEFAULT '[]',
+      pid INTEGER,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      exited_at TEXT NOT NULL DEFAULT '',
+      exit_code INTEGER,
+      signal TEXT NOT NULL DEFAULT '',
+      os_checked_at TEXT NOT NULL DEFAULT '',
+      os_alive INTEGER NOT NULL DEFAULT 0,
+      logs_json TEXT NOT NULL DEFAULT '[]'
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_updated
+    ON workflow_runs (status, updated_at DESC);
+  `);
 }
 
 function ensureColumn(db, tableName, columnName, definitionSql) {
@@ -708,6 +733,151 @@ function getSearchTitleBagCounts(db) {
   };
 }
 
+function serializeArray(value) {
+  return JSON.stringify(Array.isArray(value) ? value : [], null, 2);
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function normalizeWorkflowRunRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    run_id: row.run_id,
+    workflow_id: row.workflow_id,
+    label: row.label,
+    script: row.script,
+    args: parseJsonArray(row.args_json),
+    pid: row.pid,
+    status: row.status,
+    started_at: row.started_at,
+    updated_at: row.updated_at,
+    exited_at: row.exited_at,
+    exit_code: row.exit_code,
+    signal: row.signal,
+    os_checked_at: row.os_checked_at,
+    os_alive: Boolean(row.os_alive),
+    logs: parseJsonArray(row.logs_json),
+  };
+}
+
+function insertWorkflowRun(db, run) {
+  const now = run.startedAt || new Date().toISOString();
+  db.prepare(`
+    INSERT INTO workflow_runs (
+      run_id,
+      workflow_id,
+      label,
+      script,
+      args_json,
+      pid,
+      status,
+      started_at,
+      updated_at,
+      os_alive,
+      logs_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    run.runId,
+    run.workflowId,
+    run.label,
+    run.script,
+    serializeArray(run.args),
+    Number.isFinite(run.pid) ? run.pid : null,
+    run.status || 'starting',
+    now,
+    run.updatedAt || now,
+    run.osAlive ? 1 : 0,
+    serializeArray(run.logs),
+  );
+  return getWorkflowRun(db, run.runId);
+}
+
+function updateWorkflowRun(db, runId, changes = {}) {
+  const previous = getWorkflowRun(db, runId);
+  if (!previous) {
+    return null;
+  }
+
+  const next = {
+    workflow_id: changes.workflowId ?? previous.workflow_id,
+    label: changes.label ?? previous.label,
+    script: changes.script ?? previous.script,
+    args: changes.args ?? previous.args,
+    pid: changes.pid ?? previous.pid,
+    status: changes.status ?? previous.status,
+    updated_at: changes.updatedAt ?? new Date().toISOString(),
+    exited_at: changes.exitedAt ?? previous.exited_at,
+    exit_code: changes.exitCode ?? previous.exit_code,
+    signal: changes.signal ?? previous.signal,
+    os_checked_at: changes.osCheckedAt ?? previous.os_checked_at,
+    os_alive: changes.osAlive ?? previous.os_alive,
+    logs: changes.logs ?? previous.logs,
+  };
+
+  db.prepare(`
+    UPDATE workflow_runs
+    SET
+      workflow_id = ?,
+      label = ?,
+      script = ?,
+      args_json = ?,
+      pid = ?,
+      status = ?,
+      updated_at = ?,
+      exited_at = ?,
+      exit_code = ?,
+      signal = ?,
+      os_checked_at = ?,
+      os_alive = ?,
+      logs_json = ?
+    WHERE run_id = ?
+  `).run(
+    next.workflow_id,
+    next.label,
+    next.script,
+    serializeArray(next.args),
+    Number.isFinite(next.pid) ? next.pid : null,
+    next.status,
+    next.updated_at,
+    next.exited_at,
+    Number.isFinite(next.exit_code) ? next.exit_code : null,
+    next.signal || '',
+    next.os_checked_at || '',
+    next.os_alive ? 1 : 0,
+    serializeArray(next.logs),
+    runId,
+  );
+  return getWorkflowRun(db, runId);
+}
+
+function getWorkflowRun(db, runId) {
+  return normalizeWorkflowRunRow(db.prepare(`
+    SELECT *
+    FROM workflow_runs
+    WHERE run_id = ?
+  `).get(String(runId)));
+}
+
+function listWorkflowRuns(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 100)) : 25;
+  return db.prepare(`
+    SELECT *
+    FROM workflow_runs
+    ORDER BY started_at DESC
+    LIMIT ?
+  `).all(limit).map(normalizeWorkflowRunRow);
+}
+
 module.exports = {
   DEFAULT_DB_PATH,
   resolveDbPath,
@@ -733,4 +903,8 @@ module.exports = {
   getSearchTitleBagKeyword,
   pickRandomSearchTitleBagKeyword,
   getSearchTitleBagCounts,
+  insertWorkflowRun,
+  updateWorkflowRun,
+  getWorkflowRun,
+  listWorkflowRuns,
 };

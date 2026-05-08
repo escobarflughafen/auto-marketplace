@@ -25,6 +25,10 @@ const {
   getSearchTitleBagKeyword,
   pickRandomSearchTitleBagKeyword,
   getSearchTitleBagCounts,
+  insertWorkflowRun,
+  updateWorkflowRun,
+  getWorkflowRun,
+  listWorkflowRuns,
 } = require('../scripts/marketplace-homepage-db');
 
 function createTempDbPath() {
@@ -102,6 +106,47 @@ test('listing events are append-only detail history', () => {
       eventType: 'detail_capture_succeeded',
     });
     assert.equal(latestSuccess.event_id, event.event_id);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('workflow runs persist process state and logs', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const created = insertWorkflowRun(db, {
+      runId: 'run-1',
+      workflowId: 'search-explore',
+      label: 'Search Explorer',
+      script: 'marketplace:search:explore',
+      args: ['--query', 'pentax'],
+      pid: 12345,
+      status: 'running',
+      startedAt: '2026-05-08T00:00:00.000Z',
+      osAlive: true,
+      logs: ['started'],
+    });
+
+    assert.equal(created.run_id, 'run-1');
+    assert.deepEqual(created.args, ['--query', 'pentax']);
+    assert.equal(created.os_alive, true);
+
+    const updated = updateWorkflowRun(db, 'run-1', {
+      status: 'exited',
+      exitedAt: '2026-05-08T00:01:00.000Z',
+      exitCode: 0,
+      osAlive: false,
+      osCheckedAt: '2026-05-08T00:01:01.000Z',
+      logs: ['started', 'done'],
+    });
+
+    assert.equal(updated.status, 'exited');
+    assert.equal(updated.exit_code, 0);
+    assert.equal(updated.os_alive, false);
+    assert.deepEqual(getWorkflowRun(db, 'run-1').logs, ['started', 'done']);
+    assert.equal(listWorkflowRuns(db).length, 1);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
