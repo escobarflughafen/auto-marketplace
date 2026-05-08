@@ -3,7 +3,10 @@ const path = require('path');
 const { chromium } = require('playwright');
 const {
   createLogger,
+  inferMarketplaceAreaFromLocation,
   safeGotoWithOptions,
+  setMarketplaceLocation,
+  setMarketplaceRadius,
   waitForMarketplaceResults,
   waitForPageReady,
   scrollMarketplaceResults,
@@ -28,6 +31,9 @@ Options:
   --cdp-url "<url>"                 Attach to an existing Chromium browser over CDP
   --user-data-dir "<path>"          Launch with a persistent browser profile
   --manual-login                    Wait for a manual browser login without autofill
+  --location "<text>"               Change Marketplace location in the UI
+  --radius-miles <n>                Change Marketplace search radius in miles
+  --area "<slug>"                   Force Marketplace area slug for search URLs
   --query "<text>"                  Search Marketplace after login
   --start-url "<url>"               Open a specific Marketplace URL
   --scrolls <count>                 Auto-scroll the results page N times
@@ -44,6 +50,8 @@ Examples:
   npm run marketplace
   npm run marketplace -- --user-data-dir ./profiles/facebook-marketplace
   npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace
+  npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace --location "Ottawa, Ontario"
+  npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace --location "Bellingham, Washington" --radius-miles 10
   npm run marketplace -- --cdp-url "http://127.0.0.1:9222"
   npm run marketplace -- --query "used office chair"
   npm run marketplace -- --start-url "https://www.facebook.com/marketplace/search/?query=bike"
@@ -57,6 +65,10 @@ function parseArgs(argv) {
     cdpUrl: process.env.PLAYWRIGHT_CDP_URL || '',
     userDataDir: process.env.PLAYWRIGHT_USER_DATA_DIR || '',
     manualLogin: false,
+    location: '',
+    radiusMiles: 0,
+    area: '',
+    areaExplicit: false,
     query: '',
     startUrl: DEFAULT_MARKETPLACE_URL,
     startUrlExplicit: false,
@@ -94,6 +106,22 @@ function parseArgs(argv) {
         break;
       case '--manual-login':
         options.manualLogin = true;
+        break;
+      case '--location':
+        options.location = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--radius-miles':
+        options.radiusMiles = parseIntegerFlag(readFlagValue(argv, index, arg), arg);
+        if (options.radiusMiles < 1) {
+          throw new Error('Expected --radius-miles to be a positive integer');
+        }
+        index += 1;
+        break;
+      case '--area':
+        options.area = readFlagValue(argv, index, arg);
+        options.areaExplicit = true;
+        index += 1;
         break;
       case '--query':
         options.query = readFlagValue(argv, index, arg);
@@ -140,6 +168,10 @@ function parseArgs(argv) {
       default:
         throw new Error(`Unknown argument: ${arg}`);
     }
+  }
+
+  if (!options.areaExplicit && options.location) {
+    options.area = inferMarketplaceAreaFromLocation(options.location);
   }
 
   return options;
@@ -508,8 +540,11 @@ async function navigateToMarketplace(page, targetUrl) {
   });
 }
 
-function buildMarketplaceSearchUrl(currentUrl, query) {
+function buildMarketplaceSearchUrl(currentUrl, query, explicitArea = '') {
   const encodedQuery = encodeURIComponent(query);
+  if (explicitArea) {
+    return `https://www.facebook.com/marketplace/${encodeURIComponent(explicitArea)}/search/?query=${encodedQuery}`;
+  }
 
   try {
     const url = new URL(currentUrl);
@@ -523,8 +558,8 @@ function buildMarketplaceSearchUrl(currentUrl, query) {
   return `https://www.facebook.com/marketplace/search/?query=${encodedQuery}`;
 }
 
-async function submitMarketplaceSearch(page, query) {
-  const searchUrl = buildMarketplaceSearchUrl(page.url(), query);
+async function submitMarketplaceSearch(page, query, area = '') {
+  const searchUrl = buildMarketplaceSearchUrl(page.url(), query, area);
   log(`search_start query="${query}" url=${searchUrl}`);
   const currentPage = await safeGotoWithOptions(page.context(), page, searchUrl, {
     timeoutMs: 45000,
@@ -568,9 +603,27 @@ async function runWorkflowCycle(page, options, cycleIndex) {
     activePage = await navigateToMarketplace(activePage, options.startUrl);
   }
 
+  if (options.location) {
+    console.log(`Switching Marketplace location to: ${options.location}`);
+    activePage = await setMarketplaceLocation(activePage, {
+      location: options.location,
+      fallbackArea: options.area,
+      allowMissingControl: true,
+      logger: log,
+    });
+  }
+
+  if (options.radiusMiles > 0) {
+    console.log(`Setting Marketplace radius to: ${options.radiusMiles} mile(s)`);
+    activePage = await setMarketplaceRadius(activePage, {
+      radiusMiles: options.radiusMiles,
+      logger: log,
+    });
+  }
+
   if (options.query) {
     console.log(`Searching Marketplace for: ${options.query}`);
-    activePage = await submitMarketplaceSearch(activePage, options.query);
+    activePage = await submitMarketplaceSearch(activePage, options.query, options.area);
   }
 
   if (options.scrolls > 0) {

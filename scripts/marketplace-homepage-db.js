@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const DEFAULT_DB_PATH = path.join(
@@ -36,6 +37,13 @@ function canonicalizeListingUrl(url) {
 
 function serializeJson(value) {
   return JSON.stringify(value ?? {}, null, 2);
+}
+
+function hashContent(value) {
+  return crypto
+    .createHash('sha256')
+    .update(serializeJson(value))
+    .digest('hex');
 }
 
 function normalizeKeyword(value) {
@@ -132,6 +140,35 @@ function ensureSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_listing_search_keywords_keyword
     ON listing_search_keywords (normalized_keyword, last_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS listing_events (
+      event_id TEXT PRIMARY KEY,
+      listing_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      worker_id TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      attempt INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT '',
+      content_json TEXT NOT NULL DEFAULT '{}',
+      content_hash TEXT NOT NULL DEFAULT '',
+      screenshot_path TEXT NOT NULL DEFAULT '',
+      snapshot_path TEXT NOT NULL DEFAULT '',
+      error TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (listing_id) REFERENCES homepage_listings(listing_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_events_listing
+    ON listing_events (listing_id, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_events_type_time
+    ON listing_events (event_type, event_at DESC);
   `);
 }
 
@@ -292,18 +329,57 @@ function claimNextPendingHomepageListing(db, options = {}) {
     : 30 * 60;
   const staleBefore = new Date(Date.now() - (staleAfterSeconds * 1000)).toISOString();
   const workerId = String(options.workerId || `worker-${process.pid}`);
+  const maxAttempts = Number.isFinite(options.maxAttempts)
+    ? Math.max(1, options.maxAttempts)
+    : null;
+  const retryDelaySeconds = Number.isFinite(options.retryDelaySeconds)
+    ? Math.max(0, options.retryDelaySeconds)
+    : 0;
+  const retryBefore = new Date(Date.now() - (retryDelaySeconds * 1000)).toISOString();
+  const sourceFilter = normalizeKeyword(options.sourceFilter || '');
+  const keywordFilter = normalizeKeyword(options.keywordFilter || '').toLowerCase();
+  const params = [staleBefore];
+  let extraWhereSql = '';
+
+  if (maxAttempts !== null) {
+    extraWhereSql += ' AND detail_attempts < ?';
+    params.push(maxAttempts);
+  }
+
+  if (retryDelaySeconds > 0) {
+    extraWhereSql += `
+      AND (
+        detail_status != 'error'
+        OR COALESCE(detail_completed_at, detail_started_at, first_seen_at) <= ?
+      )
+    `;
+    params.push(retryBefore);
+  }
+
+  if (sourceFilter) {
+    extraWhereSql += ' AND source = ?';
+    params.push(sourceFilter);
+  }
+
+  if (keywordFilter) {
+    extraWhereSql += ' AND lower(source_keyword) LIKE ?';
+    params.push(`%${keywordFilter}%`);
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
     const candidate = db.prepare(`
       SELECT listing_id
       FROM homepage_listings
-      WHERE detail_status IN ('pending', 'error')
-        OR (
-          detail_status = 'processing'
-          AND COALESCE(detail_started_at, '') != ''
-          AND detail_started_at <= ?
+      WHERE (
+          detail_status IN ('pending', 'error')
+          OR (
+            detail_status = 'processing'
+            AND COALESCE(detail_started_at, '') != ''
+            AND detail_started_at <= ?
+          )
         )
+        ${extraWhereSql}
       ORDER BY
         CASE detail_status
           WHEN 'pending' THEN 0
@@ -314,7 +390,7 @@ function claimNextPendingHomepageListing(db, options = {}) {
         last_seen_at DESC,
         first_seen_at ASC
       LIMIT 1
-    `).get(staleBefore);
+    `).get(...params);
 
     if (!candidate) {
       db.exec('COMMIT');
@@ -338,6 +414,103 @@ function claimNextPendingHomepageListing(db, options = {}) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+function buildListingEventId(eventAt, listingId, eventType) {
+  const entropy = crypto.randomBytes(8).toString('hex');
+  return [
+    String(eventAt || new Date().toISOString()).replace(/[^0-9A-Za-z]/g, ''),
+    String(listingId || 'unknown'),
+    String(eventType || 'event'),
+    entropy,
+  ].join('-');
+}
+
+function appendListingEvent(db, event) {
+  const eventAt = event.eventAt || new Date().toISOString();
+  const listingId = String(event.listingId || event.listing_id || '').trim();
+  if (!listingId) {
+    throw new Error('appendListingEvent requires listingId');
+  }
+
+  const eventType = normalizeKeyword(event.eventType || event.event_type || 'detail_capture_event');
+  const content = event.content || event.contentJson || {};
+  const contentJson = serializeJson(content);
+  const contentHash = String(event.contentHash || event.content_hash || hashContent(content)).trim();
+  const eventId = String(event.eventId || event.event_id || buildListingEventId(eventAt, listingId, eventType));
+
+  db.prepare(`
+    INSERT INTO listing_events (
+      event_id,
+      listing_id,
+      event_type,
+      event_at,
+      worker_id,
+      source_url,
+      attempt,
+      status,
+      content_json,
+      content_hash,
+      screenshot_path,
+      snapshot_path,
+      error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    eventId,
+    listingId,
+    eventType,
+    eventAt,
+    String(event.workerId || event.worker_id || '').trim(),
+    String(event.sourceUrl || event.source_url || '').trim(),
+    Number.isFinite(event.attempt) ? event.attempt : 0,
+    String(event.status || '').trim(),
+    contentJson,
+    contentHash,
+    String(event.screenshotPath || event.screenshot_path || '').trim(),
+    String(event.snapshotPath || event.snapshot_path || '').trim(),
+    String(event.error || '').trim(),
+  );
+
+  return getListingEvent(db, eventId);
+}
+
+function getListingEvent(db, eventId) {
+  return db.prepare(`
+    SELECT *
+    FROM listing_events
+    WHERE event_id = ?
+  `).get(String(eventId));
+}
+
+function getListingEvents(db, listingId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, options.limit) : 50;
+  return db.prepare(`
+    SELECT *
+    FROM listing_events
+    WHERE listing_id = ?
+    ORDER BY event_at DESC
+    LIMIT ?
+  `).all(String(listingId), limit);
+}
+
+function getLatestListingEvent(db, listingId, options = {}) {
+  const eventType = normalizeKeyword(options.eventType || '');
+  const params = [String(listingId)];
+  let eventTypeSql = '';
+
+  if (eventType) {
+    eventTypeSql = 'AND event_type = ?';
+    params.push(eventType);
+  }
+
+  return db.prepare(`
+    SELECT *
+    FROM listing_events
+    WHERE listing_id = ?
+      ${eventTypeSql}
+    ORDER BY event_at DESC
+    LIMIT 1
+  `).get(...params) || null;
 }
 
 function markHomepageListingProcessed(db, listingId, detailRecord) {
@@ -550,6 +723,11 @@ module.exports = {
   markHomepageListingProcessed,
   markHomepageListingFailed,
   getHomepageListingCounts,
+  hashContent,
+  appendListingEvent,
+  getListingEvent,
+  getListingEvents,
+  getLatestListingEvent,
   upsertListingSearchKeyword,
   upsertSearchTitleBagKeyword,
   getSearchTitleBagKeyword,

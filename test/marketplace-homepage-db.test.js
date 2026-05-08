@@ -16,6 +16,10 @@ const {
   markHomepageListingProcessed,
   markHomepageListingFailed,
   getHomepageListingCounts,
+  appendListingEvent,
+  getListingEvents,
+  getLatestListingEvent,
+  hashContent,
   upsertListingSearchKeyword,
   upsertSearchTitleBagKeyword,
   getSearchTitleBagKeyword,
@@ -35,6 +39,72 @@ test('extractListingId and canonicalizeListingUrl normalize Marketplace links', 
     canonicalizeListingUrl(sourceUrl),
     'https://www.facebook.com/marketplace/item/123456789/',
   );
+});
+
+test('listing events are append-only detail history', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'event-1',
+      href: 'https://www.facebook.com/marketplace/item/601/',
+      title: 'Pentax 67',
+      text: 'CA$ 1500 | Pentax 67',
+      rank: 1,
+    });
+
+    const content = {
+      detail: {
+        title: 'Pentax 67',
+        price: 'CA$ 1500',
+      },
+    };
+    const contentHash = hashContent(content.detail);
+    const event = appendListingEvent(db, {
+      listingId: 'event-1',
+      eventType: 'detail_capture_succeeded',
+      eventAt: '2026-05-07T00:00:00.000Z',
+      workerId: 'worker-a',
+      sourceUrl: 'https://www.facebook.com/marketplace/item/601/',
+      attempt: 1,
+      status: 'done',
+      content,
+      contentHash,
+      screenshotPath: '/tmp/601.png',
+      snapshotPath: '/tmp/601.md',
+    });
+
+    assert.equal(event.listing_id, 'event-1');
+    assert.equal(event.event_type, 'detail_capture_succeeded');
+    assert.equal(event.content_hash, contentHash);
+
+    appendListingEvent(db, {
+      listingId: 'event-1',
+      eventType: 'content_changed',
+      eventAt: '2026-05-07T00:01:00.000Z',
+      workerId: 'worker-a',
+      sourceUrl: 'https://www.facebook.com/marketplace/item/601/',
+      attempt: 2,
+      status: 'changed',
+      content: {
+        previousContentHash: contentHash,
+        nextContentHash: 'next-hash',
+      },
+      contentHash: 'next-hash',
+    });
+
+    const events = getListingEvents(db, 'event-1');
+    assert.equal(events.length, 2);
+    assert.equal(events[0].event_type, 'content_changed');
+
+    const latestSuccess = getLatestListingEvent(db, 'event-1', {
+      eventType: 'detail_capture_succeeded',
+    });
+    assert.equal(latestSuccess.event_id, event.event_id);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
 });
 
 test('normalizeKeyword trims and collapses whitespace', () => {
@@ -244,6 +314,61 @@ test('claimNextPendingHomepageListing prioritizes pending rows and tracks failur
       claimedAt: '2026-04-27T02:05:00.000Z',
     });
     assert.equal(next.listing_id, '200');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('claimNextPendingHomepageListing respects max attempts and source filters', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'source-home',
+      href: 'https://www.facebook.com/marketplace/item/701/',
+      title: 'Homepage row',
+      text: 'Homepage card',
+      rank: 1,
+    }, {
+      source: 'homepage',
+    });
+    upsertHomepageListing(db, {
+      listingId: 'source-search',
+      href: 'https://www.facebook.com/marketplace/item/702/',
+      title: 'Search row',
+      text: 'Search card',
+      rank: 2,
+    }, {
+      source: 'search',
+      sourceKeyword: 'pentax',
+    });
+
+    const searchClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-search',
+      sourceFilter: 'search',
+      keywordFilter: 'pentax',
+      maxAttempts: 1,
+      claimedAt: '2026-05-07T00:00:00.000Z',
+    });
+    assert.equal(searchClaim.listing_id, 'source-search');
+
+    markHomepageListingFailed(db, 'source-search', 'temporary failure');
+    const skippedAfterMaxAttempts = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-search',
+      sourceFilter: 'search',
+      keywordFilter: 'pentax',
+      maxAttempts: 1,
+      claimedAt: '2026-05-07T00:01:00.000Z',
+    });
+    assert.equal(skippedAfterMaxAttempts, null);
+
+    const homepageClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-home',
+      sourceFilter: 'homepage',
+      claimedAt: '2026-05-07T00:02:00.000Z',
+    });
+    assert.equal(homepageClaim.listing_id, 'source-home');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

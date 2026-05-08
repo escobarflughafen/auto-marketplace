@@ -49,6 +49,94 @@ function slugify(value) {
     .slice(0, 80) || 'item';
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function inferMarketplaceAreaFromLocation(location) {
+  const normalized = cleanText(location).replace(/\s*,\s*/g, ', ');
+  if (!normalized) {
+    return '';
+  }
+
+  const primarySegment = normalized.split(',')[0].trim();
+  return slugify(primarySegment);
+}
+
+function buildMarketplaceLocationPatterns(location) {
+  const normalized = cleanText(location).replace(/\s*,\s*/g, ', ');
+  if (!normalized) {
+    return [];
+  }
+
+  const patterns = [
+    new RegExp(`^${escapeRegExp(normalized)}$`, 'i'),
+    new RegExp(escapeRegExp(normalized), 'i'),
+  ];
+  const primarySegment = normalized.split(',')[0].trim();
+  if (primarySegment && primarySegment.toLowerCase() !== normalized.toLowerCase()) {
+    patterns.push(new RegExp(`\\b${escapeRegExp(primarySegment)}\\b`, 'i'));
+  }
+
+  return patterns;
+}
+
+function normalizeRadiusMiles(value) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 0;
+  }
+
+  return parsed;
+}
+
+function buildMarketplaceRadiusPatterns(radiusMiles) {
+  const miles = normalizeRadiusMiles(radiusMiles);
+  if (miles < 1) {
+    return [];
+  }
+
+  const kilometers = Math.max(1, Math.round(miles * 1.60934));
+  return [
+    new RegExp(`^${miles}\\s*(?:mi|mile|miles)$`, 'i'),
+    new RegExp(`\\b${miles}\\s*(?:mi|mile|miles)\\b`, 'i'),
+    new RegExp(`^${kilometers}\\s*(?:km|kilometer|kilometers)$`, 'i'),
+    new RegExp(`\\b${kilometers}\\s*(?:km|kilometer|kilometers)\\b`, 'i'),
+  ];
+}
+
+function urlMatchesMarketplaceArea(url, area) {
+  const normalizedArea = inferMarketplaceAreaFromLocation(area) || slugify(area);
+  if (!normalizedArea) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(String(url || ''));
+    const match = parsed.pathname.match(/^\/marketplace\/([^/]+)(?:\/|$)/i);
+    if (!match || !match[1]) {
+      return false;
+    }
+
+    return slugify(match[1]) === normalizedArea;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function firstVisibleLocator(locatorFactories, timeout = DEFAULT_READY_TIMEOUT_MS) {
+  for (const createLocator of locatorFactories) {
+    const locator = createLocator().first();
+    try {
+      await locator.waitFor({ state: 'visible', timeout });
+      return locator;
+    } catch (_) {
+    }
+  }
+
+  return null;
+}
+
 async function safeGoto(context, page, url) {
   return safeGotoWithOptions(context, page, url);
 }
@@ -260,6 +348,190 @@ async function scrollMarketplaceResults(page, options = {}) {
   return stats;
 }
 
+async function setMarketplaceLocation(page, options = {}) {
+  const location = cleanText(options.location);
+  if (!location) {
+    return page;
+  }
+
+  const logger = typeof options.logger === 'function' ? options.logger : null;
+  const dialogTimeoutMs = Number.isFinite(options.dialogTimeoutMs) ? options.dialogTimeoutMs : 6000;
+  const settleTimeMs = Number.isFinite(options.settleTimeMs) ? options.settleTimeMs : 1500;
+  const fallbackArea = cleanText(options.fallbackArea);
+  const allowMissingControl = Boolean(options.allowMissingControl);
+
+  logger?.(`location_change_start location="${location}"`);
+
+  const locationControl = await firstVisibleLocator([
+    () => page.getByRole('button', { name: /location/i }),
+    () => page.getByRole('link', { name: /location/i }),
+    () => page.locator('[aria-label*="Location" i]'),
+    () => page.locator('button,[role="button"],a,[role="link"]').filter({ hasText: /location/i }),
+  ], dialogTimeoutMs);
+
+  if (!locationControl) {
+    if (allowMissingControl && urlMatchesMarketplaceArea(page.url(), fallbackArea || location)) {
+      logger?.(`location_change_skip reason=missing_control area_route_match=true location="${location}" url=${page.url()}`);
+      return page;
+    }
+    throw new Error(`Could not find Marketplace location control for "${location}"`);
+  }
+
+  await locationControl.click({ timeout: 5000 });
+  await page.waitForTimeout(750);
+
+  const locationInput = await firstVisibleLocator([
+    () => page.getByRole('combobox', { name: /location|search/i }),
+    () => page.getByRole('textbox', { name: /location|search/i }),
+    () => page.locator('input[placeholder*="Search" i]'),
+    () => page.locator('input[placeholder*="location" i]'),
+    () => page.locator('input[type="text"]'),
+  ], dialogTimeoutMs);
+
+  if (!locationInput) {
+    throw new Error(`Could not find Marketplace location search input for "${location}"`);
+  }
+
+  await locationInput.click({ timeout: 3000 }).catch(() => {});
+  await locationInput.fill('', { timeout: 3000 }).catch(() => {});
+  await locationInput.fill(location, { timeout: 5000 });
+  await page.waitForTimeout(1250);
+
+  let suggestionSelected = false;
+  for (const pattern of buildMarketplaceLocationPatterns(location)) {
+    const suggestion = await firstVisibleLocator([
+      () => page.getByRole('option', { name: pattern }),
+      () => page.getByRole('button', { name: pattern }),
+      () => page.getByRole('link', { name: pattern }),
+      () => page.locator('[role="option"],li,button,[role="button"],a').filter({ hasText: pattern }),
+    ], 1500);
+
+    if (!suggestion) {
+      continue;
+    }
+
+    await suggestion.click({ timeout: 3000 });
+    suggestionSelected = true;
+    break;
+  }
+
+  if (!suggestionSelected) {
+    await locationInput.press('ArrowDown').catch(() => {});
+    await page.waitForTimeout(250);
+    await locationInput.press('Enter').catch(() => {});
+  }
+
+  const applyButton = await firstVisibleLocator([
+    () => page.getByRole('button', { name: /apply|save|done/i }),
+    () => page.locator('button,[role="button"]').filter({ hasText: /apply|save|done/i }),
+  ], 2500);
+
+  if (applyButton) {
+    await applyButton.click({ timeout: 3000 });
+  } else {
+    await locationInput.press('Enter').catch(() => {});
+  }
+
+  await waitForPageReady(page, {
+    selectors: ['div[role="main"]', 'main', 'body'],
+    timeoutMs: 10000,
+    settleTimeMs,
+    minBodyTextLength: 20,
+  });
+  logger?.(`location_change_done location="${location}" url=${page.url()}`);
+  return page;
+}
+
+async function setMarketplaceRadius(page, options = {}) {
+  const radiusMiles = normalizeRadiusMiles(options.radiusMiles);
+  if (radiusMiles < 1) {
+    return page;
+  }
+
+  const logger = typeof options.logger === 'function' ? options.logger : null;
+  const dialogTimeoutMs = Number.isFinite(options.dialogTimeoutMs) ? options.dialogTimeoutMs : 5000;
+  const settleTimeMs = Number.isFinite(options.settleTimeMs) ? options.settleTimeMs : 1200;
+  const radiusPatterns = buildMarketplaceRadiusPatterns(radiusMiles);
+
+  logger?.(`radius_change_start miles=${radiusMiles}`);
+
+  const radiusControl = await firstVisibleLocator([
+    () => page.getByRole('button', { name: /radius|distance/i }),
+    () => page.getByRole('combobox', { name: /radius|distance/i }),
+    () => page.getByLabel(/radius|distance/i),
+    () => page.locator('[aria-label*="Radius" i],[aria-label*="Distance" i]'),
+    () => page.locator('button,[role="button"],a,[role="link"]').filter({ hasText: /radius|distance/i }),
+  ], dialogTimeoutMs);
+
+  if (!radiusControl) {
+    throw new Error(`Could not find Marketplace radius control for ${radiusMiles} mile(s)`);
+  }
+
+  await radiusControl.click({ timeout: 4000 });
+  await page.waitForTimeout(600);
+
+  for (const pattern of radiusPatterns) {
+    const option = await firstVisibleLocator([
+      () => page.getByRole('option', { name: pattern }),
+      () => page.getByRole('button', { name: pattern }),
+      () => page.getByRole('link', { name: pattern }),
+      () => page.locator('[role="option"],li,button,[role="button"],a,[role="link"]').filter({ hasText: pattern }),
+    ], 1500);
+
+    if (!option) {
+      continue;
+    }
+
+    await option.click({ timeout: 3000 });
+
+    const applyButton = await firstVisibleLocator([
+      () => page.getByRole('button', { name: /apply|save|done/i }),
+      () => page.locator('button,[role="button"]').filter({ hasText: /apply|save|done/i }),
+    ], 1500);
+    if (applyButton) {
+      await applyButton.click({ timeout: 3000 });
+    }
+
+    await waitForPageReady(page, {
+      selectors: ['div[role="main"]', 'main', 'body'],
+      timeoutMs: 10000,
+      settleTimeMs,
+      minBodyTextLength: 20,
+    });
+    logger?.(`radius_change_done miles=${radiusMiles} url=${page.url()}`);
+    return page;
+  }
+
+  const radiusInput = await firstVisibleLocator([
+    () => page.getByRole('spinbutton', { name: /radius|distance/i }),
+    () => page.locator('input[type="number"][aria-label*="Radius" i],input[type="number"][aria-label*="Distance" i]'),
+  ], 1500);
+
+  if (radiusInput) {
+    await radiusInput.fill(String(radiusMiles), { timeout: 3000 }).catch(() => {});
+    const applyButton = await firstVisibleLocator([
+      () => page.getByRole('button', { name: /apply|save|done/i }),
+      () => page.locator('button,[role="button"]').filter({ hasText: /apply|save|done/i }),
+    ], 1500);
+    if (applyButton) {
+      await applyButton.click({ timeout: 3000 });
+    } else {
+      await radiusInput.press('Enter').catch(() => {});
+    }
+
+    await waitForPageReady(page, {
+      selectors: ['div[role="main"]', 'main', 'body'],
+      timeoutMs: 10000,
+      settleTimeMs,
+      minBodyTextLength: 20,
+    });
+    logger?.(`radius_change_done miles=${radiusMiles} url=${page.url()}`);
+    return page;
+  }
+
+  throw new Error(`Could not find a Marketplace radius option for ${radiusMiles} mile(s)`);
+}
+
 async function expandMarketplaceListingDetails(page, options = {}) {
   const {
     maxPasses = 3,
@@ -463,33 +735,38 @@ function extractListingContent(pageText, fallbackTitle = '') {
   const previousPrice = priceMatches[1] || '';
 
   const location = extractByRegex(text, [
+    /CA\$\s?[\d,]+(?:\.\d{2})?(?:CA\$\s?[\d,]+(?:\.\d{2})?)?\s+(?:[^·]+?\s+·\s+)?(?:有货\s+·\s+)?([^·]+?)\s+(?:发消息|公共场所见面|收藏|分享)/u,
+    /CA\$\s?[\d,]+(?:\.\d{2})?(?:CA\$\s?[\d,]+(?:\.\d{2})?)?\s+(?:[^·]+?\s+·\s+)?(?:Available\s+·\s+)?([^·]+?)\s+(?:Message|Meet in a public place|Save|Share)/u,
     /(?:\d+\s*[分钟小时天周月年前]+\s*·\s*)([^·]+?)\s+发消息/u,
     /(?:\d+\s*[minuteshourdayweekmonthsyearsago]+\s*·\s*)([^·]+?)\s+Message/u,
     /查看翻译\s+([^·]+?)\s+·\s+我们只提供大概位置/u,
+    /查看翻译\s+([^·]+?)\s+我们只提供大概位置/u,
     /See translation\s+([^·]+?)\s+·\s+Approximate location/u,
+    /See translation\s+([^·]+?)\s+Approximate location/u,
   ]);
 
   const listedAgo = extractByRegex(text, [
     /(?:CA\$\s?[\d,]+(?:\.\d{2})?(?:CA\$\s?[\d,]+(?:\.\d{2})?)?\s+)([^·]+?)\s+·\s+[^·]+?\s+发消息/u,
+    /(?:CA\$\s?[\d,]+(?:\.\d{2})?(?:CA\$\s?[\d,]+(?:\.\d{2})?)?\s+)([^·]+?)\s+·\s+[^·]+?\s+(?:公共场所见面|收藏|分享)/u,
     /(?:CA\$\s?[\d,]+(?:\.\d{2})?(?:CA\$\s?[\d,]+(?:\.\d{2})?)?\s+)([^·]+?)\s+·\s+[^·]+?\s+Message/u,
+    /(?:CA\$\s?[\d,]+(?:\.\d{2})?(?:CA\$\s?[\d,]+(?:\.\d{2})?)?\s+)([^·]+?)\s+·\s+[^·]+?\s+(?:Meet in a public place|Save|Share)/u,
   ]);
 
-  const condition = extractByRegex(text, [
-    /商品状况\s+(.+?)\s+(?:品牌|Ready to use|This |I have |Pentax |查看翻译)/u,
-    /Condition\s+(.+?)\s+(?:Brand|This |Ready to use|See translation)/u,
+  const conditionBlock = extractByRegex(text, [
+    /商品状况\s+((?:.|\n)+?)\s+查看翻译/u,
+    /Condition\s+((?:.|\n)+?)\s+See translation/u,
+  ]);
+  const parsedCondition = parseConditionBlock(conditionBlock);
+  const condition = parsedCondition.condition || extractByRegex(text, [
+    /商品状况\s+((?:二手|全新|Used|New)\s*-\s*(?:成色好|如新|一般|Good condition|Like new|Fair condition|Poor condition))/u,
+    /Condition\s+((?:Used|New)\s*-\s*(?:Good condition|Like new|Fair condition|Poor condition))/u,
   ]);
 
-  let description = extractByRegex(text, [
-    /商品状况\s+.+?\s+((?:.|\n)+?)\s+查看翻译/u,
-    /Condition\s+.+?\s+((?:.|\n)+?)\s+See translation/u,
-  ]) || extractByRegex(text, [
+  let description = parsedCondition.description || extractByRegex(text, [
     /详细信息\s+.+?\s+((?:.|\n)+?)\s+卖家信息/u,
     /Details\s+.+?\s+((?:.|\n)+?)\s+Seller information/u,
   ]);
-  description = description
-    .replace(/^(?:二手|Used)\s*-\s*/u, '')
-    .replace(/^(?:成色好|Good condition)\s*/u, '')
-    .trim();
+  description = cleanDescriptionText(description);
 
   const sellerName = extractByRegex(text, [
     /卖家详细信息\s+(.+?)\s+\(\d+\)/u,
@@ -519,6 +796,41 @@ function extractListingContent(pageText, fallbackTitle = '') {
     sellerJoined,
     rawText: text,
   };
+}
+
+function parseConditionBlock(value) {
+  const block = cleanText(value || '');
+  if (!block) {
+    return { condition: '', description: '' };
+  }
+
+  const patterns = [
+    /^((?:二手|全新)\s*-\s*(?:成色好|如新|一般|成色较差))\s*(.*)$/u,
+    /^((?:Used|New)\s*-\s*(?:Good condition|Like new|Fair condition|Poor condition))\s*(.*)$/iu,
+  ];
+
+  for (const pattern of patterns) {
+    const match = block.match(pattern);
+    if (match) {
+      return {
+        condition: cleanText(match[1]),
+        description: cleanDescriptionText(match[2] || ''),
+      };
+    }
+  }
+
+  return {
+    condition: block,
+    description: '',
+  };
+}
+
+function cleanDescriptionText(value) {
+  return cleanText(value || '')
+    .replace(/^\s*-\s*/u, '')
+    .replace(/^(?:二手|Used)\s*-\s*/u, '')
+    .replace(/^(?:成色好|Good condition)\s*/u, '')
+    .trim();
 }
 
 function escapeForRegex(value) {
@@ -614,11 +926,18 @@ async function writeListingSnapshot({
 }
 
 module.exports = {
+  buildMarketplaceLocationPatterns,
+  buildMarketplaceRadiusPatterns,
   createLogger,
   ensureDir,
+  inferMarketplaceAreaFromLocation,
+  normalizeRadiusMiles,
   slugify,
   safeGoto,
   safeGotoWithOptions,
+  setMarketplaceLocation,
+  setMarketplaceRadius,
+  urlMatchesMarketplaceArea,
   waitForPageReady,
   waitForMarketplaceResults,
   waitForListingPage,

@@ -42,6 +42,18 @@ Open Marketplace, run a query, and keep the browser open:
 npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace --query "zeiss ze 50 1.4"
 ```
 
+Open Marketplace and switch the Marketplace location to Ottawa before browsing:
+
+```bash
+npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace --location "Ottawa, Ontario"
+```
+
+Open Marketplace around Bellingham with a 10-mile search radius:
+
+```bash
+npm run marketplace -- --manual-login --user-data-dir ./profiles/facebook-marketplace --location "Bellingham, Washington" --radius-miles 10
+```
+
 Run the same query continuously in the visible browser:
 
 ```bash
@@ -96,6 +108,12 @@ Homepage collection for just the first loaded homepage content, with no active s
 npm run marketplace:home:collect -- --use-credentials --first-load-only --initial-load-wait-ms 5000 --max-items 15
 ```
 
+Homepage collection after switching the Marketplace location to Ottawa, Ontario:
+
+```bash
+npm run marketplace:home:collect -- --use-credentials --location "Ottawa, Ontario" --once --max-items 15
+```
+
 Search-driven exploration starting from one seed keyword, collecting all visible results, then re-querying from discovered titles:
 
 ```bash
@@ -106,6 +124,18 @@ Search-driven exploration with bounded results and configurable reseed cadence:
 
 ```bash
 npm run marketplace:search:explore -- --use-credentials --query "nikon d850" --max-items 100 --refresh-seconds 90 --reseed-round-min 10 --reseed-round-max 20
+```
+
+Search-driven exploration in Ottawa, using both the Ottawa route slug and the UI location picker:
+
+```bash
+npm run marketplace:search:explore -- --use-credentials --query "nikon d850" --area ottawa --location "Ottawa, Ontario" --max-items 100 --once
+```
+
+Search-driven exploration around Bellingham, Washington within 10 miles:
+
+```bash
+npm run marketplace:search:explore -- --use-credentials --query "canon 85 1.4" --location "Bellingham, Washington" --radius-miles 10 --max-items 100 --once
 ```
 
 Run a local preflight for the DB-backed headless pipeline:
@@ -431,6 +461,8 @@ For `marketplace:home:collect`:
 - `--max-runtime-seconds <secs>`
 - `--stable-passes <n>`
 - `--db-path <file>`
+- `--location "<display name>"`
+- `--radius-miles <n>`
 - `--use-credentials`
 - `--credentials-path <file>`
 - `--login-timeout-seconds <secs>`

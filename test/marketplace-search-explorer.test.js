@@ -10,6 +10,7 @@ const {
   upsertSearchTitleBagKeyword,
 } = require('../scripts/marketplace-homepage-db');
 const {
+  parseArgs,
   pickSearchCardTitle,
   filterBagKeywordsFromItems,
   computeNextSeedRound,
@@ -20,6 +21,42 @@ function createTempDbPath() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marketplace-search-explorer-'));
   return path.join(tempDir, 'queue.db');
 }
+
+test('parseArgs infers Ottawa area slug when location is provided', () => {
+  const options = parseArgs([
+    '--query', 'leica m6',
+    '--location', 'Ottawa, Ontario',
+    '--once',
+  ]);
+
+  assert.equal(options.query, 'leica m6');
+  assert.equal(options.location, 'Ottawa, Ontario');
+  assert.equal(options.area, 'ottawa');
+  assert.equal(options.once, true);
+});
+
+test('parseArgs preserves explicit area when location is also provided', () => {
+  const options = parseArgs([
+    '--query', 'leica m6',
+    '--location', 'Ottawa, Ontario',
+    '--area', 'toronto',
+  ]);
+
+  assert.equal(options.area, 'toronto');
+  assert.equal(options.location, 'Ottawa, Ontario');
+});
+
+test('parseArgs reads search radius miles', () => {
+  const options = parseArgs([
+    '--query', 'canon 85 1.4',
+    '--location', 'Bellingham, Washington',
+    '--radius-miles', '10',
+  ]);
+
+  assert.equal(options.location, 'Bellingham, Washington');
+  assert.equal(options.area, 'bellingham');
+  assert.equal(options.radiusMiles, 10);
+});
 
 test('pickSearchCardTitle skips freshness and price lines', () => {
   const title = pickSearchCardTitle([

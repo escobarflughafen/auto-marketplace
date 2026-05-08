@@ -4,7 +4,10 @@ const { chromium } = require('playwright');
 const {
   createLogger,
   ensureDir,
+  inferMarketplaceAreaFromLocation,
   safeGoto,
+  setMarketplaceLocation,
+  setMarketplaceRadius,
   waitForMarketplaceResults,
   scrollMarketplaceResults,
   cleanText,
@@ -49,6 +52,7 @@ function parseIntegerFlag(value, flagName, minimum = 0) {
 function parseArgs(argv) {
   const options = {
     startUrl: DEFAULT_HOME_URL,
+    startUrlExplicit: false,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     dbPath: DEFAULT_DB_PATH,
     logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'homepage-collector.log'),
@@ -64,6 +68,8 @@ function parseArgs(argv) {
     refreshJitterMax: 1.5,
     once: false,
     headless: true,
+    location: '',
+    radiusMiles: 0,
     useCredentials: false,
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
     loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
@@ -74,6 +80,7 @@ function parseArgs(argv) {
     switch (arg) {
       case '--start-url':
         options.startUrl = readFlagValue(argv, index, arg);
+        options.startUrlExplicit = true;
         index += 1;
         break;
       case '--user-data-dir':
@@ -136,6 +143,14 @@ function parseArgs(argv) {
       case '--once':
         options.once = true;
         break;
+      case '--location':
+        options.location = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--radius-miles':
+        options.radiusMiles = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
       case '--use-credentials':
         options.useCredentials = true;
         break;
@@ -160,6 +175,13 @@ function parseArgs(argv) {
 
   if (options.refreshJitterMax < options.refreshJitterMin) {
     throw new Error('Expected --refresh-jitter-max to be >= --refresh-jitter-min');
+  }
+
+  if (options.location && !options.startUrlExplicit) {
+    const inferredArea = inferMarketplaceAreaFromLocation(options.location);
+    if (inferredArea) {
+      options.startUrl = `https://www.facebook.com/marketplace/${encodeURIComponent(inferredArea)}/`;
+    }
   }
 
   return options;
@@ -446,7 +468,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} use_credentials=${options.useCredentials}`,
+    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} use_credentials=${options.useCredentials}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -465,6 +487,16 @@ async function main() {
       useCredentials: options.useCredentials,
       credentialsPath: options.credentialsPath,
       loginTimeoutMs: options.loginTimeoutMs,
+      logger: log,
+    });
+    page = await setMarketplaceLocation(page, {
+      location: options.location,
+      fallbackArea: inferMarketplaceAreaFromLocation(options.location),
+      allowMissingControl: true,
+      logger: log,
+    });
+    page = await setMarketplaceRadius(page, {
+      radiusMiles: options.radiusMiles,
       logger: log,
     });
     const initialSessionSummary = await describeFacebookMarketplaceSession(context, page, {
@@ -504,9 +536,15 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`[${new Date().toISOString()}] collect_marketplace_homepage_error ${message}\n`);
-  console.error(message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[${new Date().toISOString()}] collect_marketplace_homepage_error ${message}\n`);
+    console.error(message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseArgs,
+};

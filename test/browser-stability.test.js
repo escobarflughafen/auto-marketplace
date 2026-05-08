@@ -2,10 +2,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildMarketplaceRadiusPatterns,
+  inferMarketplaceAreaFromLocation,
+  normalizeRadiusMiles,
   safeGotoWithOptions,
   waitForPageReady,
   scrollMarketplaceResults,
   expandMarketplaceListingDetails,
+  extractListingContent,
+  urlMatchesMarketplaceArea,
 } = require('../scripts/marketplace-utils');
 
 function createMockPage(name, behavior = {}) {
@@ -188,4 +193,67 @@ test('expandMarketplaceListingDetails clicks expandable controls across passes',
   assert.equal(page.state.calls.filter((call) => call.type === 'waitForTimeout').length, 2);
   assert.ok(messages.some((message) => message.includes('listing_expand pass=1/3')));
   assert.ok(messages.some((message) => message.includes('listing_expand_done clicks=3')));
+});
+
+test('inferMarketplaceAreaFromLocation normalizes city names for Marketplace route slugs', () => {
+  assert.equal(inferMarketplaceAreaFromLocation('Ottawa, Ontario'), 'ottawa');
+  assert.equal(inferMarketplaceAreaFromLocation(' North Vancouver, BC '), 'north-vancouver');
+});
+
+test('urlMatchesMarketplaceArea recognizes Marketplace area routes', () => {
+  assert.equal(urlMatchesMarketplaceArea('https://www.facebook.com/marketplace/ottawa/search/?query=canon', 'Ottawa, Ontario'), true);
+  assert.equal(urlMatchesMarketplaceArea('https://www.facebook.com/marketplace/vancouver/', 'Ottawa, Ontario'), false);
+});
+
+test('radius helpers normalize miles and generate label patterns', () => {
+  assert.equal(normalizeRadiusMiles('10'), 10);
+  assert.equal(normalizeRadiusMiles(0), 0);
+
+  const patterns = buildMarketplaceRadiusPatterns(10);
+  assert.ok(patterns.some((pattern) => pattern.test('10 miles')));
+  assert.ok(patterns.some((pattern) => pattern.test('10 mi')));
+  assert.ok(patterns.some((pattern) => pattern.test('16 km')));
+});
+
+test('extractListingContent parses localized sold listing details without folding description into condition', () => {
+  const text = [
+    '商品交易小组 已售 · Plaubel Makina IIs 6x9cm Camera Outfit, Circa 1940 CA$ 1,950CA$ 2,100',
+    '1 周前 · Vancouver, BC 公共场所见面 收藏 分享 详细信息',
+    '商品状况 二手 - 成色好 A wonderful, large Makina kit, this one comes in its original case.',
+    'This has been serviced, and is working flawlessly. 查看翻译 Vancouver, BC 我们只提供大概位置',
+    '卖家信息 卖家详细信息 Randy Cole (63) 加入 Facebook 的时间：2009年',
+  ].join(' ');
+
+  const listing = extractListingContent(text);
+
+  assert.equal(listing.title, '已售 · Plaubel Makina IIs 6x9cm Camera Outfit, Circa 1940');
+  assert.equal(listing.price, 'CA$ 1,950');
+  assert.equal(listing.previousPrice, 'CA$ 2,100');
+  assert.equal(listing.listedAgo, '1 周前');
+  assert.equal(listing.location, 'Vancouver, BC');
+  assert.equal(listing.condition, '二手 - 成色好');
+  assert.equal(
+    listing.description,
+    'A wonderful, large Makina kit, this one comes in its original case. This has been serviced, and is working flawlessly.',
+  );
+  assert.equal(listing.sellerName, 'Randy Cole');
+});
+
+test('extractListingContent parses available localized listing location', () => {
+  const text = [
+    '商品交易小组 Vintage Eddie Bauer down jacket talon zipper CA$ 80 · 有货 · Vancouver, BC 发消息',
+    '详细信息 商品状况 二手 - 成色好 Size medium. Fair bit of wear but it’s a great jacket.',
+    '查看翻译 Vancouver, BC 我们只提供大概位置 卖家信息 卖家详细信息 Max Ke (9)',
+    '加入 Facebook 的时间：2016年',
+  ].join(' ');
+
+  const listing = extractListingContent(text);
+
+  assert.equal(listing.title, 'Vintage Eddie Bauer down jacket talon zipper');
+  assert.equal(listing.price, 'CA$ 80');
+  assert.equal(listing.listedAgo, '');
+  assert.equal(listing.location, 'Vancouver, BC');
+  assert.equal(listing.condition, '二手 - 成色好');
+  assert.equal(listing.description, 'Size medium. Fair bit of wear but it’s a great jacket.');
+  assert.equal(listing.sellerName, 'Max Ke');
 });

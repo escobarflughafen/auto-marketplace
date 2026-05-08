@@ -2,9 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const {
+  inferMarketplaceAreaFromLocation,
   createLogger,
   ensureDir,
   safeGoto,
+  setMarketplaceLocation,
+  setMarketplaceRadius,
   waitForMarketplaceResults,
   scrollMarketplaceResults,
   cleanText,
@@ -56,6 +59,9 @@ function parseArgs(argv) {
   const options = {
     query: '',
     area: DEFAULT_AREA,
+    areaExplicit: false,
+    location: '',
+    radiusMiles: 0,
     searchUrlTemplate: DEFAULT_SEARCH_URL_TEMPLATE,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     dbPath: DEFAULT_DB_PATH,
@@ -92,6 +98,15 @@ function parseArgs(argv) {
         break;
       case '--area':
         options.area = readFlagValue(argv, index, arg);
+        options.areaExplicit = true;
+        index += 1;
+        break;
+      case '--location':
+        options.location = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--radius-miles':
+        options.radiusMiles = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
         index += 1;
         break;
       case '--search-url-template':
@@ -215,6 +230,11 @@ function parseArgs(argv) {
   options.query = normalizeKeyword(options.query);
   if (!options.query) {
     throw new Error('Missing required search keyword. Pass --query "<keyword>".');
+  }
+
+  options.location = cleanText(options.location);
+  if (!options.areaExplicit && options.location) {
+    options.area = inferMarketplaceAreaFromLocation(options.location) || DEFAULT_AREA;
   }
 
   if (options.refreshJitterMax < options.refreshJitterMin) {
@@ -621,7 +641,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" area=${options.area} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} use_credentials=${options.useCredentials}`,
+    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} use_credentials=${options.useCredentials}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -639,6 +659,16 @@ async function main() {
       useCredentials: options.useCredentials,
       credentialsPath: options.credentialsPath,
       loginTimeoutMs: options.loginTimeoutMs,
+      logger: log,
+    });
+    page = await setMarketplaceLocation(page, {
+      location: options.location,
+      fallbackArea: options.area,
+      allowMissingControl: true,
+      logger: log,
+    });
+    page = await setMarketplaceRadius(page, {
+      radiusMiles: options.radiusMiles,
       logger: log,
     });
     const initialSessionSummary = await describeFacebookMarketplaceSession(context, page, {
