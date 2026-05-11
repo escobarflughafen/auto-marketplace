@@ -227,7 +227,7 @@ test('extractListingContent parses localized sold listing details without foldin
 
   const listing = extractListingContent(text);
 
-  assert.equal(listing.title, '已售 · Plaubel Makina IIs 6x9cm Camera Outfit, Circa 1940');
+  assert.equal(listing.title, 'Plaubel Makina IIs 6x9cm Camera Outfit, Circa 1940');
   assert.equal(listing.availabilityStatus, 'sold');
   assert.equal(listing.price, 'CA$ 1,950');
   assert.equal(listing.previousPrice, 'CA$ 2,100');
@@ -264,5 +264,45 @@ test('extractListingContent parses available localized listing location', () => 
 test('detectListingAvailability recognizes pending Marketplace listings', () => {
   const availability = detectListingAvailability('Marketplace Pending · Leica M6 CA$ 3,800 Vancouver, BC');
   assert.equal(availability.status, 'pending_sale');
-  assert.equal(availability.reason, 'pending_signal');
+  assert.equal(availability.reason, 'pending_marker');
+});
+
+test('detectListingAvailability ignores sold signals in recommendations', () => {
+  const text = [
+    '商品交易小组 0:00 / 0:00 Leica SL2-S CA$ 2,999CA$ 3,300 5周前 · Montréal, QC 发消息',
+    '详细信息 商品状况 二手 - 成色好 Disponible Plateau Mont Royal, Montréal',
+    'Boîtier Leica SL2-S en bon état général. Tout fonctionne parfaitement.',
+    '卖家信息 卖家详细信息 Kevin Fouillet (41) 加入 Facebook 的时间：2009年',
+    '赞助内容 Jollibee Canada Joyful adventure awaits at Jollibee!',
+    '今日精选 CA$ 80 Light Meters - Sekonic L-308X-U / Minolta Auto Meter III F SOLD SEPARATELY QCMontréal',
+  ].join(' ');
+
+  const availability = detectListingAvailability(text, 'Leica SL2-S');
+  assert.equal(availability.status, 'unknown');
+  assert.equal(availability.reason, 'no_signal');
+});
+
+test('detectListingAvailability does not treat sold separately as listing sold', () => {
+  const availability = detectListingAvailability('Light Meters - Sekonic L-308X-U / Minolta Auto Meter III F SOLD SEPARATELY');
+  assert.equal(availability.status, 'unknown');
+  assert.equal(availability.reason, 'no_signal');
+});
+
+test('detectListingAvailability only trusts Marketplace status markers', () => {
+  assert.deepEqual(
+    detectListingAvailability('Marketplace Leica M6 Sold separately with accessories CA$ 3,800 Vancouver, BC'),
+    { status: 'unknown', reason: 'no_signal' },
+  );
+  assert.deepEqual(
+    detectListingAvailability('Marketplace Sold · Leica M6 CA$ 3,800 Vancouver, BC'),
+    { status: 'sold', reason: 'sold_marker' },
+  );
+  assert.deepEqual(
+    detectListingAvailability('Marketplace Pending · Leica M6 CA$ 3,800 Vancouver, BC'),
+    { status: 'pending_sale', reason: 'pending_marker' },
+  );
+  assert.deepEqual(
+    detectListingAvailability('Marketplace Leica M6 CA$ 3,800 · Available · Vancouver, BC'),
+    { status: 'available', reason: 'available_marker' },
+  );
 });

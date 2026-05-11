@@ -719,27 +719,72 @@ function extractByRegex(pageText, patterns) {
   return '';
 }
 
+function primaryListingTextForAvailability(pageText) {
+  const text = cleanText(pageText || '');
+  if (!text) {
+    return '';
+  }
+
+  const cutoffPatterns = [
+    /\s赞助内容\s/u,
+    /\s发消息给卖家\s/u,
+    /\s发送\s+今日精选\s/u,
+    /\s今日精选\s/u,
+    /\sSponsored\s/iu,
+    /\sMessage seller\s/iu,
+    /\sToday's picks\s/iu,
+    /\sMore from seller\s/iu,
+    /\sRelated listings\s/iu,
+  ];
+
+  const cutoff = cutoffPatterns.reduce((earliest, pattern) => {
+    const match = pattern.exec(text);
+    if (!match || match.index <= 0) {
+      return earliest;
+    }
+    return earliest === -1 ? match.index : Math.min(earliest, match.index);
+  }, -1);
+
+  return cutoff === -1 ? text : text.slice(0, cutoff);
+}
+
+function extractMarketplaceStatusMarker(pageText) {
+  const text = primaryListingTextForAvailability(pageText);
+  if (!text) {
+    return null;
+  }
+
+  const titleStatusPatterns = [
+    /(?:^|\s)(?:Marketplace|商品交易小组)\s+(Sold|已售|售出|已卖)\s*·\s+/iu,
+    /(?:^|\s)(?:Marketplace|商品交易小组)\s+(Pending|待处理|交易待定|待定)\s*·\s+/iu,
+  ];
+
+  for (const pattern of titleStatusPatterns) {
+    const match = pattern.exec(text);
+    if (!match) {
+      continue;
+    }
+    const marker = cleanText(match[1]);
+    if (/^(?:Sold|已售|售出|已卖)$/iu.test(marker)) {
+      return { status: 'sold', reason: 'sold_marker' };
+    }
+    if (/^(?:Pending|待处理|交易待定|待定)$/iu.test(marker)) {
+      return { status: 'pending_sale', reason: 'pending_marker' };
+    }
+  }
+
+  if (/(?:^|\s|·)\s*(?:Available|Disponible|有货)\s*·/iu.test(text)) {
+    return { status: 'available', reason: 'available_marker' };
+  }
+
+  return null;
+}
+
 function detectListingAvailability(pageText, title = '') {
-  const text = cleanText(`${title || ''} ${pageText || ''}`);
-  if (/(?:^|\s|·)(?:Sold|已售|售出|已卖)(?:\s|·|$)/iu.test(text)) {
-    return {
-      status: 'sold',
-      reason: 'sold_signal',
-    };
-  }
-
-  if (/(?:^|\s|·)(?:Pending|待处理|交易待定|待定)(?:\s|·|$)/iu.test(text)) {
-    return {
-      status: 'pending_sale',
-      reason: 'pending_signal',
-    };
-  }
-
-  if (/(?:^|\s|·)(?:Available|有货)(?:\s|·|$)/iu.test(text)) {
-    return {
-      status: 'available',
-      reason: 'available_signal',
-    };
+  void title;
+  const marker = extractMarketplaceStatusMarker(pageText);
+  if (marker) {
+    return marker;
   }
 
   return {
@@ -750,10 +795,11 @@ function detectListingAvailability(pageText, title = '') {
 
 function extractListingContent(pageText, fallbackTitle = '') {
   const text = cleanText(pageText);
-  const title = extractByRegex(text, [
+  const rawTitle = extractByRegex(text, [
     /商品交易小组\s+(.+?)\s+CA\$/u,
     /Marketplace\s+(.+?)\s+CA\$/u,
   ]) || fallbackTitle || 'item';
+  const title = cleanText(rawTitle.replace(/^(?:Sold|Pending|已售|售出|已卖|待处理|交易待定|待定)\s*·\s*/iu, '')) || rawTitle;
 
   const price = extractByRegex(text, [
     new RegExp(`${escapeForRegex(title)}\\s+(CA\\$\\s?[\\d,]+(?:\\.\\d{2})?)`, 'u'),
@@ -979,6 +1025,8 @@ module.exports = {
   captureListingThumbnails,
   cleanText,
   readListingTitle,
+  primaryListingTextForAvailability,
+  extractMarketplaceStatusMarker,
   detectListingAvailability,
   extractListingContent,
   writeListingSnapshot,
