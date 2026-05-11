@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Marketplace homepage SQLite maintenance every 6 hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=marketplace-db-maintenance.service
+
+[Install]
+WantedBy=timers.target

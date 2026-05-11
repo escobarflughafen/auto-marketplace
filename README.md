@@ -12,6 +12,8 @@ Current command surface:
 - `marketplace:search:explore`: search collector that reseeds from discovered titles
 - `marketplace:home:process`: backlog worker that visits queued listings for details
 - `marketplace:home:backlog:indexes`: read-only backlog index/ordering preview tool
+- `marketplace:home:db:maintain`: SQLite optimize/checkpoint/report command for scheduled maintenance
+- `marketplace:home:tier3:dry-run`: local verdict dry-run over resolved detail artifacts
 - `marketplace:home:serve`: local Tabulator-based management UI for browsing rows and controlling workers
 
 ## Requirements
@@ -180,6 +182,45 @@ Preview the installed backlog indexes and the rows a resolver would claim for a 
 ```bash
 npm run marketplace:home:backlog:indexes -- --backlog-order earliest --seen-time-field first_seen --status-filter pending --limit 20
 ```
+
+Run lightweight SQLite maintenance without starting any worker:
+
+```bash
+npm run marketplace:home:db:maintain
+```
+
+Use `--dry-run` for a DB/WAL/row-count report, `--analyze` for a statistics refresh, and reserve `--vacuum` for quiet manual maintenance windows. See `docs/marketplace-db-maintenance.md` for cron and macOS LaunchAgent examples.
+
+Run a Tier 3-style verdict dry run over resolved detail artifacts:
+
+```bash
+npm run marketplace:home:tier3:dry-run -- --listing-id 4444173605902543 --json
+```
+
+The dry run normalizes the resolved detail text, infers a product profile, checks artifact quality, scores fit/value/actionability/risk against a configurable history profile, and emits a structured `escalate` / `watch` / `skip` / `stale` verdict. Use `--history-profile profile.json` to replace the default camera-oriented example profile with real buying/selling preferences.
+
+Migrate local source plus collected Marketplace runtime data to the remote server:
+
+```bash
+ops/migrate-marketplace-runtime-to-remote.sh
+ops/migrate-marketplace-runtime-to-remote.sh --execute
+```
+
+The migration script defaults to dry-run. With `--execute`, it checkpoints the local SQLite DB, creates a timestamped remote backup of `artifacts/marketplace-homepage`, syncs source and runtime artifacts to `10.10.20.3:/srv/auto-browser/app`, rebuilds/restarts Docker Compose, and runs remote DB maintenance. It excludes credentials, browser profiles, `.git`, dependencies, and other non-runtime generated folders from the source sync.
+
+For a least-privileged Ubuntu deployment user, copy and run this once on the server:
+
+```bash
+sudo ops/ubuntu-create-auto-browser-user.sh
+```
+
+That creates an `auto-browser` service user, grants Docker group access, owns `/srv/auto-browser/app`, and does not grant passwordless sudo. After that, migrate from local as the service user:
+
+```bash
+ops/migrate-marketplace-runtime-to-remote.sh --execute --remote-user auto-browser
+```
+
+See `docs/remote-migration.md` for the full Ubuntu service-user migration process, including the Docker container-name conflict cleanup when moving from `/home/aoi/services/auto-browser` to `/srv/auto-browser/app`.
 
 Browse the homepage database in a local web UI:
 
@@ -419,6 +460,7 @@ API endpoints used by the frontend:
 - `GET /api/listings?q=<query>&limit=<n>&offset=<n>&sort=<field>&sortDir=<asc|desc>`
 - `POST /api/listings/resolve`
 - `GET /api/workflows`
+- `GET /api/workflows/:id`
 - `POST /api/workflows/start`
 - `POST /api/workflows/stop`
 - `POST /api/workflows/reconcile`
@@ -595,6 +637,24 @@ For `marketplace:home:backlog:indexes`:
 - `--seen-after <date-or-iso-timestamp>`
 - `--seen-before <date-or-iso-timestamp>`
 - `--limit <n>`
+- `--json`
+
+For `marketplace:home:db:maintain`:
+
+- `--db-path <file>`
+- `--dry-run`
+- `--json`
+- `--checkpoint` / `--no-checkpoint`
+- `--optimize` / `--no-optimize`
+- `--analyze`
+- `--vacuum`
+
+For `marketplace:home:tier3:dry-run`:
+
+- `--details-dir <dir>`
+- `--listing-id <id>`
+- `--limit <n>`
+- `--history-profile <json-file>`
 - `--json`
 
 For `marketplace:home:export`:

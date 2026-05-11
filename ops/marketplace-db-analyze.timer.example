@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Marketplace homepage SQLite statistics refresh weekly
+
+[Timer]
+OnCalendar=Sun 03:30
+Persistent=true
+Unit=marketplace-db-analyze.service
+
+[Install]
+WantedBy=timers.target

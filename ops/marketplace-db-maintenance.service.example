@@ -1,0 +1,12 @@
+[Unit]
+Description=Marketplace homepage SQLite maintenance
+Documentation=README.md
+
+[Service]
+Type=oneshot
+User=aoi
+Group=aoi
+WorkingDirectory=/home/aoi/services/auto-browser
+ExecStart=/usr/bin/env npm run marketplace:home:db:maintain -- --json
+StandardOutput=append:/home/aoi/services/auto-browser/artifacts/marketplace-homepage/db-maintenance.log
+StandardError=append:/home/aoi/services/auto-browser/artifacts/marketplace-homepage/db-maintenance.err.log

@@ -1,0 +1,11 @@
+# Marketplace homepage SQLite maintenance.
+# Install with: crontab ops/marketplace-db-maintenance.cron.example
+#
+# The frequent task keeps WAL files small and lets SQLite refresh planner hints.
+# The weekly task refreshes broader statistics during a quiet window.
+
+SHELL=/bin/zsh
+PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+
+0 */6 * * * cd /Users/aoi/Workspaces/auto-browser && npm run marketplace:home:db:maintain -- --json >> artifacts/marketplace-homepage/db-maintenance.log 2>&1
+30 3 * * 0 cd /Users/aoi/Workspaces/auto-browser && npm run marketplace:home:db:maintain -- --analyze --json >> artifacts/marketplace-homepage/db-maintenance.log 2>&1
