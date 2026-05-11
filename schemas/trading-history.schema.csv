@@ -1,0 +1,75 @@
+field_name,required,type,allowed_values,description,suggestion_usage,example
+record_id,yes,string,,Stable unique row id for this trade or decision row.,Audit join key,trade-2026-001
+record_version,no,integer,,Schema row version for future migrations.,Validation,1
+record_source,yes,enum,manual|import|marketplace_artifact|external_comp,How this row entered the history file.,Trust and audit weighting,manual
+source_platform,yes,enum,facebook_marketplace|craigslist|kijiji|ebay|retail|private_sale|other,Original marketplace or source.,Source-specific risk and comp interpretation,facebook_marketplace
+source_listing_id,no,string,,Marketplace listing id when available.,Deduplicate against resolver artifacts,4444173605902543
+source_url,no,string,,Original URL when safe to store.,Audit trail,https://www.facebook.com/marketplace/item/4444173605902543/
+canonical_key,no,string,,Manual normalized key such as brand model mount variant.,Groups repeated buying and selling experience,leica-sl2-s-body
+transaction_type,yes,enum,buy|sell|trade|watch|skip|comp,What kind of row this is.,Separates personal outcomes from external comps,buy
+decision,yes,enum,bought|sold|skipped|watched|escalated|rejected|comp_only,Decision taken by user or system.,Learns escalation precision,bought
+outcome,yes,enum,sold_profitable|sold_break_even|loss|keeper|good_buy|bad_buy|condition_problem|scam_risk|missed|pending|unknown,Final outcome if known.,Learns good and bad patterns,sold_profitable
+decision_at,no,date,YYYY-MM-DD,Date the buy or skip decision was made.,Freshness of personal preference,2026-03-12
+listed_at,no,date,YYYY-MM-DD,Approximate source listing date.,Sell-through and freshness analysis,2026-03-10
+purchase_at,no,date,YYYY-MM-DD,Date purchased.,Holding-period calculation,2026-03-12
+sold_at,no,date,YYYY-MM-DD,Date sold.,Sell-through calculation,2026-03-29
+category,yes,string,,Top-level normalized category.,Primary history match,camera_gear
+subcategory,no,string,,More specific category.,Better model matching,camera_body
+brand,yes,string,,Normalized brand in lowercase when possible.,Brand preference match,leica
+model,yes,string,,Normalized model family.,Same-model history match,sl2-s
+variant,no,string,,Version color kit year or other model variant.,Avoids false matches,body only
+mount,no,string,,Camera/lens mount or compatibility field when relevant.,Identity confidence,l-mount
+color,no,string,,Color or finish.,Variant matching,black
+bundle_type,no,enum,single|bundle|kit|lot|unknown,Whether the purchase included extras.,Bundle value signal,bundle
+title,yes,string,,Original or normalized listing title.,Text matching,Leica SL2-S body
+description_summary,no,string,,Short manual summary of the important description facts.,Condition and risk matching,Clean body with box and charger
+condition_grade,no,enum,new|like_new|good|fair|poor|for_parts|unknown,Normalized condition grade.,Condition risk and resale value,good
+condition_notes,no,string,,Free-text condition details.,Risk and issue extraction,minor brassing no sensor dust
+issue_flags,no,list,pipe-separated,Known issue tags.,Avoid/risk learning,fungus|not_tested
+included_items,no,list,pipe-separated,Included accessories or bundle items.,Bundle value,box|charger|battery|strap
+missing_items,no,list,pipe-separated,Missing accessories.,Margin and resale friction,body_cap|charger
+location_city,no,string,,City of transaction or listing.,Location friction,Ottawa
+location_region,no,string,,Province state or region.,Location friction,ON
+location_country,no,string,,Country code or name.,Currency and distance assumptions,CA
+distance_km,no,number,,Approximate travel distance from buyer base.,Pickup friction,12
+pickup_complexity,no,enum,easy|moderate|hard|shipping_only|unknown,Manual pickup or delivery friction.,Actionability score,easy
+seller_type,no,enum,individual|dealer|unknown,Seller classification.,Risk and negotiation assumptions,individual
+seller_name_hash,no,string,,Optional hashed seller identity instead of raw name.,Repeat seller audit without storing PII,seller_7f32
+seller_rating,no,number,,Seller rating when available.,Seller risk,4.9
+seller_joined_year,no,integer,,Year seller joined platform when visible.,Seller risk,2016
+seller_risk_flags,no,list,pipe-separated,Seller risk tags.,Risk learning,new_account|deposit_pressure
+list_price_cad,no,number,,Observed asking/list price in CAD.,Value score,2600
+purchase_price_cad,no,number,,Actual paid price in CAD.,Price band learning,2400
+sold_price_cad,no,number,,Actual resale price in CAD.,Expected resale learning,3100
+fees_cad,no,number,,Marketplace payment platform or selling fees.,Net margin,95
+shipping_cad,no,number,,Shipping cost paid by you.,Net margin,28
+tax_cad,no,number,,Tax paid if relevant.,Net margin,0
+travel_cost_cad,no,number,,Estimated travel cost.,Net margin,12
+repair_cost_cad,no,number,,Repair cleaning or parts cost.,Risk-adjusted margin,80
+other_cost_cad,no,number,,Other costs.,Net margin,0
+net_cost_cad,no,number,,Total cost basis if already calculated.,Value score,2615
+realized_profit_cad,no,number,,Final realized profit after costs.,Positive/negative outcome learning,392
+roi_percent,no,number,,Realized return on cost basis.,Preference weighting,15.0
+days_to_sell,no,integer,,Days from purchase/list to resale.,Liquidity and sell-through,17
+target_buy_price_cad,no,number,,Manual future target buy price for similar items.,Escalation threshold,2500
+expected_sell_price_cad,no,number,,Manual expected resale price for similar items.,Margin estimate,3100
+expected_net_margin_cad,no,number,,Manual projected net margin for similar items.,Escalation threshold,350
+market_floor_cad,no,number,,Observed low clean-market comparable.,Value context,2800
+market_median_cad,no,number,,Observed median comparable.,Value context,3200
+market_ceiling_cad,no,number,,Observed high comparable.,Value context,3600
+comps_count,no,integer,,Number of comps behind market fields.,Confidence weighting,8
+comp_source,no,string,,Where comps came from.,Audit,ebay_sold|fb_saved
+demand_score,no,number,0-1,Manual demand score.,Sell-through estimate,0.8
+liquidity_score,no,number,0-1,Manual liquidity score.,Sell-through estimate,0.7
+confidence_score,no,number,0-1,Overall confidence in this row.,Row weighting,0.9
+price_confidence_score,no,number,0-1,Confidence in price/value fields.,Value weighting,0.85
+identity_confidence_score,no,number,0-1,Confidence that model identity is correct.,Identity risk,0.95
+condition_risk_score,no,number,0-1,Higher means more condition risk.,Risk score,0.2
+seller_risk_score,no,number,0-1,Higher means more seller risk.,Risk score,0.1
+watchlist_match,no,boolean,true|false,Whether this matched a personal watchlist target.,Escalation boost,true
+avoid_keywords,no,list,pipe-separated,Extra bad keywords learned from this row.,Avoid list,separation|icloud_locked
+notes,no,string,,Human notes for audit.,Audit context,Fast sale after clean photos
+artifact_paths,no,list,pipe-separated,Local artifacts related to this row.,Artifact join,artifacts/marketplace-homepage/details/444.md
+listing_snapshot_id,no,string,,Resolver snapshot or DB listing id.,Join to local DB,4444173605902543
+created_at,no,datetime,ISO-8601,Row creation timestamp.,Audit,2026-05-11T10:00:00Z
+updated_at,no,datetime,ISO-8601,Last update timestamp.,Audit,2026-05-11T10:00:00Z

@@ -195,9 +195,10 @@ Run a Tier 3-style verdict dry run over resolved detail artifacts:
 
 ```bash
 npm run marketplace:home:tier3:dry-run -- --listing-id 4444173605902543 --json
+npm run marketplace:home:tier3:dry-run -- --history-csv examples/trading-history.example.csv --limit 5 --json
 ```
 
-The dry run normalizes the resolved detail text, infers a product profile, checks artifact quality, scores fit/value/actionability/risk against a configurable history profile, and emits a structured `escalate` / `watch` / `skip` / `stale` verdict. Use `--history-profile profile.json` to replace the default camera-oriented example profile with real buying/selling preferences.
+The dry run normalizes the resolved detail text, infers a product profile, checks artifact quality, scores fit/value/actionability/risk against a configurable history profile, and emits a structured `escalate` / `watch` / `skip` / `stale` verdict. Use `--history-csv trading-history.csv` for the preferred personal trading-history format, or `--history-profile profile.json` for the older JSON profile. The CSV schema lives at `schemas/trading-history.schema.csv`; see `docs/trading-history-csv.md`.
 
 Migrate local source plus collected Marketplace runtime data to the remote server:
 
@@ -655,6 +656,7 @@ For `marketplace:home:tier3:dry-run`:
 - `--listing-id <id>`
 - `--limit <n>`
 - `--history-profile <json-file>`
+- `--history-csv <csv-file>`
 - `--json`
 
 For `marketplace:home:export`:

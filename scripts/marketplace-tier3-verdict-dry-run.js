@@ -45,6 +45,7 @@ function parseArgs(argv) {
     limit: 10,
     json: false,
     historyProfilePath: '',
+    historyCsvPath: '',
   };
 
   for (let index = 2; index < argv.length; index += 1) {
@@ -62,6 +63,9 @@ function parseArgs(argv) {
       case '--history-profile':
         options.historyProfilePath = path.resolve(argv[++index] || '');
         break;
+      case '--history-csv':
+        options.historyCsvPath = path.resolve(argv[++index] || '');
+        break;
       case '--json':
         options.json = true;
         break;
@@ -76,7 +80,147 @@ function parseArgs(argv) {
   return options;
 }
 
-function readHistoryProfile(profilePath) {
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let value = '';
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (quoted) {
+      if (char === '"' && next === '"') {
+        value += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(value);
+      value = '';
+    } else if (char === '\n') {
+      row.push(value);
+      rows.push(row);
+      row = [];
+      value = '';
+    } else if (char !== '\r') {
+      value += char;
+    }
+  }
+
+  if (value !== '' || row.length > 0) {
+    row.push(value);
+    rows.push(row);
+  }
+
+  const [header = [], ...dataRows] = rows.filter((csvRow) => csvRow.some((cell) => String(cell || '').trim() !== ''));
+  return dataRows.map((csvRow) => Object.fromEntries(header.map((name, index) => [
+    cleanText(name),
+    cleanText(csvRow[index] || ''),
+  ])));
+}
+
+function splitList(value) {
+  return String(value || '')
+    .split(/[|;]/u)
+    .map((item) => cleanText(item).toLowerCase())
+    .filter(Boolean);
+}
+
+function parseNumberValue(value) {
+  const text = String(value || '').replace(/[$,%\s,]/g, '');
+  if (!text) {
+    return null;
+  }
+  const parsed = Number.parseFloat(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function percentile(values, ratio) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((left, right) => left - right);
+  if (sorted.length === 0) {
+    return null;
+  }
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * ratio)));
+  return sorted[index];
+}
+
+function isPositiveHistoryRow(row) {
+  const outcome = String(row.outcome || row.verdict || '').toLowerCase();
+  const decision = String(row.decision || '').toLowerCase();
+  const profit = parseNumberValue(row.realized_profit_cad);
+  const roi = parseNumberValue(row.roi_percent);
+  return (
+    ['sold_profitable', 'profitable', 'keeper', 'good_buy', 'fast_resale', 'escalated_success'].includes(outcome)
+    || ['bought', 'sold', 'escalated'].includes(decision)
+    || profit > 0
+    || roi >= 10
+  );
+}
+
+function deriveHistoryProfileFromRows(rows) {
+  const positiveRows = rows.filter(isPositiveHistoryRow);
+  const preferredCategories = [...new Set(positiveRows.map((row) => cleanText(row.category).toLowerCase()).filter(Boolean))];
+  const preferredBrands = [...new Set(positiveRows.map((row) => cleanText(row.brand).toLowerCase()).filter(Boolean))];
+  const avoidKeywords = [...new Set([
+    ...DEFAULT_HISTORY_PROFILE.avoidKeywords,
+    ...rows.flatMap((row) => splitList(row.avoid_keywords)),
+    ...rows
+      .filter((row) => ['bad_buy', 'loss', 'scam_risk', 'condition_problem', 'skipped'].includes(String(row.outcome || '').toLowerCase()))
+      .flatMap((row) => splitList(row.issue_flags)),
+  ])];
+
+  const categories = [...new Set([...preferredCategories, ...rows.map((row) => cleanText(row.category).toLowerCase()).filter(Boolean)])];
+  const priceBands = { ...DEFAULT_HISTORY_PROFILE.priceBands };
+  for (const category of categories) {
+    const prices = positiveRows
+      .filter((row) => cleanText(row.category).toLowerCase() === category)
+      .map((row) => (
+        parseNumberValue(row.purchase_price_cad)
+        ?? parseNumberValue(row.list_price_cad)
+        ?? parseNumberValue(row.sold_price_cad)
+      ))
+      .filter((value) => value !== null);
+    if (prices.length > 0) {
+      const low = Math.max(0, Math.floor(percentile(prices, 0.1) * 0.7));
+      const targetMax = Math.max(low, Math.ceil(percentile(prices, 0.85) * 1.15));
+      priceBands[category] = { low, targetMax };
+    }
+  }
+
+  return {
+    ...DEFAULT_HISTORY_PROFILE,
+    name: 'csv-trading-history-profile',
+    source: 'csv',
+    rowCount: rows.length,
+    positiveRowCount: positiveRows.length,
+    preferredCategories: preferredCategories.length ? preferredCategories : DEFAULT_HISTORY_PROFILE.preferredCategories,
+    preferredBrands: preferredBrands.length ? preferredBrands : DEFAULT_HISTORY_PROFILE.preferredBrands,
+    avoidKeywords,
+    priceBands,
+  };
+}
+
+function readHistoryCsvProfile(csvPath) {
+  const rows = parseCsv(fs.readFileSync(csvPath, 'utf8'));
+  return deriveHistoryProfileFromRows(rows);
+}
+
+function readHistoryProfile(profilePath, csvPath = '') {
+  if (profilePath && csvPath) {
+    throw new Error('Use only one of --history-profile or --history-csv');
+  }
+  if (csvPath) {
+    return readHistoryCsvProfile(csvPath);
+  }
   if (!profilePath) {
     return DEFAULT_HISTORY_PROFILE;
   }
@@ -184,7 +328,7 @@ function scoreVerdict(snapshot, historyProfile) {
   const product = inferProductProfile(snapshot.listingContent);
   const text = `${product.title} ${snapshot.listingContent.description || ''}`.toLowerCase();
   const priceBand = historyProfile.priceBands[product.category] || historyProfile.priceBands.other;
-  const reasonCodes = ['using_default_history_profile'];
+  const reasonCodes = [historyProfile.source === 'csv' ? 'using_csv_history_profile' : 'using_default_history_profile'];
   const qualityFlags = [];
 
   if (!product.title) qualityFlags.push('missing_title');
@@ -285,10 +429,10 @@ function renderVerdicts(verdicts) {
 function main() {
   const options = parseArgs(process.argv);
   if (options.help) {
-    console.log('Usage: node scripts/marketplace-tier3-verdict-dry-run.js [--listing-id ID] [--limit N] [--history-profile profile.json] [--json]');
+    console.log('Usage: node scripts/marketplace-tier3-verdict-dry-run.js [--listing-id ID] [--limit N] [--history-profile profile.json | --history-csv trading-history.csv] [--json]');
     return;
   }
-  const profile = readHistoryProfile(options.historyProfilePath);
+  const profile = readHistoryProfile(options.historyProfilePath, options.historyCsvPath);
   const artifactPaths = listArtifactPaths(options.detailsDir, options.listingId, options.limit);
   const verdicts = artifactPaths.map((artifactPath) => scoreVerdict(parseSnapshotMarkdown(artifactPath), profile));
 
@@ -305,6 +449,9 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_HISTORY_PROFILE,
+  parseCsv,
+  deriveHistoryProfileFromRows,
+  readHistoryCsvProfile,
   inferProductProfile,
   parseSnapshotMarkdown,
   scoreVerdict,

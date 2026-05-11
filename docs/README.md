@@ -3,6 +3,7 @@
 - [Marketplace Homepage Pipeline Overview](./marketplace-homepage-pipeline-overview.md)
 - [Marketplace Workflow Flowcharts](./marketplace-workflow-flowcharts.md)
 - [Marketplace SQLite Maintenance](./marketplace-db-maintenance.md)
+- [Trading History CSV](./trading-history-csv.md)
 - [Remote Migration](./remote-migration.md)
 - [Listing Data Platform Architecture](./listing-data-platform-architecture.md)
 
