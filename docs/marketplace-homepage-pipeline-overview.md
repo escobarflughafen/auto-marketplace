@@ -21,6 +21,8 @@ The design is intentionally minimal:
 
 That keeps the current implementation easy to inspect, easy to modify, and easy to operate from the terminal.
 
+For visual workflow diagrams, see [Marketplace Workflow Flowcharts](./marketplace-workflow-flowcharts.md).
+
 ## Main Features
 
 ### 1. Homepage-only collection
