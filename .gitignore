@@ -9,6 +9,8 @@ profiles/
 artifacts/
 reviews/
 facebook-marketplace.png
+.playwright-cli/
+output/
 *.log
 *.db
 *.db-shm

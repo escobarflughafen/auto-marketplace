@@ -219,7 +219,33 @@ That collector will:
 - otherwise wait for the refresh timer before re-running the search
 - optionally capture listing detail pages if you add `--detail-limit <n>`
 
-## 7. Expected behavior
+## 7. Current DB-backed homepage workflow
+
+The preferred local pipeline is now SQLite-backed:
+
+```bash
+npm run marketplace:home:collect
+npm run marketplace:home:process
+npm run marketplace:home:serve
+```
+
+Use `marketplace:home:collect` or `marketplace:search:explore` for discovery, and `marketplace:home:process` for asynchronous detail resolution. The resolver supports `--drain`, continuous mode, source/status/keyword filters, item and poll jitter, inactive sold/pending-sale bypass, and backlog start controls:
+
+```bash
+npm run marketplace:home:process -- --drain --backlog-order latest --seen-time-field last_seen --seen-after 2026-05-09T00:00:00.000Z
+```
+
+Before running a bounded resolver, preview candidate ordering and available SQLite indexes with:
+
+```bash
+npm run marketplace:home:backlog:indexes -- --backlog-order earliest --seen-time-field first_seen --status-filter pending --limit 20
+```
+
+The local management UI is served from `frontend/marketplace-monitor/` and opens at `http://127.0.0.1:3080` by default. It contains the Tabulator listings table, Worker Control, Worker Overview, and centered per-worker inspector with status, audit events, text history, and latest preview screenshot.
+
+Homepage location is most reliable through the Marketplace route slug inferred from `--location`; tested homepage radius controls were not reliably visible, so treat `--radius-miles` as best-effort on homepage routes.
+
+## 8. Expected behavior
 
 - The browser runs in headed mode by default.
 - If `--user-data-dir` is used, the browser profile is reused on the next run, so Facebook session data persists more naturally.
@@ -228,7 +254,7 @@ That collector will:
 - If the saved session is still valid, the script reuses it and skips login.
 - After setup, the browser stays open so you can continue browsing Marketplace manually.
 
-## 8. Recommended hybrid workflow
+## 9. Recommended hybrid workflow
 
 For repeated use, prefer a dedicated persistent profile:
 
@@ -240,7 +266,7 @@ That gives you a stable browser profile that keeps cookies and Facebook state be
 
 Avoid pointing this at your main personal Chrome profile while that browser is already in use. A dedicated automation profile is safer.
 
-## 9. Starting a browser for CDP control
+## 10. Starting a browser for CDP control
 
 On macOS, one common pattern is:
 

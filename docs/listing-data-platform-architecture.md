@@ -8,6 +8,18 @@ The core rule is:
 
 > Collectors are source-specific and replaceable. Events are durable. Labels are versioned. Canonical listing identity is source-independent.
 
+## Current Local Implementation Status
+
+As of May 2026, this repo is still a local single-node implementation:
+
+- Playwright collectors write Facebook Marketplace homepage/search observations into SQLite.
+- The backlog resolver claims SQLite rows, opens detail pages in a browser, writes detail fields and artifacts, and records append-only `listing_events`.
+- Resolver runs can be ordered by priority/rank/latest/earliest and bounded by `first_seen_at` or `last_seen_at`.
+- `marketplace:home:backlog:indexes` previews available SQLite indexes and candidate rows for a selected resolver order.
+- `marketplace:home:serve` exposes the DB through a Tabulator-based frontend with listings, worker controls, per-worker audit tables, and latest screenshot preview.
+
+This is useful for local iteration and auditing, but it is not the target multi-source platform yet. Known backend gaps are still transactional consistency around some event/state updates, explicit `workflow_run_id` on every listing event, FTS/index strategy for larger search workloads, and replacing expensive full-count table scans in the UI API.
+
 ## Current Problem
 
 The current collector has useful raw homepage data, but several fields are overloaded:

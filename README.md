@@ -2,7 +2,7 @@
 
 Playwright-based Facebook Marketplace automation.
 
-This repo has two main modes:
+Current command surface:
 
 - `marketplace`: interactive browser workflow, headed by default
 - `marketplace:doctor`: headless readiness and DB preflight check
@@ -11,7 +11,8 @@ This repo has two main modes:
 - `marketplace:home:collect`: homepage collector backed by a SQLite queue
 - `marketplace:search:explore`: search collector that reseeds from discovered titles
 - `marketplace:home:process`: backlog worker that visits queued listings for details
-- `marketplace:home:serve`: local web server for browsing homepage DB rows
+- `marketplace:home:backlog:indexes`: read-only backlog index/ordering preview tool
+- `marketplace:home:serve`: local Tabulator-based management UI for browsing rows and controlling workers
 
 ## Requirements
 
@@ -108,7 +109,7 @@ Homepage collection for just the first loaded homepage content, with no active s
 npm run marketplace:home:collect -- --use-credentials --first-load-only --initial-load-wait-ms 5000 --max-items 15
 ```
 
-Homepage collection after switching the Marketplace location to Ottawa, Ontario:
+Homepage collection from the Ottawa route slug:
 
 ```bash
 npm run marketplace:home:collect -- --use-credentials --location "Ottawa, Ontario" --once --max-items 15
@@ -126,7 +127,7 @@ Search-driven exploration with bounded results and configurable reseed cadence:
 npm run marketplace:search:explore -- --use-credentials --query "nikon d850" --max-items 100 --refresh-seconds 90 --reseed-round-min 10 --reseed-round-max 20
 ```
 
-Search-driven exploration in Ottawa, using both the Ottawa route slug and the UI location picker:
+Search-driven exploration in Ottawa, using the Ottawa route slug and attempting the UI location picker when Facebook exposes it:
 
 ```bash
 npm run marketplace:search:explore -- --use-credentials --query "nikon d850" --area ottawa --location "Ottawa, Ontario" --max-items 100 --once
@@ -150,11 +151,44 @@ Backlog processing for homepage-found listings:
 npm run marketplace:home:process -- --once
 ```
 
+Resolve the current eligible backlog and exit after pending/retryable rows are drained or the run limit is reached:
+
+```bash
+npm run marketplace:home:process -- --drain --batch-size 5 --limit 50
+```
+
+Run a continuous resolver for search-discovered pending rows, with jitter between listing detail visits:
+
+```bash
+npm run marketplace:home:process -- --status-filter pending --source-filter search --item-delay-seconds 8 --item-jitter-min 0.5 --item-jitter-max 1.5
+```
+
+Resolve the newest eligible rows first, using `last_seen_at` as the time index and a bounded seen-time window:
+
+```bash
+npm run marketplace:home:process -- --drain --backlog-order latest --seen-time-field last_seen --seen-after 2026-05-09T00:00:00.000Z --seen-before 2026-05-10T00:00:00.000Z
+```
+
+By default the resolver records sold or pending-sale Marketplace signals as `sold` / `pending_sale` and bypasses further processing for those rows. To manually revisit those rows:
+
+```bash
+npm run marketplace:home:process -- --status-filter sold --resolve-inactive --once
+```
+
+Preview the installed backlog indexes and the rows a resolver would claim for a selected ordering:
+
+```bash
+npm run marketplace:home:backlog:indexes -- --backlog-order earliest --seen-time-field first_seen --status-filter pending --limit 20
+```
+
 Browse the homepage database in a local web UI:
 
 ```bash
 npm run marketplace:home:serve
 ```
+
+The management UI is served from `frontend/marketplace-monitor/`; `scripts/serve-marketplace-homepage.js` provides the API, static file serving, Tabulator assets, and managed worker process controls.
+The UI keeps workflow drafts client-side, separates static workflow definitions from polling state, and exposes worker audit views from `listing_events`. Selecting a worker opens an exclusive detail view with a status table, grouped done/skipped/error/started event tables, text history, and the latest worker POV screenshot when available.
 
 Export all homepage DB rows to JSON:
 
@@ -234,8 +268,15 @@ The homepage pipeline is split into two small pieces so detail capture can run a
 - reports whether each polled row was `new`, `existing_same`, or `existing_updated`
 - `marketplace:home:process` claims pending rows from the same database
 - opens each listing URL in the browser, expands the page, captures details, and writes the results back into the database
+- can run once, continuously, or in drain mode with `--drain` to resolve the eligible backlog and exit
+- can restrict work by queue status, source, and keyword; continuous runs can add jittered polling and jittered delay between listing visits
+- can start from the priority/rank order, latest seen rows, or earliest seen rows
+- can bound eligible rows by `first_seen_at` or `last_seen_at` with `--seen-after` and `--seen-before`
+- detects sold/pending-sale detail pages and moves them out of the default backlog unless `--resolve-inactive` is set
+- records richer detail events including availability, seller rating, seller joined date, previous price, extraction completeness, screenshot paths, and snapshot paths
+- compares stable detail content instead of volatile raw page text before writing `content_changed` events
 - collector sleep between polls is jittered by default between `25%` and `150%` of `--refresh-seconds`
-- `marketplace:home:serve` exposes the same SQLite DB in a local browser UI with lightweight KQL-style filtering
+- `marketplace:home:serve` exposes the same SQLite DB in a local browser UI with KQL-style filtering, remote table sorting, worker controls, and per-worker audit views
 
 ## What The Search Explorer Does
 
@@ -249,6 +290,17 @@ The search explorer uses the same SQLite DB and browser profile, but changes how
 - on later rounds, picks a random bag entry as the next query
 - automatically falls back to the seed query again every `--reseed-round-min` to `--reseed-round-max` rounds
 - keeps all timing, scrolling, bag, and reseed behavior configurable through CLI arguments
+
+## Location Behavior
+
+Homepage location is controlled most reliably by the Marketplace route slug, for example `/marketplace/ottawa/`. A controlled homepage test on 2026-05-10 confirmed that `--location "Ottawa, Ontario"` reaches the Ottawa homepage route, while the homepage DOM did not expose a reliable location/radius picker and radius selection failed for `10` miles.
+
+Operational guidance:
+
+- use `--location "<city, region>"` for homepage collection so the collector navigates to the inferred route slug
+- treat `--radius-miles` as best-effort on homepage routes
+- search and interactive flows still attempt the UI location/radius controls when Facebook exposes them
+- location test artifacts are written under `artifacts/marketplace-homepage/location-tests/`
 
 Run them in separate terminals if you want continuous collection and continuous detail processing at the same time:
 
@@ -320,6 +372,20 @@ Supported server flags:
 - `--port <port>`
 - `--db-path <file>`
 
+Current UI layout:
+
+- header summary with queue counts and refresh state
+- one compact workspace surface below the header
+- Listings view backed by Tabulator remote pagination and remote sorting over `/api/listings`
+- KQL/query-builder filters plus shortcut filters and row-count controls
+- backlog resolve actions from the Listings table: single-row Fetch, Resolve Selected, and Resolve All In View
+- snapshot POV panel for selected listing artifacts
+- Worker Control split into two columns: workflow settings on the left, command preview and action buttons on the right
+- Worker Overview table that stays fully viewable below the control panel
+- centered worker inspector with current status, event category tables, text history, and latest screenshot preview
+
+Worker Control polling is intentionally split from form state. The frontend polls `/api/workflows` every few seconds for runtime status, but it only rebuilds workflow controls when workflow definitions change, so typing in fields should not jump the page or clear draft input.
+
 Query examples:
 
 - `nikon`
@@ -345,6 +411,20 @@ Supported query fields:
 - `before:`
 - `after:`
 - `sort:`
+
+API endpoints used by the frontend:
+
+- `GET /api/summary`
+- `GET /api/query-fields`
+- `GET /api/listings?q=<query>&limit=<n>&offset=<n>&sort=<field>&sortDir=<asc|desc>`
+- `POST /api/listings/resolve`
+- `GET /api/workflows`
+- `POST /api/workflows/start`
+- `POST /api/workflows/stop`
+- `POST /api/workflows/reconcile`
+- `GET /api/workflows/:id/stats`
+- `GET /api/workflows/:id/events?category=done|skipped|error|started|all&limit=50`
+- `GET /files/<artifact-path>`
 
 ## Data Format
 
@@ -471,9 +551,29 @@ For `marketplace:home:collect`:
 For `marketplace:home:process`:
 
 - `--once`
+- `--drain` / `--until-empty`
 - `--poll-interval-seconds <secs>`
+- `--poll-jitter-min <n>`
+- `--poll-jitter-max <n>`
+- `--item-delay-seconds <secs>`
+- `--item-jitter-min <n>`
+- `--item-jitter-max <n>`
 - `--batch-size <n>`
+- `--limit <n>`
 - `--stale-after-seconds <secs>`
+- `--retry-delay-seconds <secs>`
+- `--max-attempts <n>`
+- `--status-filter <all|pending|error|processing|sold|pending_sale|inactive>`
+- `--backlog-order <priority|rank|latest|earliest>`
+- `--seen-time-field <last_seen|first_seen>`
+- `--seen-after <date-or-iso-timestamp>`
+- `--seen-before <date-or-iso-timestamp>`
+- `--resolve-inactive`
+- `--source-filter <source>`
+- `--keyword-filter <text>`
+- `--listing-id <id>`
+- `--listing-ids <id,id,...>`
+- `--listing-id-file <json-or-text-file>`
 - `--db-path <file>`
 - `--capture-dir <dir>`
 - `--headed`
@@ -483,6 +583,19 @@ For `marketplace:home:serve`:
 - `--host <host>`
 - `--port <port>`
 - `--db-path <file>`
+
+For `marketplace:home:backlog:indexes`:
+
+- `--db-path <file>`
+- `--status-filter <all|pending|error|processing|sold|pending_sale|inactive>`
+- `--source-filter <source>`
+- `--keyword-filter <text>`
+- `--backlog-order <priority|rank|latest|earliest>`
+- `--seen-time-field <last_seen|first_seen>`
+- `--seen-after <date-or-iso-timestamp>`
+- `--seen-before <date-or-iso-timestamp>`
+- `--limit <n>`
+- `--json`
 
 For `marketplace:home:export`:
 

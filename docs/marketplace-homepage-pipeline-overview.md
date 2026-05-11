@@ -11,6 +11,7 @@ This project now includes a Facebook Marketplace homepage collection pipeline th
 - processes queued listing URLs asynchronously in a separate browser worker
 - captures listing details, screenshots, and markdown snapshots
 - provides a small local web server for browsing and querying collected rows
+- provides a Tabulator-based local management UI for worker control, listing review, and per-worker audit views
 
 The design is intentionally minimal:
 
@@ -114,9 +115,12 @@ The project also includes a lightweight local web server that reads the same SQL
 
 - browser-based row browsing
 - queue summary counts
-- pagination
+- Tabulator pagination and table sorting
 - KQL-style filtering
 - direct links to listing pages and captured artifacts
+- workflow controls for homepage collection, search exploration, and backlog resolution
+- listing-table resolve dispatch for one backlog row, selected backlog rows, or all backlog rows matching the current viewer query
+- per-worker status, text history, event audit tables, and latest POV screenshot preview
 
 ## Main Commands
 
@@ -152,11 +156,44 @@ One-pass processing:
 npm run marketplace:home:process -- --once
 ```
 
+Drain currently eligible pending/retryable rows, then exit:
+
+```bash
+npm run marketplace:home:process -- --drain --batch-size 5 --limit 50
+```
+
+When detail pages show sold or pending-sale signals, the worker stores the screenshot/snapshot POV and marks the row `sold` or `pending_sale` instead of treating it as a normal resolved detail capture. Default resolver runs skip those rows afterward; use `--status-filter sold --resolve-inactive` or `--status-filter pending_sale --resolve-inactive` when a manual revisit is needed.
+
+Resolver start controls:
+
+```bash
+npm run marketplace:home:process -- --drain --backlog-order latest --seen-time-field last_seen --seen-after 2026-05-09T00:00:00.000Z
+```
+
+The resolver can organize claim order by `priority`, `rank`, `latest`, or `earliest`. The time-based orders use either `last_seen_at` or `first_seen_at`, selected with `--seen-time-field`. `--seen-after` and `--seen-before` bound the eligible backlog by the selected time field.
+
+The resolver can also be scoped to exact listing IDs:
+
+```bash
+npm run marketplace:home:process -- --drain --listing-id 4444173605902543 --limit 1
+```
+
+The Listings UI uses the same path by writing a temporary batch file and starting a managed backlog worker with `--listing-id-file`.
+
+Use the read-only index preview tool before a resolver run when you want to inspect the actual candidate order:
+
+```bash
+npm run marketplace:home:backlog:indexes -- --backlog-order earliest --seen-time-field first_seen --status-filter pending --limit 20
+```
+
 ### Homepage browser UI
 
 ```bash
 npm run marketplace:home:serve
 ```
+
+The browser UI lives in `frontend/marketplace-monitor/` and uses the Node server as an API/process-management backend. Workflow form state is kept client-side per worker type so operator settings survive switching between workflows. The Worker Control panel is split into workflow settings and command preview/actions. The worker overview stays visible below it, and selecting a worker opens a centered detail view with status, preview, event tables, and text history.
+Managed backlog workers are started with their workflow run id as `--worker-id`, so `listing_events` can be used as a per-worker audit log. The worker detail view groups those events into done, skipped, errors, and started, and shows the latest screenshot as a live POV preview when available. Legacy `pid-*` event rows are linked to workflow runs by overlapping listing IDs in run logs.
 
 ## Coding Logic and Implementation
 
@@ -246,7 +283,11 @@ The high-level flow is:
 5. extract structured content from page text
 6. capture screenshot and thumbnail artifacts
 7. write listing detail results back to SQLite
-8. repeat until idle, then sleep
+8. repeat according to the selected mode:
+   - `--once`: process one batch and exit
+   - `--drain`: keep processing eligible rows until none are claimable, then exit
+   - default: run continuously and sleep when idle
+9. if a sold or pending-sale signal is confirmed, store the worker POV artifacts and move the row to `sold` or `pending_sale` unless explicitly resolving inactive rows
 
 The worker uses the browser, not raw HTTP fetches, for listing detail extraction.
 
