@@ -125,6 +125,16 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_recent
+    ON homepage_listings (last_seen_at DESC, first_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_completed
+    ON homepage_listings (detail_completed_at DESC, last_seen_at DESC);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS search_title_bag (
       normalized_keyword TEXT PRIMARY KEY,
       keyword TEXT NOT NULL,
@@ -160,6 +170,7 @@ function ensureSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS listing_events (
       event_id TEXT PRIMARY KEY,
+      workflow_run_id TEXT NOT NULL DEFAULT '',
       listing_id TEXT NOT NULL,
       event_type TEXT NOT NULL,
       event_at TEXT NOT NULL,
@@ -176,6 +187,8 @@ function ensureSchema(db) {
     );
   `);
 
+  ensureColumn(db, 'listing_events', 'workflow_run_id', "TEXT NOT NULL DEFAULT ''");
+
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_listing_events_listing
     ON listing_events (listing_id, event_at DESC);
@@ -184,6 +197,16 @@ function ensureSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_listing_events_type_time
     ON listing_events (event_type, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_events_workflow_time
+    ON listing_events (workflow_run_id, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_events_worker_time
+    ON listing_events (worker_id, event_at DESC);
   `);
 
   db.exec(`
@@ -625,8 +648,13 @@ function claimNextPendingHomepageListing(db, options = {}) {
       WHERE listing_id = ?
     `).run(now, workerId, candidate.listing_id);
 
+    const claimed = getHomepageListing(db, candidate.listing_id);
+    if (typeof options.startEventBuilder === 'function') {
+      appendListingEvent(db, options.startEventBuilder(claimed));
+    }
+
     db.exec('COMMIT');
-    return getHomepageListing(db, candidate.listing_id);
+    return claimed;
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
@@ -655,10 +683,12 @@ function appendListingEvent(db, event) {
   const contentJson = serializeJson(content);
   const contentHash = String(event.contentHash || event.content_hash || hashContent(content)).trim();
   const eventId = String(event.eventId || event.event_id || buildListingEventId(eventAt, listingId, eventType));
+  const workflowRunId = String(event.workflowRunId || event.workflow_run_id || '').trim();
 
   db.prepare(`
     INSERT INTO listing_events (
       event_id,
+      workflow_run_id,
       listing_id,
       event_type,
       event_at,
@@ -671,9 +701,10 @@ function appendListingEvent(db, event) {
       screenshot_path,
       snapshot_path,
       error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     eventId,
+    workflowRunId,
     listingId,
     eventType,
     eventAt,
@@ -845,6 +876,18 @@ function getHomepageListingCounts(db) {
     sold: 0,
     pending_sale: 0,
   });
+}
+
+function runTransaction(db, callback) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = callback();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function upsertListingSearchKeyword(db, listingId, keyword, options = {}) {
@@ -1025,6 +1068,7 @@ function normalizeListingEventRow(row) {
 
   return {
     event_id: row.event_id,
+    workflow_run_id: row.workflow_run_id || '',
     listing_id: row.listing_id,
     event_type: row.event_type,
     event_at: row.event_at,
@@ -1129,12 +1173,31 @@ function workerIdWhereSql(workerIds, params, alias = 'e') {
   return `${alias}.worker_id IN (${ids.map(() => '?').join(', ')})`;
 }
 
+function workerRunWhereSql(workerId, workerIds, params, alias = 'e') {
+  const runId = String(workerId || '').trim();
+  const ids = uniqueStrings(workerIds);
+  const clauses = [];
+  if (runId) {
+    params.push(runId);
+    clauses.push(`${alias}.workflow_run_id = ?`);
+  }
+  if (ids.length > 0) {
+    params.push(...ids);
+    clauses.push(`${alias}.worker_id IN (${ids.map(() => '?').join(', ')})`);
+  }
+  if (clauses.length === 0) {
+    params.push('');
+    return `${alias}.worker_id = ?`;
+  }
+  return `(${clauses.join(' OR ')})`;
+}
+
 function listWorkerListingEvents(db, workerId, options = {}) {
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
   const eventTypes = eventTypesForCategory(options.category);
   const workerIds = options.workerIds || [workerId];
   const params = [];
-  const workerSql = workerIdWhereSql(workerIds, params, 'e');
+  const workerSql = workerRunWhereSql(workerId, workerIds, params, 'e');
   let eventTypeSql = '';
 
   if (eventTypes.length > 0) {
@@ -1168,7 +1231,7 @@ function listWorkerListingEvents(db, workerId, options = {}) {
 function getWorkerListingEventStats(db, workerId, options = {}) {
   const workerIds = uniqueStrings(options.workerIds || [workerId]);
   const statsParams = [];
-  const statsWorkerSql = workerIdWhereSql(workerIds, statsParams, 'listing_events');
+  const statsWorkerSql = workerRunWhereSql(workerId, workerIds, statsParams, 'listing_events');
   const rows = db.prepare(`
     SELECT event_type, COUNT(*) AS count
     FROM listing_events
@@ -1199,7 +1262,7 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
   }
 
   const latestParams = [];
-  const latestWorkerSql = workerIdWhereSql(workerIds, latestParams, 'e');
+  const latestWorkerSql = workerRunWhereSql(workerId, workerIds, latestParams, 'e');
   const latest = db.prepare(`
     SELECT
       e.*,
@@ -1220,7 +1283,7 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
   `).get(...latestParams);
 
   const latestPreviewParams = [];
-  const latestPreviewWorkerSql = workerIdWhereSql(workerIds, latestPreviewParams, 'e');
+  const latestPreviewWorkerSql = workerRunWhereSql(workerId, workerIds, latestPreviewParams, 'e');
   const latestPreview = db.prepare(`
     SELECT
       e.*,
@@ -1359,6 +1422,77 @@ function listWorkflowRuns(db, options = {}) {
   `).all(limit).map(normalizeWorkflowRunRow);
 }
 
+function fileSizeBytes(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function getDatabaseMaintenanceReport(db, dbPath = DEFAULT_DB_PATH) {
+  const resolvedPath = resolveDbPath(dbPath);
+  const pageCount = db.prepare('PRAGMA page_count').get().page_count;
+  const pageSize = db.prepare('PRAGMA page_size').get().page_size;
+  const freelistCount = db.prepare('PRAGMA freelist_count').get().freelist_count;
+  const journalMode = db.prepare('PRAGMA journal_mode').get().journal_mode;
+  const listingRows = db.prepare('SELECT COUNT(*) AS count FROM homepage_listings').get().count;
+  const eventRows = db.prepare('SELECT COUNT(*) AS count FROM listing_events').get().count;
+  const workflowRows = db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get().count;
+  return {
+    dbPath: resolvedPath,
+    journalMode,
+    pageCount,
+    pageSize,
+    freelistCount,
+    estimatedDbBytes: pageCount * pageSize,
+    files: {
+      dbBytes: fileSizeBytes(resolvedPath),
+      walBytes: fileSizeBytes(`${resolvedPath}-wal`),
+      shmBytes: fileSizeBytes(`${resolvedPath}-shm`),
+    },
+    rows: {
+      homepageListings: listingRows,
+      listingEvents: eventRows,
+      workflowRuns: workflowRows,
+    },
+  };
+}
+
+function runDatabaseMaintenance(db, dbPath = DEFAULT_DB_PATH, options = {}) {
+  const startedAt = new Date().toISOString();
+  const before = getDatabaseMaintenanceReport(db, dbPath);
+  const actions = [];
+
+  if (options.optimize !== false) {
+    db.exec('PRAGMA optimize;');
+    actions.push('optimize');
+  }
+
+  if (options.analyze) {
+    db.exec('ANALYZE;');
+    actions.push('analyze');
+  }
+
+  if (options.checkpoint !== false) {
+    const checkpoint = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').all();
+    actions.push({ checkpoint: 'truncate', result: checkpoint });
+  }
+
+  if (options.vacuum) {
+    db.exec('VACUUM;');
+    actions.push('vacuum');
+  }
+
+  return {
+    startedAt,
+    completedAt: new Date().toISOString(),
+    actions,
+    before,
+    after: getDatabaseMaintenanceReport(db, dbPath),
+  };
+}
+
 module.exports = {
   DEFAULT_DB_PATH,
   resolveDbPath,
@@ -1377,6 +1511,7 @@ module.exports = {
   markHomepageListingInactive,
   getHomepageListingCounts,
   hashContent,
+  runTransaction,
   appendListingEvent,
   getListingEvent,
   getListingEvents,
@@ -1393,4 +1528,6 @@ module.exports = {
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
   getWorkerListingEventStats,
+  getDatabaseMaintenanceReport,
+  runDatabaseMaintenance,
 };

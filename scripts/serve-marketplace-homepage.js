@@ -399,6 +399,7 @@ function syncWorkflowRun(db, record, changes = {}) {
 }
 
 function publicProcessRecord(record) {
+  const logs = record.logs || [];
   return {
     id: record.id,
     workflowId: record.workflowId,
@@ -414,11 +415,15 @@ function publicProcessRecord(record) {
     osCheckedAt: record.osCheckedAt || '',
     osAlive: Boolean(record.osAlive),
     managed: record.managed !== false,
-    logs: record.logs.slice(-120),
+    runtimeStats: runtimeStatsFromLogs(logs),
+    latestAction: latestActionFromLogs(logs),
+    failureSummary: failureSummaryFromLogs(logs),
+    logCount: logs.length,
   };
 }
 
-function publicWorkflowRunRecord(run) {
+function publicWorkflowRunRecord(run, options = {}) {
+  const logs = run.logs || [];
   return {
     id: run.run_id,
     workflowId: run.workflow_id,
@@ -434,15 +439,68 @@ function publicWorkflowRunRecord(run) {
     osCheckedAt: run.os_checked_at,
     osAlive: run.os_alive,
     managed: managedProcesses.has(run.run_id),
-    logs: run.logs.slice(-120),
+    runtimeStats: runtimeStatsFromLogs(logs),
+    latestAction: latestActionFromLogs(logs),
+    failureSummary: failureSummaryFromLogs(logs),
+    logCount: logs.length,
+    ...(options.includeLogs ? { logs: logs.slice(-120) } : {}),
   };
 }
 
-function publicWorkflowRunRecordWithStats(db, run) {
-  const record = publicWorkflowRunRecord(run);
+function publicWorkflowRunRecordWithStats(db, run, options = {}) {
+  const record = publicWorkflowRunRecord(run, options);
   const workerIds = resolveWorkerEventIdsForRun(db, run.run_id);
-  record.eventStats = getWorkerListingEventStats(db, run.run_id, { workerIds });
+  const eventStats = getWorkerListingEventStats(db, run.run_id, { workerIds });
+  record.eventStats = options.includeLatestEvents
+    ? eventStats
+    : {
+      total: eventStats.total,
+      done: eventStats.done,
+      skipped: eventStats.skipped,
+      error: eventStats.error,
+      started: eventStats.started,
+      workerIds: eventStats.workerIds,
+    };
   return record;
+}
+
+function stripLogPrefix(line) {
+  return String(line || '').replace(/^\[[^\]]+\]\s*/, '').replace(/^\[[^\]]+\]\s*/, '');
+}
+
+function latestActionFromLogs(logs = []) {
+  return logs.slice().reverse().find((line) => /job_start|job_done|job_error|job_bypassed|backlog_sleep|backlog_item_sleep|backlog_exit/.test(line))
+    || logs[logs.length - 1]
+    || '';
+}
+
+function failureSummaryFromLogs(logs = []) {
+  const line = logs.slice().reverse().find((item) => /process_marketplace_homepage_backlog_error|error/i.test(item)
+    && !/process_exit|npm error|^\[[^\]]+\]\s*>/.test(item));
+  return stripLogPrefix(line || '').replace(/^process_marketplace_homepage_backlog_error\s+/, '').trim();
+}
+
+function runtimeStatsFromLogs(logs = []) {
+  const stats = { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
+  for (const line of logs) {
+    const listingMatch = line.match(/listing_id=([^\s]+)/);
+    if (/job_start/.test(line)) {
+      stats.attempted += 1;
+      stats.currentListingId = listingMatch?.[1] || stats.currentListingId;
+    } else if (/job_done/.test(line)) {
+      stats.done += 1;
+      stats.currentListingId = '';
+    } else if (/job_bypassed/.test(line)) {
+      stats.bypassed += 1;
+      stats.currentListingId = '';
+    } else if (/job_error/.test(line)) {
+      stats.errors += 1;
+      stats.currentListingId = '';
+    } else if (/backlog_sleep|backlog_item_sleep/.test(line)) {
+      stats.sleeps += 1;
+    }
+  }
+  return stats;
 }
 
 function reconcileWorkflowRuns(db) {
@@ -1023,6 +1081,23 @@ function createServer(options) {
     if (requestUrl.pathname === '/api/workflows/reconcile' && request.method === 'POST') {
       writeJson(response, 200, {
         processes: reconcileWorkflowRuns(db),
+      });
+      return;
+    }
+
+    const workerDetailMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)$/);
+    if (workerDetailMatch && request.method === 'GET') {
+      const workerId = decodeURIComponent(workerDetailMatch[1]);
+      const run = getWorkflowRun(db, workerId);
+      if (!run) {
+        writeJson(response, 404, { error: `Unknown workflow run: ${workerId}` });
+        return;
+      }
+      writeJson(response, 200, {
+        process: publicWorkflowRunRecordWithStats(db, run, {
+          includeLogs: true,
+          includeLatestEvents: true,
+        }),
       });
       return;
     }

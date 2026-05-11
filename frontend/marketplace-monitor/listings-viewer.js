@@ -381,6 +381,9 @@ export function createListingsViewer() {
   }
 
   function summarizeProcessFailure(proc) {
+    if (proc?.failureSummary) {
+      return proc.failureSummary;
+    }
     const lines = (proc?.logs || []).slice().reverse();
     const errorLine = lines.find((line) => /process_marketplace_homepage_backlog_error|error/i.test(line)
       && !/process_exit|npm error|^\[[^\]]+\]\s*>/.test(line));

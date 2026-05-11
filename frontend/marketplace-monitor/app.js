@@ -9,6 +9,7 @@ const store = {
   selectedWorkflowId: '',
   processes: [],
   selectedProcessId: '',
+  workerDetailProcess: null,
   workerDetailCategory: 'done',
   workerDetailEvents: [],
   workerDetailStats: null,
@@ -262,12 +263,14 @@ function eventReason(event) {
 }
 
 function latestWorkerAction(proc) {
+  if (proc?.latestAction) return proc.latestAction;
   const logs = proc.logs || [];
   const latest = logs.slice().reverse().find((line) => /job_start|job_done|job_error|job_bypassed|backlog_sleep|backlog_item_sleep|backlog_exit/.test(line));
   return latest || logs[logs.length - 1] || '';
 }
 
 function workerStats(proc) {
+  if (proc?.runtimeStats) return proc.runtimeStats;
   const logs = proc.logs || [];
   const stats = { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
   for (const line of logs) {
@@ -298,6 +301,7 @@ function renderProcesses() {
   }
   if (store.selectedProcessId && !store.processes.some((proc) => proc.id === store.selectedProcessId)) {
     store.selectedProcessId = '';
+    store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
   }
@@ -322,7 +326,9 @@ function renderProcesses() {
       + '</div></td>'
       + '</tr>';
   }).join('');
-  const selectedProcess = activeProcess();
+  const selectedProcess = store.selectedProcessId
+    ? (store.workerDetailProcess || activeProcess())
+    : null;
   document.body.classList.toggle('worker-inspector-open', Boolean(selectedProcess));
   els.processList.innerHTML = '<div class="card">'
     + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">View a worker for its focused audit workspace. The overview stays compact for scanning and stopping workers.</div></div></div>'
@@ -346,6 +352,7 @@ function renderProcesses() {
   for (const button of document.querySelectorAll('.worker-detail-close-button')) {
     button.addEventListener('click', () => {
       store.selectedProcessId = '';
+      store.workerDetailProcess = null;
       store.workerDetailStats = null;
       store.workerDetailEvents = [];
       renderProcesses();
@@ -355,6 +362,7 @@ function renderProcesses() {
     backdrop.addEventListener('click', (event) => {
       if (event.target !== backdrop) return;
       store.selectedProcessId = '';
+      store.workerDetailProcess = null;
       store.workerDetailStats = null;
       store.workerDetailEvents = [];
       renderProcesses();
@@ -544,6 +552,7 @@ function renderWorkerDetail(selectedProcess) {
 async function loadWorkerDetail() {
   const selectedProcess = activeProcess();
   if (!selectedProcess) {
+    store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
     renderProcesses();
@@ -551,10 +560,12 @@ async function loadWorkerDetail() {
   }
 
   const workerId = encodeURIComponent(selectedProcess.id);
-  const [statsPayload, eventsPayload] = await Promise.all([
+  const [detailPayload, statsPayload, eventsPayload] = await Promise.all([
+    fetchJson(`/api/workflows/${workerId}`),
     fetchJson(`/api/workflows/${workerId}/stats`),
     fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(store.workerDetailCategory)}&limit=50`),
   ]);
+  store.workerDetailProcess = detailPayload.process || selectedProcess;
   store.workerDetailStats = statsPayload.stats || null;
   store.workerDetailEvents = eventsPayload.events || [];
   renderProcesses();
@@ -592,6 +603,7 @@ function bindEvents() {
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !store.selectedProcessId) return;
     store.selectedProcessId = '';
+    store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
     renderProcesses();

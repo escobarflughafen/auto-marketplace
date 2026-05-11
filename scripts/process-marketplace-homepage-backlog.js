@@ -24,6 +24,7 @@ const {
   markHomepageListingInactive,
   getHomepageListingCounts,
   hashContent,
+  runTransaction,
   appendListingEvent,
   getLatestListingEvent,
 } = require('./marketplace-homepage-db');
@@ -494,6 +495,16 @@ function buildClaimOptions(options) {
     seenBefore: options.seenBefore,
     listingIds: options.listingIds,
     listingIdTable: options.listingIdTable,
+    startEventBuilder: (listing) => ({
+      workflowRunId: options.workerId,
+      listingId: listing.listing_id,
+      eventType: 'detail_capture_started',
+      workerId: options.workerId,
+      sourceUrl: listing.href,
+      attempt: listing.detail_attempts,
+      status: 'processing',
+      content: buildJobCardEventContent(listing, options.workerId),
+    }),
   };
 }
 
@@ -516,15 +527,6 @@ async function processBatch(page, db, options, state = {}) {
       `job_start listing_id=${listing.listing_id} href=${listing.href} attempt=${listing.detail_attempts}`,
     );
     attemptedCount += 1;
-    appendListingEvent(db, {
-      listingId: listing.listing_id,
-      eventType: 'detail_capture_started',
-      workerId: options.workerId,
-      sourceUrl: listing.href,
-      attempt: listing.detail_attempts,
-      status: 'processing',
-      content: buildJobCardEventContent(listing, options.workerId),
-    });
 
     try {
       const capture = await captureListingRecord(activePage.context(), activePage, listing, options.captureDir);
@@ -540,26 +542,29 @@ async function processBatch(page, db, options, state = {}) {
         : '';
 
       if (inactiveStatus && !options.resolveInactive) {
-        appendListingEvent(db, {
-          listingId: listing.listing_id,
-          eventType: 'detail_capture_bypassed',
-          workerId: options.workerId,
-          sourceUrl: listing.href,
-          attempt: listing.detail_attempts,
-          status: inactiveStatus,
-          content,
-          contentHash,
-          screenshotPath: capture.detailRecord.screenshotPath,
-          snapshotPath: capture.detailRecord.snapshotPath,
-          error: capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
+        runTransaction(db, () => {
+          appendListingEvent(db, {
+            workflowRunId: options.workerId,
+            listingId: listing.listing_id,
+            eventType: 'detail_capture_bypassed',
+            workerId: options.workerId,
+            sourceUrl: listing.href,
+            attempt: listing.detail_attempts,
+            status: inactiveStatus,
+            content,
+            contentHash,
+            screenshotPath: capture.detailRecord.screenshotPath,
+            snapshotPath: capture.detailRecord.snapshotPath,
+            error: capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
+          });
+          markHomepageListingInactive(
+            db,
+            listing.listing_id,
+            inactiveStatus,
+            capture.detailRecord,
+            capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
+          );
         });
-        markHomepageListingInactive(
-          db,
-          listing.listing_id,
-          inactiveStatus,
-          capture.detailRecord,
-          capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
-        );
         await appendLog(
           options.logFile,
           `job_bypassed listing_id=${listing.listing_id} availability=${inactiveStatus} reason=${capture.detailRecord.listingContent?.availabilityReason || inactiveStatus} screenshot=${capture.detailRecord.screenshotPath}`,
@@ -567,43 +572,47 @@ async function processBatch(page, db, options, state = {}) {
         continue;
       }
 
-      appendListingEvent(db, {
-        listingId: listing.listing_id,
-        eventType: 'detail_capture_succeeded',
-        workerId: options.workerId,
-        sourceUrl: listing.href,
-        attempt: listing.detail_attempts,
-        status: 'done',
-        content,
-        contentHash,
-        screenshotPath: capture.detailRecord.screenshotPath,
-        snapshotPath: capture.detailRecord.snapshotPath,
-      });
-
-      if (previousSuccess && previousSuccess.content_hash && previousSuccess.content_hash !== contentHash) {
+      runTransaction(db, () => {
         appendListingEvent(db, {
+          workflowRunId: options.workerId,
           listingId: listing.listing_id,
-          eventType: 'content_changed',
+          eventType: 'detail_capture_succeeded',
           workerId: options.workerId,
           sourceUrl: listing.href,
           attempt: listing.detail_attempts,
-          status: 'changed',
-          content: {
-            previousContentHash: previousSuccess.content_hash,
-            nextContentHash: contentHash,
-            detail: content.detail,
-            comparable: content.comparable,
-            freshness: content.freshness,
-            availability: content.availability,
-            extraction: content.extraction,
-          },
+          status: 'done',
+          content,
           contentHash,
           screenshotPath: capture.detailRecord.screenshotPath,
           snapshotPath: capture.detailRecord.snapshotPath,
         });
-      }
 
-      markHomepageListingProcessed(db, listing.listing_id, capture.detailRecord);
+        if (previousSuccess && previousSuccess.content_hash && previousSuccess.content_hash !== contentHash) {
+          appendListingEvent(db, {
+            workflowRunId: options.workerId,
+            listingId: listing.listing_id,
+            eventType: 'content_changed',
+            workerId: options.workerId,
+            sourceUrl: listing.href,
+            attempt: listing.detail_attempts,
+            status: 'changed',
+            content: {
+              previousContentHash: previousSuccess.content_hash,
+              nextContentHash: contentHash,
+              detail: content.detail,
+              comparable: content.comparable,
+              freshness: content.freshness,
+              availability: content.availability,
+              extraction: content.extraction,
+            },
+            contentHash,
+            screenshotPath: capture.detailRecord.screenshotPath,
+            snapshotPath: capture.detailRecord.snapshotPath,
+          });
+        }
+
+        markHomepageListingProcessed(db, listing.listing_id, capture.detailRecord);
+      });
       await appendLog(
         options.logFile,
         `job_done listing_id=${listing.listing_id} title="${capture.detailRecord.title}" screenshot=${capture.detailRecord.screenshotPath}`,
@@ -613,22 +622,25 @@ async function processBatch(page, db, options, state = {}) {
       const eventType = error?.code === 'LISTING_UNAVAILABLE'
         ? 'listing_unavailable'
         : 'detail_capture_failed';
-      appendListingEvent(db, {
-        listingId: listing.listing_id,
-        eventType,
-        workerId: options.workerId,
-        sourceUrl: listing.href,
-        attempt: listing.detail_attempts,
-        status: 'error',
-        content: buildJobCardEventContent(listing, options.workerId, {
-          error: {
-            type: error?.code || 'ERROR',
-            message: error instanceof Error ? error.message : String(error),
-          },
-        }),
-        error: error instanceof Error ? error.message : String(error),
+      runTransaction(db, () => {
+        appendListingEvent(db, {
+          workflowRunId: options.workerId,
+          listingId: listing.listing_id,
+          eventType,
+          workerId: options.workerId,
+          sourceUrl: listing.href,
+          attempt: listing.detail_attempts,
+          status: 'error',
+          content: buildJobCardEventContent(listing, options.workerId, {
+            error: {
+              type: error?.code || 'ERROR',
+              message: error instanceof Error ? error.message : String(error),
+            },
+          }),
+          error: error instanceof Error ? error.message : String(error),
+        });
+        markHomepageListingFailed(db, listing.listing_id, error instanceof Error ? error.message : error);
       });
-      markHomepageListingFailed(db, listing.listing_id, error instanceof Error ? error.message : error);
       await appendLog(
         options.logFile,
         `job_error listing_id=${listing.listing_id} error="${error instanceof Error ? error.message : String(error)}"`,

@@ -18,6 +18,7 @@ const {
   markHomepageListingFailed,
   markHomepageListingInactive,
   getHomepageListingCounts,
+  runTransaction,
   appendListingEvent,
   getListingEvents,
   getLatestListingEvent,
@@ -34,6 +35,8 @@ const {
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
   getWorkerListingEventStats,
+  getDatabaseMaintenanceReport,
+  runDatabaseMaintenance,
 } = require('../scripts/marketplace-homepage-db');
 
 function createTempDbPath() {
@@ -71,6 +74,7 @@ test('listing events are append-only detail history', () => {
     };
     const contentHash = hashContent(content.detail);
     const event = appendListingEvent(db, {
+      workflowRunId: 'run-worker-a',
       listingId: 'event-1',
       eventType: 'detail_capture_succeeded',
       eventAt: '2026-05-07T00:00:00.000Z',
@@ -85,6 +89,7 @@ test('listing events are append-only detail history', () => {
     });
 
     assert.equal(event.listing_id, 'event-1');
+    assert.equal(event.workflow_run_id, 'run-worker-a');
     assert.equal(event.event_type, 'detail_capture_succeeded');
     assert.equal(event.content_hash, contentHash);
 
@@ -130,6 +135,7 @@ test('worker event helpers group audit events by category', () => {
     });
 
     appendListingEvent(db, {
+      workflowRunId: 'workflow-run-1',
       listingId: 'worker-event-1',
       eventType: 'detail_capture_started',
       workerId: 'run-worker-1',
@@ -137,6 +143,7 @@ test('worker event helpers group audit events by category', () => {
       content: { detail: { title: 'Worker event row' } },
     });
     appendListingEvent(db, {
+      workflowRunId: 'workflow-run-1',
       listingId: 'worker-event-1',
       eventType: 'detail_capture_succeeded',
       workerId: 'run-worker-1',
@@ -145,6 +152,7 @@ test('worker event helpers group audit events by category', () => {
       screenshotPath: '/tmp/611.png',
     });
     appendListingEvent(db, {
+      workflowRunId: 'workflow-run-1',
       listingId: 'worker-event-1',
       eventType: 'detail_capture_bypassed',
       workerId: 'run-worker-1',
@@ -161,6 +169,9 @@ test('worker event helpers group audit events by category', () => {
     const doneEvents = listWorkerListingEvents(db, 'run-worker-1', { category: 'done' });
     assert.equal(doneEvents.length, 1);
     assert.equal(doneEvents[0].content.detail.price, 'CA$ 100');
+
+    const runStats = getWorkerListingEventStats(db, 'workflow-run-1');
+    assert.equal(runStats.total, 3);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
@@ -237,6 +248,75 @@ test('worker event helpers link legacy pid audit rows to workflow runs', () => {
   }
 });
 
+test('claimNextPendingHomepageListing can append start event in claim transaction', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'claim-start-1',
+      href: 'https://www.facebook.com/marketplace/item/631/',
+      title: 'Claim start row',
+      text: 'CA$ 100 | Claim start row',
+      rank: 1,
+    });
+
+    const claimed = claimNextPendingHomepageListing(db, {
+      workerId: 'workflow-run-claim',
+      statusFilter: 'pending',
+      claimedAt: '2026-05-09T00:00:00.000Z',
+      startEventBuilder: (listing) => ({
+        workflowRunId: 'workflow-run-claim',
+        listingId: listing.listing_id,
+        eventType: 'detail_capture_started',
+        workerId: 'workflow-run-claim',
+        status: 'processing',
+        attempt: listing.detail_attempts,
+        content: { listingId: listing.listing_id },
+      }),
+    });
+
+    assert.equal(claimed.listing_id, 'claim-start-1');
+    const events = listWorkerListingEvents(db, 'workflow-run-claim', { category: 'started' });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].workflow_run_id, 'workflow-run-claim');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('runTransaction atomically writes event and listing status', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'transaction-1',
+      href: 'https://www.facebook.com/marketplace/item/632/',
+      title: 'Transaction row',
+      text: 'CA$ 100 | Transaction row',
+      rank: 1,
+    });
+
+    runTransaction(db, () => {
+      appendListingEvent(db, {
+        workflowRunId: 'workflow-run-transaction',
+        listingId: 'transaction-1',
+        eventType: 'detail_capture_failed',
+        workerId: 'workflow-run-transaction',
+        status: 'error',
+        error: 'test error',
+      });
+      markHomepageListingFailed(db, 'transaction-1', 'test error');
+    });
+
+    assert.equal(getHomepageListingCounts(db).error, 1);
+    assert.equal(getWorkerListingEventStats(db, 'workflow-run-transaction').error, 1);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
 test('workflow runs persist process state and logs', () => {
   const dbPath = createTempDbPath();
   const { db } = openMarketplaceHomepageDatabase(dbPath);
@@ -273,6 +353,53 @@ test('workflow runs persist process state and logs', () => {
     assert.equal(updated.os_alive, false);
     assert.deepEqual(getWorkflowRun(db, 'run-1').logs, ['started', 'done']);
     assert.equal(listWorkflowRuns(db).length, 1);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('schema includes read-path and audit indexes', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const indexes = db.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'index'
+    `).all().map((row) => row.name);
+    assert.ok(indexes.includes('idx_homepage_listings_recent'));
+    assert.ok(indexes.includes('idx_homepage_listings_completed'));
+    assert.ok(indexes.includes('idx_listing_events_workflow_time'));
+    assert.ok(indexes.includes('idx_listing_events_worker_time'));
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('database maintenance reports size and can run optimize/checkpoint', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'maintenance-1',
+      href: 'https://www.facebook.com/marketplace/item/641/',
+      title: 'Maintenance row',
+      text: 'CA$ 100 | Maintenance row',
+      rank: 1,
+    });
+
+    const before = getDatabaseMaintenanceReport(db, dbPath);
+    assert.equal(before.rows.homepageListings, 1);
+    const result = runDatabaseMaintenance(db, dbPath, {
+      optimize: true,
+      checkpoint: true,
+      analyze: false,
+      vacuum: false,
+    });
+    assert.ok(result.actions.length >= 1);
+    assert.equal(result.after.rows.homepageListings, 1);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
