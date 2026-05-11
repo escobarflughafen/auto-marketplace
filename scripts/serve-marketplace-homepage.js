@@ -16,6 +16,14 @@ const {
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
   getWorkerListingEventStats,
+  listBacklogCandidates,
+  addResolveQueueItems,
+  clearResolveQueueItems,
+  markResolveQueueDispatched,
+  refreshResolveQueueRunStatuses,
+  listResolveQueueItems,
+  listResolveQueueEvents,
+  getResolveQueueCounts,
 } = require('./marketplace-homepage-db');
 const {
   buildListingsQuery,
@@ -611,6 +619,7 @@ function getBacklogListingIdsByQuery(db, options = {}) {
     query: options.query || '',
     sort: options.sort || '',
     sortDirection: options.sortDirection || options.sortDir || '',
+    excludeListingIds: options.excludeListingIds || [],
     backlogOnly: true,
   });
   return db.prepare(query.sql).all(...query.params).map((row) => row.listing_id);
@@ -636,6 +645,7 @@ function cryptoRandomSuffix() {
 function resolveListingsFromViewer(db, body = {}) {
   const mode = String(body.mode || '').trim();
   const requestedIds = normalizeListingIds(body.listingIds || body.listingId);
+  const excludeListingIds = normalizeListingIds(body.excludeListingIds || body.excludeListingId);
   const sort = String(body.sort || '').trim();
   const sortDirection = String(body.sortDirection || body.sortDir || '').trim();
   const query = String(body.query || body.q || '').trim();
@@ -644,7 +654,7 @@ function resolveListingsFromViewer(db, body = {}) {
   if (mode === 'listing' || mode === 'selected') {
     listingIds = getBacklogListingIdsByIds(db, requestedIds);
   } else if (mode === 'query') {
-    listingIds = getBacklogListingIdsByQuery(db, { query, sort, sortDirection });
+    listingIds = getBacklogListingIdsByQuery(db, { query, sort, sortDirection, excludeListingIds });
   } else {
     const error = new Error('Expected resolve mode to be listing, selected, or query');
     error.statusCode = 400;
@@ -663,6 +673,7 @@ function resolveListingsFromViewer(db, body = {}) {
     sort,
     sortDirection,
     requestedCount: mode === 'query' ? null : requestedIds.length,
+    excludedCount: excludeListingIds.length,
   });
   const args = [
     '--use-credentials',
@@ -679,6 +690,40 @@ function resolveListingsFromViewer(db, body = {}) {
     listingIds,
     listingCount: listingIds.length,
     batchFile: filePath,
+  };
+}
+
+function resolveQueuedListingsFromViewer(db) {
+  refreshResolveQueueRunStatuses(db);
+  const queuedItems = listResolveQueueItems(db, { statuses: ['queued'], limit: 500 });
+  const queuedIds = queuedItems.map((item) => item.listing_id);
+  if (queuedIds.length === 0) {
+    const error = new Error('Resolve queue is empty');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const result = resolveListingsFromViewer(db, {
+    mode: 'selected',
+    listingIds: queuedIds,
+  });
+  const dispatchedIds = new Set(result.listingIds);
+  const skippedIds = queuedIds.filter((listingId) => !dispatchedIds.has(listingId));
+  if (skippedIds.length > 0) {
+    clearResolveQueueItems(db, skippedIds, {
+      actor: 'system',
+    });
+  }
+  markResolveQueueDispatched(db, result.listingIds, result.process?.id || '', {
+    actor: 'viewer',
+  });
+  return {
+    ...result,
+    queue: {
+      items: listResolveQueueItems(db),
+      counts: getResolveQueueCounts(db),
+      events: listResolveQueueEvents(db, { limit: 20 }),
+    },
   };
 }
 
@@ -994,6 +1039,7 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/summary') {
+      refreshResolveQueueRunStatuses(db);
       const total = db.prepare('SELECT COUNT(*) AS total FROM homepage_listings').get().total;
       const latest = db.prepare('SELECT MAX(last_seen_at) AS latest_seen_at FROM homepage_listings').get();
       writeJson(response, 200, {
@@ -1001,6 +1047,7 @@ function createServer(options) {
         totalRows: total,
         latestSeenAt: latest.latest_seen_at,
         queueCounts: getHomepageListingCounts(db),
+        resolveQueueCounts: getResolveQueueCounts(db),
       });
       return;
     }
@@ -1018,11 +1065,12 @@ function createServer(options) {
       const offset = requestUrl.searchParams.get('offset') || '0';
       const sort = requestUrl.searchParams.get('sort') || '';
       const sortDirection = requestUrl.searchParams.get('sortDir') || '';
+      const excludeListingIds = normalizeListingIds(requestUrl.searchParams.getAll('excludeListingId'));
 
       try {
         const startedAt = process.hrtime.bigint();
-        const listingsQuery = buildListingsQuery({ query, limit, offset, sort, sortDirection });
-        const countQuery = buildCountQuery({ query });
+        const listingsQuery = buildListingsQuery({ query, limit, offset, sort, sortDirection, excludeListingIds });
+        const countQuery = buildCountQuery({ query, excludeListingIds });
         const rows = db.prepare(listingsQuery.sql).all(...listingsQuery.params).map(enrichRowPaths);
         const total = db.prepare(countQuery.sql).get(...countQuery.params).total;
         const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
@@ -1053,6 +1101,48 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/backlog') {
+      try {
+        const limit = parseIntegerFlag(requestUrl.searchParams.get('limit') || '50', 'limit', 1);
+        const maxAttemptsRaw = requestUrl.searchParams.get('maxAttempts') || '';
+        const retryDelayRaw = requestUrl.searchParams.get('retryDelaySeconds') || '';
+        const maxAttempts = maxAttemptsRaw
+          ? parseIntegerFlag(maxAttemptsRaw, 'maxAttempts', 1)
+          : undefined;
+        const retryDelaySeconds = retryDelayRaw
+          ? parseIntegerFlag(retryDelayRaw, 'retryDelaySeconds', 0)
+          : 0;
+        const options = {
+          statusFilter: requestUrl.searchParams.get('statusFilter') || 'all',
+          sourceFilter: requestUrl.searchParams.get('sourceFilter') || '',
+          keywordFilter: requestUrl.searchParams.get('keywordFilter') || '',
+          backlogOrder: requestUrl.searchParams.get('backlogOrder') || 'priority',
+          seenTimeField: requestUrl.searchParams.get('seenTimeField') || 'last_seen',
+          seenAfter: requestUrl.searchParams.get('seenAfter') || '',
+          seenBefore: requestUrl.searchParams.get('seenBefore') || '',
+          limit,
+          retryDelaySeconds,
+          ...(maxAttempts !== undefined ? { maxAttempts } : {}),
+        };
+        refreshResolveQueueRunStatuses(db);
+        const startedAt = process.hrtime.bigint();
+        const rows = listBacklogCandidates(db, options);
+        const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
+        writeJson(response, 200, {
+          options,
+          rows,
+          stats: {
+            elapsedMs,
+            returnedRows: rows.length,
+          },
+          resolveQueueCounts: getResolveQueueCounts(db),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/listings/resolve' && request.method === 'POST') {
       try {
         const body = await readRequestJson(request);
@@ -1064,7 +1154,60 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'GET') {
+      refreshResolveQueueRunStatuses(db);
+      writeJson(response, 200, {
+        items: listResolveQueueItems(db),
+        counts: getResolveQueueCounts(db),
+        events: listResolveQueueEvents(db, { limit: 30 }),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'POST') {
+      try {
+        const body = await readRequestJson(request);
+        const result = addResolveQueueItems(db, normalizeListingIds(body.listingIds || body.listingId), {
+          actor: 'viewer',
+        });
+        writeJson(response, 201, {
+          ...result,
+          events: listResolveQueueEvents(db, { limit: 30 }),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'DELETE') {
+      try {
+        const body = await readRequestJson(request);
+        const result = clearResolveQueueItems(db, normalizeListingIds(body.listingIds || body.listingId), {
+          actor: 'viewer',
+        });
+        writeJson(response, 200, {
+          ...result,
+          events: listResolveQueueEvents(db, { limit: 30 }),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/resolve-queue/run' && request.method === 'POST') {
+      try {
+        const result = resolveQueuedListingsFromViewer(db);
+        writeJson(response, 201, result);
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
+      refreshResolveQueueRunStatuses(db);
       writeJson(response, 200, {
         workflows: Object.entries(WORKFLOWS).map(([id, workflow]) => ({
           id,

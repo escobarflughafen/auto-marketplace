@@ -22,6 +22,13 @@ const {
   runTransaction,
   appendListingEvent,
   appendWorkflowEvent,
+  addResolveQueueItems,
+  clearResolveQueueItems,
+  markResolveQueueDispatched,
+  refreshResolveQueueRunStatuses,
+  listResolveQueueItems,
+  listResolveQueueEvents,
+  getResolveQueueCounts,
   listWorkflowEvents,
   getListingEvents,
   getLatestListingEvent,
@@ -377,6 +384,103 @@ test('schema includes read-path and audit indexes', () => {
     assert.ok(indexes.includes('idx_listing_events_worker_time'));
     assert.ok(indexes.includes('idx_workflow_events_run_time'));
     assert.ok(indexes.includes('idx_workflow_events_type_time'));
+    assert.ok(indexes.includes('idx_resolve_queue_items_status_updated'));
+    assert.ok(indexes.includes('idx_resolve_queue_events_listing_time'));
+    assert.ok(indexes.includes('idx_resolve_queue_events_type_time'));
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('resolve queue persists items and append-only audit events', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'queue-1',
+      href: 'https://www.facebook.com/marketplace/item/801/',
+      title: 'Queued one',
+      text: 'CA$ 100 | Queued one',
+      rank: 1,
+    });
+    upsertHomepageListing(db, {
+      listingId: 'queue-2',
+      href: 'https://www.facebook.com/marketplace/item/802/',
+      title: 'Queued two',
+      text: 'CA$ 200 | Queued two',
+      rank: 2,
+    });
+
+    const added = addResolveQueueItems(db, ['queue-1', 'queue-2', 'missing'], {
+      queuedAt: '2026-05-11T00:00:00.000Z',
+      actor: 'test',
+    });
+    assert.equal(added.addedCount, 2);
+    assert.deepEqual(added.skippedIds, ['missing']);
+    assert.equal(getResolveQueueCounts(db).queued, 2);
+    assert.deepEqual(listResolveQueueItems(db).map((item) => item.listing_id), ['queue-1', 'queue-2']);
+    assert.equal(listResolveQueueEvents(db).length, 2);
+
+    const cleared = clearResolveQueueItems(db, ['queue-1'], {
+      clearedAt: '2026-05-11T00:01:00.000Z',
+      actor: 'test',
+    });
+    assert.equal(cleared.clearedCount, 1);
+    assert.deepEqual(listResolveQueueItems(db, { statuses: ['queued'] }).map((item) => item.listing_id), ['queue-2']);
+    assert.equal(getResolveQueueCounts(db).cleared, 1);
+    assert.equal(listResolveQueueEvents(db).length, 3);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('resolve queue dispatch tracks workflow terminal status', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'dispatch-1',
+      href: 'https://www.facebook.com/marketplace/item/811/',
+      title: 'Dispatch one',
+      text: 'CA$ 100 | Dispatch one',
+      rank: 1,
+    });
+    addResolveQueueItems(db, ['dispatch-1'], {
+      queuedAt: '2026-05-11T00:00:00.000Z',
+      actor: 'test',
+    });
+    insertWorkflowRun(db, {
+      runId: 'run-dispatch',
+      workflowId: 'backlog-worker',
+      label: 'Resolve',
+      script: 'marketplace:home:process',
+      args: [],
+      pid: 123,
+      status: 'running',
+      startedAt: '2026-05-11T00:02:00.000Z',
+      osAlive: true,
+      logs: [],
+    });
+
+    markResolveQueueDispatched(db, ['dispatch-1'], 'run-dispatch', {
+      dispatchedAt: '2026-05-11T00:02:01.000Z',
+      actor: 'test',
+    });
+    assert.equal(getResolveQueueCounts(db).dispatched, 1);
+
+    updateWorkflowRun(db, 'run-dispatch', {
+      status: 'failed',
+      exitedAt: '2026-05-11T00:03:00.000Z',
+      exitCode: 1,
+      osAlive: false,
+    });
+    const refreshed = refreshResolveQueueRunStatuses(db);
+    assert.equal(refreshed.updatedCount, 1);
+    assert.equal(getResolveQueueCounts(db).failed, 1);
+    assert.equal(listResolveQueueItems(db, { statuses: ['failed'] })[0].workflow_run_id, 'run-dispatch');
+    assert.equal(listResolveQueueEvents(db)[0].event_type, 'resolve_queue_failed');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

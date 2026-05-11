@@ -23,7 +23,21 @@ const els = {
   workflowSelect: document.getElementById('workflowSelect'),
   workflowForm: document.getElementById('workflowForm'),
   workflowArgsPreview: document.getElementById('workflowArgsPreview'),
+  themeSelect: document.getElementById('themeSelect'),
 };
+
+function normalizeTheme(value) {
+  return value === 'classic' ? 'classic' : 'parasols';
+}
+
+function setTheme(value) {
+  const theme = normalizeTheme(value);
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem('marketplace-monitor-theme', theme);
+  if (els.themeSelect) {
+    els.themeSelect.value = theme;
+  }
+}
 
 function html(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -156,6 +170,14 @@ function renderField(field, draft) {
     + '</tr>';
 }
 
+function renderWorkflowRows(workflow, draft) {
+  const fields = workflow?.fields || [];
+  if (!fields.length) {
+    return '<tr><td colspan="2" class="empty-state">No workflow fields available.</td></tr>';
+  }
+  return fields.map((field) => renderField(field, draft)).join('');
+}
+
 function renderWorkflowForm() {
   const workflow = selectedWorkflow();
   if (!workflow) {
@@ -165,11 +187,7 @@ function renderWorkflowForm() {
     return;
   }
   const draft = ensureWorkflowDraft(workflow);
-  els.workflowForm.innerHTML = workflow.fields.map((field) => renderField(field, draft)).join('');
-  for (const input of els.workflowForm.querySelectorAll('input, select')) {
-    input.addEventListener('input', handleWorkflowFieldChange);
-    input.addEventListener('change', handleWorkflowFieldChange);
-  }
+  els.workflowForm.innerHTML = '';
   els.workflowArgsPreview.value = buildWorkflowArgs(workflow).join(' ');
   renderWorkerControl();
 }
@@ -193,14 +211,15 @@ function renderWorkerControl() {
     return;
   }
 
-  const rows = els.workflowForm.innerHTML || '<tr><td colspan="2" class="empty-state">No workflow fields available.</td></tr>';
+  const draft = ensureWorkflowDraft(workflow);
+  const rows = renderWorkflowRows(workflow, draft);
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker Control</div><div class="process-meta">Draft settings are kept per workflow type.</div></div>'
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
     + '<div class="worker-control-section-title">Workflow Settings</div>'
-    + '<div class="tablewrap worker-control-tablewrap"><table class="worker-control-table"><tbody>'
+    + '<div class="tablewrap worker-control-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + '<tr><th><label for="workerControlWorkflowSelect">Workflow</label></th><td><select id="workerControlWorkflowSelect">'
     + store.workflows.map((item) => (
       `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(item.label)}</option>`
@@ -211,7 +230,7 @@ function renderWorkerControl() {
     + '</section>'
     + '<section class="worker-control-column worker-control-right">'
     + '<div class="worker-control-section-title">Preview & Actions</div>'
-    + '<div class="tablewrap worker-control-tablewrap worker-command-tablewrap"><table class="worker-control-table"><tbody>'
+    + '<div class="tablewrap worker-control-tablewrap worker-command-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + `<tr><th>Command</th><td><textarea id="workerControlArgsPreview" readonly>${html(els.workflowArgsPreview.value)}</textarea></td></tr>`
     + '<tr><th>Controls</th><td><div class="worker-control-actions">'
     + '<button type="button" id="workerControlStartButton">Start Worker</button>'
@@ -332,7 +351,7 @@ function renderProcesses() {
   document.body.classList.toggle('worker-inspector-open', Boolean(selectedProcess));
   els.processList.innerHTML = '<div class="card">'
     + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">View a worker for its focused audit workspace. The overview stays compact for scanning and stopping workers.</div></div></div>'
-    + '<div class="tablewrap worker-table-wrap"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Listing</th><th>Attempted</th><th>Done</th><th>Bypassed</th><th>Errors</th><th>Doing</th><th></th></tr></thead><tbody>'
+    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Listing</th><th>Attempted</th><th>Done</th><th>Bypassed</th><th>Errors</th><th>Doing</th><th></th></tr></thead><tbody>'
     + rows
     + '</tbody></table></div>'
     + '</div>'
@@ -415,20 +434,35 @@ function tableRows(rows) {
   )).join('');
 }
 
+function workerDetailSectionRow(section, contentHtml) {
+  return '<tr>'
+    + `<th>${html(section)}</th>`
+    + `<td class="worker-detail-section-cell">${contentHtml}</td>`
+    + '</tr>';
+}
+
+function workerEventLinks(event) {
+  return [
+    event?.screenshotUrl ? `<a class="button-link compact" href="${html(event.screenshotUrl)}" target="_blank" rel="noreferrer">Shot</a>` : '',
+    event?.snapshotUrl ? `<a class="button-link compact" href="${html(event.snapshotUrl)}" target="_blank" rel="noreferrer">MD</a>` : '',
+    event?.source_url ? `<a class="button-link compact" href="${html(event.source_url)}" target="_blank" rel="noreferrer">FB</a>` : '',
+  ].filter(Boolean).join('');
+}
+
+function workerEventDetail(event) {
+  return [
+    eventPrice(event) ? `Price: ${eventPrice(event)}` : '',
+    eventTitle(event) ? `Title: ${eventTitle(event)}` : '',
+    eventReason(event) ? `Reason: ${eventReason(event)}` : '',
+  ].filter(Boolean).join(' · ');
+}
+
 function renderWorkerDetail(selectedProcess) {
   const stats = workerStats(selectedProcess);
   const logs = (selectedProcess?.logs || []).slice(-120);
   const detailStats = store.workerDetailStats || selectedProcess?.eventStats || {};
   const latestEvent = detailStats.latestEvent || null;
   const previewEvent = detailStats.latestPreviewEvent || latestEvent;
-  const latestTitle = eventTitle(previewEvent);
-  const latestLinks = previewEvent
-    ? [
-      previewEvent.screenshotUrl ? `<a class="button-link compact" href="${html(previewEvent.screenshotUrl)}" target="_blank" rel="noreferrer">Shot</a>` : '',
-      previewEvent.snapshotUrl ? `<a class="button-link compact" href="${html(previewEvent.snapshotUrl)}" target="_blank" rel="noreferrer">MD</a>` : '',
-      previewEvent.source_url ? `<a class="button-link compact" href="${html(previewEvent.source_url)}" target="_blank" rel="noreferrer">FB</a>` : '',
-    ].filter(Boolean).join('')
-    : '';
   const categoryButtons = [
     ['done', 'Done', detailStats.done || 0],
     ['skipped', 'Skipped', detailStats.skipped || 0],
@@ -438,34 +472,6 @@ function renderWorkerDetail(selectedProcess) {
   ].map(([category, label, count]) => (
     `<button type="button" class="secondary worker-category-button ${store.workerDetailCategory === category ? 'active' : ''}" data-category="${html(category)}">${html(label)} ${html(count)}</button>`
   )).join('');
-  const eventRows = store.workerDetailEvents.length
-    ? store.workerDetailEvents.map((event) => (
-      '<tr>'
-        + `<td>${html(new Date(event.event_at).toLocaleString())}</td>`
-        + `<td><code>${html(event.listing_id)}</code></td>`
-        + `<td>${html(event.event_type)}</td>`
-        + `<td><span class="status ${html(event.status)}">${html(event.status)}</span></td>`
-        + `<td>${html(eventPrice(event))}</td>`
-        + `<td class="cell-text">${html(eventTitle(event))}</td>`
-        + `<td class="cell-text">${html(eventReason(event))}</td>`
-        + '<td><div class="row-actions">'
-        + (event.screenshotUrl ? `<a class="button-link compact" href="${html(event.screenshotUrl)}" target="_blank" rel="noreferrer">Shot</a>` : '')
-        + (event.snapshotUrl ? `<a class="button-link compact" href="${html(event.snapshotUrl)}" target="_blank" rel="noreferrer">MD</a>` : '')
-        + (event.source_url ? `<a class="button-link compact" href="${html(event.source_url)}" target="_blank" rel="noreferrer">FB</a>` : '')
-        + '</div></td>'
-      + '</tr>'
-    )).join('')
-    : '<tr><td colspan="8" class="empty-state">No events for this category yet.</td></tr>';
-  const logRows = logs.length
-    ? logs.map((line, index) => {
-      const parsed = compactLogLine(line);
-      return '<tr>'
-        + `<td>${html(index + 1)}</td>`
-        + `<td>${html(parsed.time)}</td>`
-        + `<td class="cell-log">${html(parsed.text)}</td>`
-        + '</tr>';
-    }).join('')
-    : '<tr><td colspan="3" class="empty-state">No text history yet.</td></tr>';
   const statusRows = tableRows([
     ['Worker', selectedProcess?.label || ''],
     ['Run ID', selectedProcess?.id || ''],
@@ -489,63 +495,89 @@ function renderWorkerDetail(selectedProcess) {
     ['Audit skipped', detailStats.skipped || 0],
     ['Audit errors', detailStats.error || 0],
   ]);
-  const previewRows = previewEvent
-    ? tableRows([
+  const detailRows = [
+    workerDetailSectionRow('Status', '<div class="worker-status-grid">'
+      + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + statusRows + '</tbody></table></div>'
+      + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + countRows + '</tbody></table></div>'
+      + '</div>'),
+  ];
+
+  if (previewEvent) {
+    const previewRows = tableRows([
       ['Time', formatDate(previewEvent.event_at)],
       ['Listing', previewEvent.listing_id || ''],
       ['Worker ID', previewEvent.worker_id || ''],
       ['Event', previewEvent.event_type || ''],
       ['Status', previewEvent.status || ''],
       ['Price', eventPrice(previewEvent)],
-      ['Title', latestTitle],
+      ['Title', eventTitle(previewEvent)],
       ['Reason', eventReason(previewEvent)],
-    ])
-    : '<tr><td colspan="2" class="empty-state">No event preview yet.</td></tr>';
-  return '<div class="worker-inspector-backdrop" role="dialog" aria-modal="true" aria-label="Worker detail">'
-    + '<section class="worker-inspector">'
+    ]);
+    detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="worker-preview-grid">'
+      + '<div class="worker-preview-frame">'
+      + (previewEvent.screenshotUrl
+        ? `<a href="${html(previewEvent.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(previewEvent.screenshotUrl)}" alt="Latest worker screenshot"></a>`
+        : '<div class="empty-state">No screenshot available.</div>')
+      + '</div>'
+      + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + previewRows + (workerEventLinks(previewEvent) ? `<tr><th>Links</th><td><div class="row-actions">${workerEventLinks(previewEvent)}</div></td></tr>` : '') + '</tbody></table></div>'
+      + '</div>'));
+  } else {
+    detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="empty-state">No event preview yet.</div>'));
+  }
+
+  const eventRows = store.workerDetailEvents.length
+    ? store.workerDetailEvents.map((event) => (
+      '<tr>'
+        + `<td>${html(new Date(event.event_at).toLocaleString())}</td>`
+        + `<td><code>${html(event.listing_id)}</code></td>`
+        + `<td>${html(event.event_type)}</td>`
+        + `<td><span class="status ${html(event.status)}">${html(event.status)}</span></td>`
+        + `<td>${html(eventPrice(event))}</td>`
+        + `<td class="cell-text">${html(eventTitle(event))}</td>`
+        + `<td class="cell-text">${html(eventReason(event))}</td>`
+        + '<td><div class="row-actions">' + workerEventLinks(event) + '</div></td>'
+      + '</tr>'
+    )).join('')
+    : '<tr><td colspan="8" class="empty-state">No events for this category yet.</td></tr>';
+  detailRows.push(workerDetailSectionRow('Audit Events', '<div class="worker-panel-toolbar worker-detail-section-toolbar">'
+    + '<div class="worker-panel-title">Audit Events</div>'
+    + `<div class="segmented worker-categories">${categoryButtons}</div>`
+    + '</div>'
+    + '<div class="worker-detail-section-tablewrap"><table class="worker-events-table"><thead><tr><th>Time</th><th>Listing</th><th>Event</th><th>Status</th><th>Price</th><th>Title</th><th>Reason</th><th>Links</th></tr></thead><tbody>'
+    + eventRows
+    + '</tbody></table></div>'));
+
+  const commandRows = tableRows([['Command', `npm run ${selectedProcess?.script || ''} -- ${(selectedProcess?.args || []).join(' ')}`]]);
+  const logRows = logs.length
+    ? logs.map((line, index) => {
+      const parsed = compactLogLine(line);
+      return '<tr>'
+        + `<td>${html(index + 1)}</td>`
+        + `<td>${html(parsed.time)}</td>`
+        + `<td class="cell-log">${html(parsed.text)}</td>`
+        + '</tr>';
+    }).join('')
+    : '<tr><td colspan="3" class="empty-state">No text history yet.</td></tr>';
+  detailRows.push(workerDetailSectionRow('Text History', '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + commandRows + '</tbody></table></div>'
+    + '<div class="worker-detail-section-tablewrap"><table class="worker-log-table"><thead><tr><th>#</th><th>Time</th><th>Line</th></tr></thead><tbody>'
+    + logRows
+    + '</tbody></table></div>'));
+
+  return '<div class="worker-inspector-backdrop" aria-label="Worker detail inspector">'
+    + '<aside class="worker-inspector" aria-label="Worker detail">'
     + '<header class="worker-inspector-header">'
     + '<div><div class="label">Worker Workspace</div>'
     + `<div class="worker-inspector-title">${html(selectedProcess?.label || 'Worker')}</div>`
     + `<div class="process-meta">${html(selectedProcess?.id || '')}</div></div>`
     + '<button type="button" class="secondary worker-detail-close-button">Close</button>'
     + '</header>'
-    + '<div class="worker-inspector-body">'
-    + '<section class="worker-panel worker-status-panel">'
-    + '<div class="worker-panel-title">Status</div>'
-    + '<div class="worker-status-grid">'
-    + '<div class="tablewrap compact-tablewrap"><table class="compact-kv-table"><tbody>' + statusRows + '</tbody></table></div>'
-    + '<div class="tablewrap compact-tablewrap"><table class="compact-kv-table"><tbody>' + countRows + '</tbody></table></div>'
-    + '</div>'
-    + '</section>'
-    + '<section class="worker-panel worker-preview-panel">'
-    + '<div class="worker-panel-title">Latest Preview</div>'
-    + '<div class="worker-preview-grid">'
-    + '<div class="worker-preview-frame">'
-    + (previewEvent?.screenshotUrl
-      ? `<a href="${html(previewEvent.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(previewEvent.screenshotUrl)}" alt="Latest worker screenshot"></a>`
-      : '<div class="empty-state">No screenshot available.</div>')
-    + '</div>'
-    + '<div class="tablewrap compact-tablewrap"><table class="compact-kv-table"><tbody>' + previewRows + (latestLinks ? `<tr><th>Links</th><td><div class="row-actions">${latestLinks}</div></td></tr>` : '') + '</tbody></table></div>'
-    + '</div>'
-    + '</section>'
-    + '<section class="worker-panel">'
-    + '<div class="worker-panel-toolbar">'
-    + '<div class="worker-panel-title">Audit Events</div>'
-    + `<div class="segmented worker-categories">${categoryButtons}</div>`
-    + '</div>'
-    + '<div class="tablewrap worker-events-wrap"><table class="worker-events-table"><thead><tr><th>Time</th><th>Listing</th><th>Event</th><th>Status</th><th>Price</th><th>Title</th><th>Reason</th><th>Links</th></tr></thead><tbody>'
-    + eventRows
+    + '<div class="worker-inspector-body worker-detail-table-body">'
+    + '<div class="tablewrap worker-detail-tablewrap" tabindex="0">'
+    + '<table class="worker-detail-table"><thead><tr><th>Section</th><th>Content</th></tr></thead><tbody>'
+    + detailRows.join('')
     + '</tbody></table></div>'
-    + '</section>'
-    + '<section class="worker-panel">'
-    + '<div class="worker-panel-title">Text History</div>'
-    + `<div class="tablewrap compact-tablewrap"><table class="compact-kv-table"><tbody>${tableRows([['Command', `npm run ${selectedProcess?.script || ''} -- ${(selectedProcess?.args || []).join(' ')}`]])}</tbody></table></div>`
-    + '<div class="tablewrap worker-log-wrap"><table class="worker-log-table"><thead><tr><th>#</th><th>Time</th><th>Line</th></tr></thead><tbody>'
-    + logRows
-    + '</tbody></table></div>'
-    + '</section>'
     + '</div>'
-    + '</section>'
+    + '</aside>'
     + '</div>';
 }
 
@@ -600,6 +632,10 @@ async function loadWorkflows() {
 }
 
 function bindEvents() {
+  setTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
+  els.themeSelect?.addEventListener('change', () => {
+    setTheme(els.themeSelect.value);
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !store.selectedProcessId) return;
     store.selectedProcessId = '';
@@ -646,6 +682,7 @@ listingsViewer.bindEvents();
 listingsViewer.renderHead();
 await loadSummary();
 await listingsViewer.loadQueryFields();
+await listingsViewer.loadResolveQueue();
 await listingsViewer.loadRows();
 await loadWorkflows();
 setInterval(loadSummary, 10000);

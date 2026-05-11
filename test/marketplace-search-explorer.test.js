@@ -58,6 +58,13 @@ test('parseArgs reads search radius miles', () => {
   assert.equal(options.radiusMiles, 10);
 });
 
+test('parseArgs infers major city area slugs for search explorer', () => {
+  assert.equal(parseArgs(['--query', 'nikon', '--location', 'Montreal, Quebec']).area, 'montreal');
+  assert.equal(parseArgs(['--query', 'nikon', '--location', 'Calgary, Alberta']).area, 'calgary');
+  assert.equal(parseArgs(['--query', 'nikon', '--location', 'New York, NY']).area, 'nyc');
+  assert.equal(parseArgs(['--query', 'nikon', '--location', 'Vancouver, WA']).area, 'vancouver-wa');
+});
+
 test('pickSearchCardTitle skips freshness and price lines', () => {
   const title = pickSearchCardTitle([
     '刚刚上架',

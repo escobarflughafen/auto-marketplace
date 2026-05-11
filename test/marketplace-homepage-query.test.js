@@ -5,6 +5,7 @@ const {
   parseQuery,
   buildListingsQuery,
   buildListingIdsQuery,
+  buildCountQuery,
 } = require('../scripts/marketplace-homepage-query');
 
 test('parseQuery extracts plain terms and field filters', () => {
@@ -106,4 +107,27 @@ test('buildListingIdsQuery returns backlog-only ids in viewer order', () => {
   assert.match(query.sql, /detail_status IN \('pending', 'error', 'processing'\)/);
   assert.match(query.sql, /ORDER BY last_seen_at DESC/);
   assert.deepEqual(query.params, ['done', '%nikon%', '%nikon%']);
+});
+
+test('listing queries can exclude staged resolve queue ids', () => {
+  const listingsQuery = buildListingsQuery({
+    query: 'status:pending',
+    excludeListingIds: ['queued-a', 'queued-b', 'queued-a'],
+  });
+  assert.match(listingsQuery.sql, /listing_id NOT IN \(\?, \?\)/);
+  assert.deepEqual(listingsQuery.params.slice(0, 3), ['pending', 'queued-a', 'queued-b']);
+
+  const idsQuery = buildListingIdsQuery({
+    query: 'status:pending',
+    excludeListingIds: ['queued-a'],
+  });
+  assert.match(idsQuery.sql, /listing_id NOT IN \(\?\)/);
+  assert.deepEqual(idsQuery.params, ['pending', 'queued-a']);
+
+  const countQuery = buildCountQuery({
+    query: 'status:pending',
+    excludeListingIds: ['queued-a'],
+  });
+  assert.match(countQuery.sql, /listing_id NOT IN \(\?\)/);
+  assert.deepEqual(countQuery.params, ['pending', 'queued-a']);
 });

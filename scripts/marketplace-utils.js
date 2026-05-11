@@ -53,6 +53,161 @@ function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const MARKETPLACE_AREA_SLUGS = new Map([
+  // Vancouver / Lower Mainland / BC.
+  ['vancouver', 'vancouver'],
+  ['north vancouver', 'north-vancouver'],
+  ['west vancouver', 'west-vancouver'],
+  ['burnaby', 'burnaby'],
+  ['richmond', 'richmond'],
+  ['surrey', 'surrey'],
+  ['delta', 'delta'],
+  ['new westminster', 'new-westminster'],
+  ['coquitlam', 'coquitlam'],
+  ['port coquitlam', 'port-coquitlam'],
+  ['port moody', 'port-moody'],
+  ['langley', 'langley'],
+  ['maple ridge', 'maple-ridge'],
+  ['pitt meadows', 'pitt-meadows'],
+  ['white rock', 'white-rock'],
+  ['abbotsford', 'abbotsford'],
+  ['chilliwack', 'chilliwack'],
+  ['squamish', 'squamish'],
+  ['whistler', 'whistler'],
+  ['victoria', 'victoria'],
+  ['nanaimo', 'nanaimo'],
+  ['kelowna', 'kelowna'],
+  ['kamloops', 'kamloops'],
+  ['prince george', 'prince-george'],
+
+  // Pacific Northwest.
+  ['seattle', 'seattle'],
+  ['bellevue', 'bellevue'],
+  ['redmond', 'redmond'],
+  ['kirkland', 'kirkland'],
+  ['everett', 'everett'],
+  ['tacoma', 'tacoma'],
+  ['olympia', 'olympia'],
+  ['bellingham', 'bellingham'],
+  ['spokane', 'spokane'],
+  ['vancouver washington', 'vancouver-wa'],
+  ['vancouver wa', 'vancouver-wa'],
+  ['portland', 'portland'],
+  ['beaverton', 'beaverton'],
+  ['hillsboro', 'hillsboro'],
+  ['gresham', 'gresham'],
+  ['salem', 'salem'],
+  ['eugene', 'eugene'],
+  ['bend', 'bend'],
+  ['boise', 'boise'],
+
+  // Canada major cities.
+  ['montreal', 'montreal'],
+  ['montréal', 'montreal'],
+  ['ottawa', 'ottawa'],
+  ['calgary', 'calgary'],
+  ['edmonton', 'edmonton'],
+  ['toronto', 'toronto'],
+  ['mississauga', 'mississauga'],
+  ['brampton', 'brampton'],
+  ['hamilton', 'hamilton'],
+  ['london', 'london'],
+  ['kitchener', 'kitchener'],
+  ['waterloo', 'waterloo'],
+  ['winnipeg', 'winnipeg'],
+  ['regina', 'regina'],
+  ['saskatoon', 'saskatoon'],
+  ['quebec city', 'quebec-city'],
+  ['québec city', 'quebec-city'],
+  ['halifax', 'halifax'],
+
+  // New York metro and major New York state cities.
+  ['new york', 'nyc'],
+  ['new york city', 'nyc'],
+  ['nyc', 'nyc'],
+  ['brooklyn', 'nyc'],
+  ['queens', 'nyc'],
+  ['bronx', 'nyc'],
+  ['manhattan', 'nyc'],
+  ['staten island', 'nyc'],
+  ['long island', 'long-island'],
+  ['jersey city', 'jersey-city'],
+  ['newark', 'newark'],
+  ['yonkers', 'yonkers'],
+  ['white plains', 'white-plains'],
+  ['albany', 'albany'],
+  ['buffalo', 'buffalo'],
+  ['rochester', 'rochester'],
+  ['syracuse', 'syracuse'],
+
+  // Major US cities.
+  ['los angeles', 'los-angeles'],
+  ['san diego', 'san-diego'],
+  ['san jose', 'san-jose'],
+  ['san francisco', 'san-francisco'],
+  ['sacramento', 'sacramento'],
+  ['fresno', 'fresno'],
+  ['las vegas', 'las-vegas'],
+  ['phoenix', 'phoenix'],
+  ['tucson', 'tucson'],
+  ['salt lake city', 'salt-lake-city'],
+  ['denver', 'denver'],
+  ['albuquerque', 'albuquerque'],
+  ['dallas', 'dallas'],
+  ['fort worth', 'fort-worth'],
+  ['austin', 'austin'],
+  ['houston', 'houston'],
+  ['san antonio', 'san-antonio'],
+  ['el paso', 'el-paso'],
+  ['oklahoma city', 'oklahoma-city'],
+  ['kansas city', 'kansas-city'],
+  ['omaha', 'omaha'],
+  ['minneapolis', 'minneapolis'],
+  ['saint paul', 'saint-paul'],
+  ['st paul', 'saint-paul'],
+  ['chicago', 'chicago'],
+  ['milwaukee', 'milwaukee'],
+  ['detroit', 'detroit'],
+  ['cleveland', 'cleveland'],
+  ['columbus', 'columbus'],
+  ['cincinnati', 'cincinnati'],
+  ['indianapolis', 'indianapolis'],
+  ['st louis', 'st-louis'],
+  ['saint louis', 'st-louis'],
+  ['nashville', 'nashville'],
+  ['memphis', 'memphis'],
+  ['louisville', 'louisville'],
+  ['atlanta', 'atlanta'],
+  ['charlotte', 'charlotte'],
+  ['raleigh', 'raleigh'],
+  ['durham', 'durham'],
+  ['washington', 'washington-dc'],
+  ['washington dc', 'washington-dc'],
+  ['district of columbia', 'washington-dc'],
+  ['baltimore', 'baltimore'],
+  ['philadelphia', 'philadelphia'],
+  ['pittsburgh', 'pittsburgh'],
+  ['boston', 'boston'],
+  ['providence', 'providence'],
+  ['hartford', 'hartford'],
+  ['miami', 'miami'],
+  ['fort lauderdale', 'fort-lauderdale'],
+  ['orlando', 'orlando'],
+  ['tampa', 'tampa'],
+  ['jacksonville', 'jacksonville'],
+  ['new orleans', 'new-orleans'],
+]);
+
+function normalizeAreaLookupKey(value) {
+  return cleanText(value)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\./g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 function inferMarketplaceAreaFromLocation(location) {
   const normalized = cleanText(location).replace(/\s*,\s*/g, ', ');
   if (!normalized) {
@@ -60,7 +215,13 @@ function inferMarketplaceAreaFromLocation(location) {
   }
 
   const primarySegment = normalized.split(',')[0].trim();
-  return slugify(primarySegment);
+  const regionSegment = normalized.split(',')[1]?.trim() || '';
+  const primaryKey = normalizeAreaLookupKey(primarySegment);
+  const regionKey = normalizeAreaLookupKey(regionSegment);
+  const combinedKey = regionKey ? `${primaryKey} ${regionKey}` : primaryKey;
+  return MARKETPLACE_AREA_SLUGS.get(combinedKey)
+    || MARKETPLACE_AREA_SLUGS.get(primaryKey)
+    || slugify(primarySegment);
 }
 
 function buildMarketplaceLocationPatterns(location) {

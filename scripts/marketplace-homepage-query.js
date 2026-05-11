@@ -689,6 +689,29 @@ function clampLimit(limit) {
   return Math.min(parsed, MAX_LIMIT);
 }
 
+function normalizeExcludeListingIds(value) {
+  const source = Array.isArray(value) ? value : [value];
+  return [...new Set(source
+    .flatMap((item) => String(item || '').split(','))
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+function appendExcludeListingIds(where, excludeListingIds) {
+  const ids = normalizeExcludeListingIds(excludeListingIds);
+  if (!ids.length) {
+    return where;
+  }
+
+  const excludeSql = `listing_id NOT IN (${ids.map(() => '?').join(', ')})`;
+  return {
+    sql: where.sql
+      ? `${where.sql} AND ${excludeSql}`
+      : `WHERE ${excludeSql}`,
+    params: [...where.params, ...ids],
+  };
+}
+
 function buildListingsQuery(options = {}) {
   const parsedQuery = parseQuery(options.query || '');
   if (SORT_FIELDS.has(String(options.sort || '').toLowerCase())) {
@@ -698,7 +721,7 @@ function buildListingsQuery(options = {}) {
     options.sortDirection || options.sortDir,
     parsedQuery.sort === 'rank' ? 'asc' : 'desc',
   );
-  const where = buildWhereClause(parsedQuery);
+  const where = appendExcludeListingIds(buildWhereClause(parsedQuery), options.excludeListingIds);
   const limit = clampLimit(options.limit);
   const offset = Math.max(0, Number.parseInt(options.offset, 10) || 0);
   const sql = `
@@ -749,7 +772,7 @@ function buildListingIdsQuery(options = {}) {
     options.sortDirection || options.sortDir,
     parsedQuery.sort === 'rank' ? 'asc' : 'desc',
   );
-  const where = buildWhereClause(parsedQuery);
+  const where = appendExcludeListingIds(buildWhereClause(parsedQuery), options.excludeListingIds);
   const extraClauses = [];
   if (options.backlogOnly !== false) {
     extraClauses.push("detail_status IN ('pending', 'error', 'processing')");
@@ -773,7 +796,7 @@ function buildListingIdsQuery(options = {}) {
 
 function buildCountQuery(options = {}) {
   const parsedQuery = parseQuery(options.query || '');
-  const where = buildWhereClause(parsedQuery);
+  const where = appendExcludeListingIds(buildWhereClause(parsedQuery), options.excludeListingIds);
   return {
     parsedQuery,
     sql: `

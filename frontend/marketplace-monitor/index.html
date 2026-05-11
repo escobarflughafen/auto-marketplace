@@ -4,14 +4,32 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Marketplace Monitor</title>
+  <script>
+    (() => {
+      const savedTheme = localStorage.getItem('marketplace-monitor-theme');
+      document.documentElement.dataset.theme = savedTheme === 'classic' ? 'classic' : 'parasols';
+    })();
+  </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
   <link rel="stylesheet" href="/app/styles.css">
 </head>
 <body>
   <div class="shell">
     <section class="hero">
-      <h1>Marketplace Monitor</h1>
-      <div class="sub">Browse collected rows, watch queue state, and manage Marketplace workers.</div>
+      <div class="hero-brand">
+        <span class="route-badge route-badge-market">M</span>
+        <div>
+          <h1>Marketplace<br>Monitor</h1>
+          <div class="sub">Browse collected rows, watch queue state, and manage Marketplace workers.</div>
+        </div>
+      </div>
+      <label class="theme-field" for="themeSelect">
+        <span>Style</span>
+        <select id="themeSelect">
+          <option value="parasols">Parasols</option>
+          <option value="classic">Classic</option>
+        </select>
+      </label>
     </section>
 
     <section class="workspace-surface">
@@ -34,6 +52,11 @@
       </nav>
 
       <section class="panel active" id="listingsPanel">
+      <nav class="subtabs listing-subtabs">
+        <button type="button" class="subtab active" data-listing-view="queryResultsView">Query Results</button>
+        <button type="button" class="subtab" data-listing-view="backlogQueueView">Backlog Queue</button>
+      </nav>
+      <section class="listing-view active" id="queryResultsView">
       <div class="query-tools">
         <div class="card">
           <div class="label">Query Builder</div>
@@ -81,10 +104,18 @@
         <button type="button" class="secondary" id="refreshListingsButton">Refresh</button>
       </div>
       <div class="resolve-toolbar">
-        <button type="button" class="secondary" id="resolveSelectedButton" disabled>Resolve Selected</button>
+        <button type="button" class="secondary" id="queueSelectedButton" disabled>Queue Selected</button>
+        <button type="button" class="secondary" id="resolveQueuedButton" disabled>Run Queue</button>
+        <button type="button" class="secondary" id="clearResolveQueueButton" disabled>Clear Queue</button>
+        <label class="inline-control resolve-hide-control">
+          <input id="hideQueuedResolveCheckbox" type="checkbox" checked>
+          Hide queued
+        </label>
+        <button type="button" class="secondary" id="resolveSelectedButton" disabled>Resolve Selected Now</button>
         <button type="button" class="secondary" id="resolveCurrentButton">Resolve All In View</button>
         <div class="process-meta" id="listingResolveMeta">No listing resolve batch queued.</div>
       </div>
+      <div class="resolve-queue-panel" id="resolveQueuePanel"></div>
       <div class="listings-main" id="listingsMain">
         <div class="listings-table-pane">
           <div class="results-meta" id="resultsMeta"></div>
@@ -109,6 +140,106 @@
           </div>
         </aside>
       </div>
+      </section>
+      <section class="listing-view" id="backlogQueueView">
+        <div class="backlog-toolbar">
+          <label class="inline-control">
+            Status
+            <select id="backlogStatusFilter">
+              <option value="all">Eligible</option>
+              <option value="pending">Pending</option>
+              <option value="error">Errors</option>
+              <option value="processing">Stale processing</option>
+              <option value="sold">Sold</option>
+              <option value="pending_sale">Pending sale</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </label>
+          <label class="inline-control">
+            Source
+            <select id="backlogSourceFilter">
+              <option value="">All</option>
+              <option value="homepage">Homepage</option>
+              <option value="search">Search</option>
+            </select>
+          </label>
+          <label class="inline-control">
+            Keyword
+            <input id="backlogKeywordFilter" type="text" placeholder="keyword">
+          </label>
+          <label class="inline-control">
+            Order
+            <select id="backlogOrder">
+              <option value="priority">Priority</option>
+              <option value="rank">Rank</option>
+              <option value="latest">Latest</option>
+              <option value="earliest">Earliest</option>
+            </select>
+          </label>
+          <label class="inline-control">
+            Time
+            <select id="backlogSeenTimeField">
+              <option value="last_seen">Last seen</option>
+              <option value="first_seen">First seen</option>
+            </select>
+          </label>
+          <label class="inline-control">
+            Limit
+            <select id="backlogLimit">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+          <button type="button" class="secondary" id="refreshBacklogButton">Refresh</button>
+          <button type="button" class="secondary" id="queueBacklogSelectedButton" disabled>Queue Selected</button>
+          <button type="button" class="secondary" id="queueBacklogVisibleButton" disabled>Queue Visible</button>
+        </div>
+        <div class="backlog-advanced">
+          <label class="inline-control">
+            Seen after
+            <input id="backlogSeenAfter" type="text" placeholder="2026-05-08">
+          </label>
+          <label class="inline-control">
+            Seen before
+            <input id="backlogSeenBefore" type="text" placeholder="2026-05-11">
+          </label>
+          <label class="inline-control">
+            Max attempts
+            <input id="backlogMaxAttempts" type="number" min="1" placeholder="Any">
+          </label>
+          <label class="inline-control">
+            Retry delay
+            <input id="backlogRetryDelaySeconds" type="number" min="0" value="300">
+          </label>
+        </div>
+        <div class="results-meta" id="backlogMeta">Backlog queue not loaded yet.</div>
+        <div class="tablewrap backlog-tablewrap" tabindex="0">
+          <table class="backlog-table">
+            <thead>
+              <tr>
+                <th><input id="selectAllBacklogRows" type="checkbox" aria-label="Select all backlog rows"></th>
+                <th>#</th>
+                <th>Status</th>
+                <th>ID</th>
+                <th>Rank</th>
+                <th>Attempts</th>
+                <th>Source</th>
+                <th>Keyword</th>
+                <th>Last seen</th>
+                <th>Started</th>
+                <th>Completed</th>
+                <th>Title</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="backlogTableBody">
+              <tr><td colspan="13" class="empty-state">No backlog preview loaded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
       </section>
 
       <section class="panel" id="opsPanel">

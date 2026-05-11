@@ -255,6 +255,59 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_workflow_events_type_time
     ON workflow_events (event_type, event_at DESC);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS resolve_queue_items (
+      listing_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'queued',
+      queued_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      queued_by TEXT NOT NULL DEFAULT 'viewer',
+      workflow_run_id TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (listing_id) REFERENCES homepage_listings(listing_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_resolve_queue_items_status_updated
+    ON resolve_queue_items (status, updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_resolve_queue_items_run
+    ON resolve_queue_items (workflow_run_id, status);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS resolve_queue_events (
+      event_id TEXT PRIMARY KEY,
+      listing_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      workflow_run_id TEXT NOT NULL DEFAULT '',
+      actor TEXT NOT NULL DEFAULT 'viewer',
+      status TEXT NOT NULL DEFAULT '',
+      content_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (listing_id) REFERENCES homepage_listings(listing_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_resolve_queue_events_listing_time
+    ON resolve_queue_events (listing_id, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_resolve_queue_events_type_time
+    ON resolve_queue_events (event_type, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_resolve_queue_events_run_time
+    ON resolve_queue_events (workflow_run_id, event_at DESC);
+  `);
 }
 
 function ensureColumn(db, tableName, columnName, definitionSql) {
@@ -950,6 +1003,378 @@ function runTransaction(db, callback) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+function buildResolveQueueEventId(eventAt, listingId, eventType) {
+  const entropy = crypto.randomBytes(8).toString('hex');
+  return [
+    String(eventAt || new Date().toISOString()).replace(/[^0-9A-Za-z]/g, ''),
+    String(listingId || 'unknown'),
+    String(eventType || 'resolve_queue_event'),
+    entropy,
+  ].join('-');
+}
+
+function normalizeResolveQueueEventRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    event_id: row.event_id,
+    listing_id: row.listing_id,
+    event_type: row.event_type,
+    event_at: row.event_at,
+    workflow_run_id: row.workflow_run_id || '',
+    actor: row.actor || '',
+    status: row.status || '',
+    content: parseJsonObject(row.content_json),
+    error: row.error || '',
+  };
+}
+
+function normalizeResolveQueueItemRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    listing_id: row.listing_id,
+    status: row.status,
+    queued_at: row.queued_at,
+    updated_at: row.updated_at,
+    queued_by: row.queued_by,
+    workflow_run_id: row.workflow_run_id || '',
+    note: row.note || '',
+    href: row.href || '',
+    detail_status: row.detail_status || '',
+    card_title: row.card_title || '',
+    detail_title: row.detail_title || '',
+    source: row.source || '',
+    source_keyword: row.source_keyword || '',
+    last_seen_rank: row.last_seen_rank,
+    last_seen_at: row.last_seen_at || '',
+  };
+}
+
+function appendResolveQueueEvent(db, event) {
+  const eventAt = event.eventAt || event.event_at || new Date().toISOString();
+  const listingId = String(event.listingId || event.listing_id || '').trim();
+  if (!listingId) {
+    throw new Error('appendResolveQueueEvent requires listingId');
+  }
+
+  const eventType = normalizeKeyword(event.eventType || event.event_type || 'resolve_queue_event');
+  const eventId = String(event.eventId || event.event_id || buildResolveQueueEventId(eventAt, listingId, eventType));
+
+  db.prepare(`
+    INSERT INTO resolve_queue_events (
+      event_id,
+      listing_id,
+      event_type,
+      event_at,
+      workflow_run_id,
+      actor,
+      status,
+      content_json,
+      error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    eventId,
+    listingId,
+    eventType,
+    eventAt,
+    String(event.workflowRunId || event.workflow_run_id || '').trim(),
+    String(event.actor || 'viewer').trim(),
+    String(event.status || '').trim(),
+    serializeJson(event.content || event.contentJson || {}),
+    String(event.error || '').trim(),
+  );
+
+  return normalizeResolveQueueEventRow(db.prepare(`
+    SELECT *
+    FROM resolve_queue_events
+    WHERE event_id = ?
+  `).get(eventId));
+}
+
+function activeResolveQueueStatuses() {
+  return ['queued', 'dispatched', 'failed'];
+}
+
+function listResolveQueueItems(db, options = {}) {
+  const statuses = Array.isArray(options.statuses)
+    ? uniqueStrings(options.statuses)
+    : activeResolveQueueStatuses();
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 500)) : 200;
+  const statusSql = statuses.length
+    ? `WHERE q.status IN (${statuses.map(() => '?').join(', ')})`
+    : '';
+  return db.prepare(`
+    SELECT
+      q.*,
+      h.href,
+      h.detail_status,
+      h.card_title,
+      h.detail_title,
+      h.source,
+      h.source_keyword,
+      h.last_seen_rank,
+      h.last_seen_at
+    FROM resolve_queue_items q
+    LEFT JOIN homepage_listings h ON h.listing_id = q.listing_id
+    ${statusSql}
+    ORDER BY
+      CASE q.status
+        WHEN 'queued' THEN 0
+        WHEN 'dispatched' THEN 1
+        WHEN 'failed' THEN 2
+        ELSE 3
+      END,
+      q.queued_at ASC
+    LIMIT ?
+  `).all(...statuses, limit).map(normalizeResolveQueueItemRow);
+}
+
+function listResolveQueueEvents(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
+  return db.prepare(`
+    SELECT *
+    FROM resolve_queue_events
+    ORDER BY event_at DESC
+    LIMIT ?
+  `).all(limit).map(normalizeResolveQueueEventRow);
+}
+
+function getResolveQueueCounts(db) {
+  const rows = db.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM resolve_queue_items
+    GROUP BY status
+  `).all();
+  return rows.reduce((accumulator, row) => ({
+    ...accumulator,
+    [row.status]: row.count,
+  }), {
+    queued: 0,
+    dispatched: 0,
+    failed: 0,
+    completed: 0,
+    cleared: 0,
+  });
+}
+
+function validBacklogListingIds(db, listingIds) {
+  const ids = uniqueStrings(listingIds);
+  if (!ids.length) {
+    return [];
+  }
+
+  return db.prepare(`
+    SELECT listing_id
+    FROM homepage_listings
+    WHERE listing_id IN (${ids.map(() => '?').join(', ')})
+      AND detail_status IN ('pending', 'error', 'processing')
+  `).all(...ids).map((row) => row.listing_id);
+}
+
+function addResolveQueueItems(db, listingIds, options = {}) {
+  const requestedIds = uniqueStrings(listingIds);
+  const validIds = validBacklogListingIds(db, requestedIds);
+  const validIdSet = new Set(validIds);
+  const skippedIds = requestedIds.filter((listingId) => !validIdSet.has(listingId));
+  const actor = String(options.actor || 'viewer').trim() || 'viewer';
+  const now = options.queuedAt || new Date().toISOString();
+  let addedCount = 0;
+
+  runTransaction(db, () => {
+    for (const listingId of validIds) {
+      const previous = db.prepare(`
+        SELECT status
+        FROM resolve_queue_items
+        WHERE listing_id = ?
+      `).get(listingId);
+      if (previous?.status !== 'queued') {
+        addedCount += 1;
+      }
+      db.prepare(`
+        INSERT INTO resolve_queue_items (
+          listing_id,
+          status,
+          queued_at,
+          updated_at,
+          queued_by,
+          workflow_run_id,
+          note
+        ) VALUES (?, 'queued', ?, ?, ?, '', '')
+        ON CONFLICT(listing_id) DO UPDATE SET
+          status = 'queued',
+          queued_at = excluded.queued_at,
+          updated_at = excluded.updated_at,
+          queued_by = excluded.queued_by,
+          workflow_run_id = '',
+          note = ''
+      `).run(listingId, now, now, actor);
+      appendResolveQueueEvent(db, {
+        listingId,
+        eventType: previous ? 'resolve_queue_requeued' : 'resolve_queue_added',
+        eventAt: now,
+        actor,
+        status: 'queued',
+        content: {
+          previousStatus: previous?.status || '',
+        },
+      });
+    }
+  });
+
+  return {
+    requestedIds,
+    listingIds: validIds,
+    skippedIds,
+    addedCount,
+    items: listResolveQueueItems(db),
+    counts: getResolveQueueCounts(db),
+  };
+}
+
+function clearResolveQueueItems(db, listingIds = [], options = {}) {
+  const requestedIds = uniqueStrings(listingIds);
+  const actor = String(options.actor || 'viewer').trim() || 'viewer';
+  const now = options.clearedAt || new Date().toISOString();
+  const params = ['queued', 'failed'];
+  let idSql = '';
+  if (requestedIds.length) {
+    idSql = `AND listing_id IN (${requestedIds.map(() => '?').join(', ')})`;
+    params.push(...requestedIds);
+  }
+  const rows = db.prepare(`
+    SELECT listing_id, status
+    FROM resolve_queue_items
+    WHERE status IN (?, ?)
+      ${idSql}
+  `).all(...params);
+
+  runTransaction(db, () => {
+    for (const row of rows) {
+      db.prepare(`
+        UPDATE resolve_queue_items
+        SET status = 'cleared',
+          updated_at = ?,
+          note = ''
+        WHERE listing_id = ?
+      `).run(now, row.listing_id);
+      appendResolveQueueEvent(db, {
+        listingId: row.listing_id,
+        eventType: 'resolve_queue_cleared',
+        eventAt: now,
+        actor,
+        status: 'cleared',
+        content: {
+          previousStatus: row.status,
+        },
+      });
+    }
+  });
+
+  return {
+    clearedCount: rows.length,
+    listingIds: rows.map((row) => row.listing_id),
+    items: listResolveQueueItems(db),
+    counts: getResolveQueueCounts(db),
+  };
+}
+
+function markResolveQueueDispatched(db, listingIds, workflowRunId, options = {}) {
+  const ids = uniqueStrings(listingIds);
+  const actor = String(options.actor || 'viewer').trim() || 'viewer';
+  const now = options.dispatchedAt || new Date().toISOString();
+  let dispatchedCount = 0;
+
+  runTransaction(db, () => {
+    for (const listingId of ids) {
+      const result = db.prepare(`
+        UPDATE resolve_queue_items
+        SET status = 'dispatched',
+          updated_at = ?,
+          workflow_run_id = ?,
+          note = ''
+        WHERE listing_id = ?
+          AND status = 'queued'
+      `).run(now, String(workflowRunId || ''), listingId);
+      if (result.changes > 0) {
+        dispatchedCount += 1;
+        appendResolveQueueEvent(db, {
+          listingId,
+          eventType: 'resolve_queue_dispatched',
+          eventAt: now,
+          workflowRunId,
+          actor,
+          status: 'dispatched',
+        });
+      }
+    }
+  });
+
+  return {
+    dispatchedCount,
+    listingIds: ids,
+    items: listResolveQueueItems(db),
+    counts: getResolveQueueCounts(db),
+  };
+}
+
+function refreshResolveQueueRunStatuses(db) {
+  const rows = db.prepare(`
+    SELECT q.listing_id, q.workflow_run_id, q.status, w.status AS workflow_status
+    FROM resolve_queue_items q
+    JOIN workflow_runs w ON w.run_id = q.workflow_run_id
+    WHERE q.status = 'dispatched'
+  `).all();
+  const now = new Date().toISOString();
+  let updatedCount = 0;
+
+  runTransaction(db, () => {
+    for (const row of rows) {
+      const workflowStatus = String(row.workflow_status || '');
+      let nextStatus = '';
+      if (workflowStatus === 'exited') {
+        nextStatus = 'completed';
+      } else if (workflowStatus === 'failed' || workflowStatus === 'error' || workflowStatus === 'lost') {
+        nextStatus = 'failed';
+      }
+      if (!nextStatus) {
+        continue;
+      }
+
+      db.prepare(`
+        UPDATE resolve_queue_items
+        SET status = ?,
+          updated_at = ?,
+          note = ?
+        WHERE listing_id = ?
+          AND status = 'dispatched'
+      `).run(nextStatus, now, `workflow ${workflowStatus}`, row.listing_id);
+      appendResolveQueueEvent(db, {
+        listingId: row.listing_id,
+        eventType: nextStatus === 'completed' ? 'resolve_queue_completed' : 'resolve_queue_failed',
+        eventAt: now,
+        workflowRunId: row.workflow_run_id,
+        actor: 'system',
+        status: nextStatus,
+        content: {
+          workflowStatus,
+        },
+      });
+      updatedCount += 1;
+    }
+  });
+
+  return {
+    updatedCount,
+    items: listResolveQueueItems(db),
+    counts: getResolveQueueCounts(db),
+  };
 }
 
 function upsertListingSearchKeyword(db, listingId, keyword, options = {}) {
@@ -1656,11 +2081,19 @@ module.exports = {
   runTransaction,
   appendListingEvent,
   appendWorkflowEvent,
+  appendResolveQueueEvent,
   getWorkflowEvent,
   listWorkflowEvents,
   getListingEvent,
   getListingEvents,
   getLatestListingEvent,
+  addResolveQueueItems,
+  clearResolveQueueItems,
+  markResolveQueueDispatched,
+  refreshResolveQueueRunStatuses,
+  listResolveQueueItems,
+  listResolveQueueEvents,
+  getResolveQueueCounts,
   upsertListingSearchKeyword,
   upsertSearchTitleBagKeyword,
   getSearchTitleBagKeyword,

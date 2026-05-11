@@ -21,3 +21,18 @@ test('parseArgs reads homepage location flags', () => {
   assert.equal(options.maxItems, 5);
   assert.equal(options.startUrl, 'https://www.facebook.com/marketplace/ottawa/');
 });
+
+test('parseArgs builds homepage route URLs for major city locations', () => {
+  assert.equal(
+    parseArgs(['--location', 'Montreal, Quebec']).startUrl,
+    'https://www.facebook.com/marketplace/montreal/',
+  );
+  assert.equal(
+    parseArgs(['--location', 'Calgary, Alberta']).startUrl,
+    'https://www.facebook.com/marketplace/calgary/',
+  );
+  assert.equal(
+    parseArgs(['--location', 'New York, NY']).startUrl,
+    'https://www.facebook.com/marketplace/nyc/',
+  );
+});

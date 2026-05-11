@@ -28,7 +28,10 @@ const COLUMNS = [
     width: 44,
     responsive: 0,
     headerSort: false,
-    cellClick: (_event, cell) => cell.getRow().toggleSelect(),
+    cellClick: (_event, cell) => {
+      cell.getTable()._marketplaceViewer?.suppressNextSelectionPreview();
+      cell.getRow().toggleSelect();
+    },
   },
   { title: 'ID', field: 'listing_id', width: 142, frozen: true, responsive: 0, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
   { title: 'Status', field: 'detail_status', width: 94, responsive: 0, formatter: (cell) => `<span class="status ${escapeHtml(cell.getValue())}">${escapeHtml(cell.getValue())}</span>` },
@@ -145,9 +148,7 @@ function actionsFormatter(cell) {
   if (isBacklogRow(row)) {
     actions.push(`<button type="button" class="secondary row-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">Fetch</button>`);
   }
-  if (isResolvedPovRow(row)) {
-    actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">POV</button>`);
-  }
+  actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">POV</button>`);
   if (row.href) {
     actions.push(`<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>`);
   }
@@ -198,6 +199,16 @@ export function createListingsViewer() {
     selectedSnapshotListingId: '',
     selectedIds: [],
     selectedBacklogIds: [],
+    selectedPovOrderIds: [],
+    resolveQueueIds: [],
+    resolveQueueItems: [],
+    resolveQueueEvents: [],
+    resolveQueueCounts: {},
+    resolveQueueAvailable: true,
+    backlogRows: [],
+    selectedBacklogQueueIds: [],
+    suppressSelectionPreview: false,
+    hideQueuedResolve: true,
     resolving: false,
     resolveMessage: 'No listing resolve batch queued.',
     resolveProcessId: '',
@@ -221,10 +232,40 @@ export function createListingsViewer() {
     snapshotLinks: document.getElementById('snapshotLinks'),
     listingStatusTools: document.getElementById('listingStatusTools'),
     listingLimitSelect: document.getElementById('listingLimitSelect'),
+    queueSelectedButton: document.getElementById('queueSelectedButton'),
+    resolveQueuedButton: document.getElementById('resolveQueuedButton'),
+    clearResolveQueueButton: document.getElementById('clearResolveQueueButton'),
+    hideQueuedResolveCheckbox: document.getElementById('hideQueuedResolveCheckbox'),
     resolveSelectedButton: document.getElementById('resolveSelectedButton'),
     resolveCurrentButton: document.getElementById('resolveCurrentButton'),
     listingResolveMeta: document.getElementById('listingResolveMeta'),
+    resolveQueuePanel: document.getElementById('resolveQueuePanel'),
+    backlogMeta: document.getElementById('backlogMeta'),
+    backlogTableBody: document.getElementById('backlogTableBody'),
+    backlogStatusFilter: document.getElementById('backlogStatusFilter'),
+    backlogSourceFilter: document.getElementById('backlogSourceFilter'),
+    backlogKeywordFilter: document.getElementById('backlogKeywordFilter'),
+    backlogOrder: document.getElementById('backlogOrder'),
+    backlogSeenTimeField: document.getElementById('backlogSeenTimeField'),
+    backlogLimit: document.getElementById('backlogLimit'),
+    backlogSeenAfter: document.getElementById('backlogSeenAfter'),
+    backlogSeenBefore: document.getElementById('backlogSeenBefore'),
+    backlogMaxAttempts: document.getElementById('backlogMaxAttempts'),
+    backlogRetryDelaySeconds: document.getElementById('backlogRetryDelaySeconds'),
+    refreshBacklogButton: document.getElementById('refreshBacklogButton'),
+    queueBacklogSelectedButton: document.getElementById('queueBacklogSelectedButton'),
+    queueBacklogVisibleButton: document.getElementById('queueBacklogVisibleButton'),
+    selectAllBacklogRows: document.getElementById('selectAllBacklogRows'),
   };
+
+  function queuedExclusionIds() {
+    return state.hideQueuedResolve
+      ? state.resolveQueueItems
+        .filter((item) => item.status === 'queued')
+        .map((item) => item.listing_id)
+        .filter(Boolean)
+      : [];
+  }
 
   function buildListingsUrl(params = {}) {
     const page = Math.max(1, Number.parseInt(params.page, 10) || 1);
@@ -245,6 +286,9 @@ export function createListingsViewer() {
     if (sort) {
       urlParams.set('sort', sort);
       urlParams.set('sortDir', sorter.dir === 'asc' ? 'asc' : 'desc');
+    }
+    for (const listingId of queuedExclusionIds()) {
+      urlParams.append('excludeListingId', listingId);
     }
     return `/api/listings?${urlParams.toString()}`;
   }
@@ -288,22 +332,44 @@ export function createListingsViewer() {
       resizableColumnFit: true,
       columns: COLUMNS,
     });
+    state.table.on('rowSelected', (row) => {
+      const data = row.getData();
+      const listingId = data?.listing_id;
+      if (listingId) {
+        state.selectedPovOrderIds = state.selectedPovOrderIds.filter((id) => id !== listingId);
+        state.selectedPovOrderIds.push(listingId);
+      }
+      if (!state.suppressSelectionPreview || !els.snapshotPanel.hidden) {
+        renderSnapshotPanel(data || null);
+      }
+    });
+    state.table.on('rowDeselected', (row) => {
+      const listingId = row.getData()?.listing_id;
+      if (listingId) {
+        state.selectedPovOrderIds = state.selectedPovOrderIds.filter((id) => id !== listingId);
+      }
+      if (!state.suppressSelectionPreview || !els.snapshotPanel.hidden) {
+        renderLatestSelectedSnapshot();
+      }
+    });
     state.table.on('rowSelectionChanged', (data) => {
       state.selectedIds = data.map((row) => row.listing_id).filter(Boolean);
       state.selectedBacklogIds = data
         .filter((row) => isBacklogRow(row))
         .map((row) => row.listing_id)
         .filter(Boolean);
-      const focused = data.find((row) => row.listing_id === state.selectedSnapshotListingId);
-      const selectedForPov = isResolvedPovRow(focused)
-        ? focused
-        : data.slice().reverse().find((row) => isResolvedPovRow(row));
-      renderSnapshotPanel(selectedForPov || null);
+      if (!state.suppressSelectionPreview || !els.snapshotPanel.hidden) {
+        renderLatestSelectedSnapshot(data);
+      }
+      state.suppressSelectionPreview = false;
       renderResolveControls();
     });
     state.table._marketplaceViewer = {
       showSnapshot: renderSnapshotPanel,
       resolveListing: resolveListing,
+      suppressNextSelectionPreview: () => {
+        state.suppressSelectionPreview = true;
+      },
     };
   }
 
@@ -312,41 +378,78 @@ export function createListingsViewer() {
     const offset = stats.offset ?? 0;
     els.resultsMeta.textContent = 'Showing ' + state.rows.length + ' of ' + state.total + ' rows'
       + (state.q ? ' for query: ' + state.q : '')
+      + (queuedExclusionIds().length ? ` · hiding ${queuedExclusionIds().length} queued` : '')
       + ' · sort: ' + (payload.sort || '') + ' ' + (payload.sortDirection || '')
       + ' · query: ' + (stats.elapsedMs ?? 0) + 'ms'
       + ' · window: ' + offset + '-' + (offset + state.rows.length);
   }
 
+  function selectedRowForPov(data) {
+    const selectedIds = new Set(data.map((row) => row.listing_id).filter(Boolean));
+    state.selectedPovOrderIds = state.selectedPovOrderIds.filter((id) => selectedIds.has(id));
+    const latestSelectedId = state.selectedPovOrderIds[state.selectedPovOrderIds.length - 1];
+    return data.find((row) => row.listing_id === latestSelectedId) || data[data.length - 1] || null;
+  }
+
+  function renderLatestSelectedSnapshot(data = state.table?.getSelectedData?.() || []) {
+    renderSnapshotPanel(selectedRowForPov(data));
+  }
+
+  function positionSnapshotPanel() {
+    if (els.snapshotPanel.hidden) return;
+    if (!window.matchMedia('(min-width: 1180px)').matches) {
+      els.snapshotPanel.style.removeProperty('--snapshot-top');
+      return;
+    }
+
+    const minTop = 12;
+    const minHeight = 280;
+    const maxTop = Math.max(minTop, window.innerHeight - minHeight - 12);
+    const workspaceTop = els.listingsMain.getBoundingClientRect().top;
+    const top = Math.min(Math.max(minTop, workspaceTop), maxTop);
+    els.snapshotPanel.style.setProperty('--snapshot-top', `${top}px`);
+  }
+
   function renderSnapshotPanel(row) {
-    if (!isResolvedPovRow(row)) {
+    if (!row) {
       state.selectedSnapshotListingId = '';
       els.snapshotPanel.hidden = true;
       els.listingsMain.classList.remove('snapshot-open');
       document.body.classList.remove('listing-pov-open');
+      els.snapshotPanel.style.removeProperty('--snapshot-top');
       return;
     }
 
+    const resolved = isResolvedPovRow(row);
     state.selectedSnapshotListingId = row.listing_id || '';
     els.snapshotPanel.hidden = false;
     els.listingsMain.classList.add('snapshot-open');
     document.body.classList.add('listing-pov-open');
+    positionSnapshotPanel();
     els.snapshotTitle.textContent = displayTitleForRow(row);
     els.snapshotMeta.textContent = `${row.listing_id} · ${row.detail_status} · ${row.source || 'unknown source'}${row.source_keyword ? ' · ' + row.source_keyword : ''}`;
     els.snapshotImageWrap.innerHTML = row.screenshotUrl
       ? `<a href="${escapeHtml(row.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="snapshot-image" src="${escapeHtml(row.screenshotUrl)}" alt="Worker screenshot for ${escapeHtml(row.listing_id)}"></a>`
-      : '<div class="empty-state">No worker screenshot captured yet.</div>';
+      : '<div class="empty-state">Pending changes: no worker screenshot captured yet. Showing available row data.</div>';
     const details = [
+      resolved ? null : ['Pending changes', 'Resolve has not completed yet. Showing available listing data.'],
       ['Status', row.detail_status],
+      ['Title', displayTitleForRow(row)],
+      ['Card title', row.card_title],
+      ['Card text', row.card_text],
       ['Price', row.detail_price || row.numeric_price],
       ['Location', row.detail_location],
       ['Condition', row.detail_condition],
       ['Seller', row.detail_seller_name],
+      ['Source', row.source],
+      ['Keyword', row.source_keyword],
+      ['Rank', row.last_seen_rank],
       ['Attempts', row.detail_attempts],
       ['Last error', row.detail_last_error],
       ['First seen', formatDate(row.first_seen_at)],
       ['Last seen', formatDate(row.last_seen_at)],
       ['Completed', formatDate(row.detail_completed_at)],
-    ].filter(([, value]) => value !== undefined && value !== null && value !== '');
+    ].filter((item) => item && item[1] !== undefined && item[1] !== null && item[1] !== '');
     els.snapshotDetails.innerHTML = details.map(([label, value]) => (
       `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`
     )).join('');
@@ -357,17 +460,188 @@ export function createListingsViewer() {
     ].filter(Boolean).join('');
   }
 
+  function resolveQueueTitle(item) {
+    return item.detail_title || item.card_title || item.listing_id || '';
+  }
+
+  function renderResolveQueuePanel() {
+    const items = state.resolveQueueItems;
+    const events = state.resolveQueueEvents.slice(0, 5);
+    const counts = state.resolveQueueCounts || {};
+    if (!items.length && !events.length) {
+      els.resolveQueuePanel.innerHTML = '';
+      return;
+    }
+
+    const itemRows = items.length
+      ? items.map((item) => (
+        '<tr>'
+          + `<td><span class="status ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span></td>`
+          + `<td><code>${escapeHtml(item.listing_id)}</code></td>`
+          + `<td class="cell-text">${escapeHtml(resolveQueueTitle(item))}</td>`
+          + `<td>${escapeHtml(item.detail_status || '')}</td>`
+          + `<td>${escapeHtml(formatDate(item.queued_at))}</td>`
+          + `<td>${escapeHtml(item.workflow_run_id || '')}</td>`
+          + '<td><div class="row-actions">'
+          + (item.status === 'queued' || item.status === 'failed'
+            ? `<button type="button" class="secondary resolve-queue-remove-button" data-listing-id="${escapeHtml(item.listing_id)}">Remove</button>`
+            : '')
+          + (item.href ? `<a class="button-link compact" href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
+          + '</div></td>'
+        + '</tr>'
+      )).join('')
+      : '<tr><td colspan="7" class="empty-state">No active resolve queue rows.</td></tr>';
+
+    const eventRows = events.length
+      ? events.map((event) => (
+        '<tr>'
+          + `<td>${escapeHtml(formatDate(event.event_at))}</td>`
+          + `<td><code>${escapeHtml(event.listing_id)}</code></td>`
+          + `<td>${escapeHtml(event.event_type)}</td>`
+          + `<td>${escapeHtml(event.status)}</td>`
+          + `<td>${escapeHtml(event.workflow_run_id || '')}</td>`
+        + '</tr>'
+      )).join('')
+      : '<tr><td colspan="5" class="empty-state">No resolve queue audit events yet.</td></tr>';
+
+    els.resolveQueuePanel.innerHTML = '<section class="card resolve-queue-card">'
+      + '<div class="resolve-queue-header">'
+      + '<div><div class="label">Resolve Queue</div>'
+      + `<div class="process-meta">${escapeHtml(counts.queued || 0)} queued · ${escapeHtml(counts.dispatched || 0)} dispatched · ${escapeHtml(counts.failed || 0)} failed · ${escapeHtml(counts.completed || 0)} completed</div></div>`
+      + '</div>'
+      + '<div class="tablewrap resolve-queue-tablewrap"><table class="resolve-queue-table"><thead><tr><th>Status</th><th>ID</th><th>Title</th><th>Row</th><th>Queued</th><th>Run</th><th></th></tr></thead><tbody>'
+      + itemRows
+      + '</tbody></table></div>'
+      + '<div class="resolve-queue-audit">'
+      + '<div class="label">Queue Audit</div>'
+      + '<div class="tablewrap compact-tablewrap"><table class="compact-kv-table resolve-queue-events"><thead><tr><th>Time</th><th>ID</th><th>Event</th><th>Status</th><th>Run</th></tr></thead><tbody>'
+      + eventRows
+      + '</tbody></table></div>'
+      + '</div>'
+      + '</section>';
+  }
+
   function renderResolveControls(message = '') {
     if (message) {
       state.resolveMessage = message;
     }
     const count = state.selectedBacklogIds.length;
+    const queuedCount = state.resolveQueueItems.filter((item) => item.status === 'queued').length;
+    const clearableCount = state.resolveQueueItems.filter((item) => item.status === 'queued' || item.status === 'failed').length;
+    const activeQueueCount = state.resolveQueueItems.length;
+    els.queueSelectedButton.disabled = !state.resolveQueueAvailable || state.resolving || count === 0;
+    els.resolveQueuedButton.disabled = !state.resolveQueueAvailable || state.resolving || queuedCount === 0;
+    els.clearResolveQueueButton.disabled = !state.resolveQueueAvailable || state.resolving || clearableCount === 0;
+    els.hideQueuedResolveCheckbox.disabled = !state.resolveQueueAvailable;
+    els.hideQueuedResolveCheckbox.checked = state.hideQueuedResolve;
     els.resolveSelectedButton.disabled = state.resolving || count === 0;
     els.resolveCurrentButton.disabled = state.resolving || state.total === 0;
-    if (count > 0 && !state.resolving) {
+    if (queuedCount > 0 && count > 0 && !state.resolving) {
+      els.listingResolveMeta.textContent = `${queuedCount} queued for resolve. ${count} selected can be added.`;
+    } else if (queuedCount > 0 && !state.resolving) {
+      els.listingResolveMeta.textContent = `${queuedCount} queued for resolve${state.hideQueuedResolve ? ' and hidden from view' : ''}.`;
+    } else if (count > 0 && !state.resolving) {
       els.listingResolveMeta.textContent = `${count} selected for backlog resolve.`;
     } else {
       els.listingResolveMeta.textContent = state.resolveMessage;
+    }
+    renderResolveQueuePanel();
+  }
+
+  function backlogTitle(row) {
+    return row.detail_title || row.card_title || row.listing_id || '';
+  }
+
+  function syncBacklogSelectionControls() {
+    const visibleIds = state.backlogRows.map((row) => row.listing_id).filter(Boolean);
+    const selectedVisible = visibleIds.filter((id) => state.selectedBacklogQueueIds.includes(id));
+    els.queueBacklogSelectedButton.disabled = !state.resolveQueueAvailable || selectedVisible.length === 0;
+    els.queueBacklogVisibleButton.disabled = !state.resolveQueueAvailable || visibleIds.length === 0;
+    els.selectAllBacklogRows.disabled = visibleIds.length === 0;
+    els.selectAllBacklogRows.checked = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
+    els.selectAllBacklogRows.indeterminate = selectedVisible.length > 0 && selectedVisible.length < visibleIds.length;
+  }
+
+  function renderBacklogRows() {
+    const queuedIds = new Set(state.resolveQueueIds);
+    const rows = state.backlogRows;
+    if (!rows.length) {
+      els.backlogTableBody.innerHTML = '<tr><td colspan="13" class="empty-state">No backlog candidates match these controls.</td></tr>';
+      syncBacklogSelectionControls();
+      return;
+    }
+
+    els.backlogTableBody.innerHTML = rows.map((row, index) => {
+      const listingId = row.listing_id || '';
+      const selected = state.selectedBacklogQueueIds.includes(listingId);
+      const queued = queuedIds.has(listingId);
+      return '<tr>'
+        + `<td><input type="checkbox" class="backlog-row-checkbox" data-listing-id="${escapeHtml(listingId)}"${selected ? ' checked' : ''}${queued ? ' disabled' : ''} aria-label="Select ${escapeHtml(listingId)}"></td>`
+        + `<td>${escapeHtml(index + 1)}</td>`
+        + `<td><span class="status ${escapeHtml(row.detail_status)}">${escapeHtml(row.detail_status)}</span></td>`
+        + `<td><code>${escapeHtml(listingId)}</code></td>`
+        + `<td>${escapeHtml(row.last_seen_rank ?? '')}</td>`
+        + `<td>${escapeHtml(row.detail_attempts ?? '')}</td>`
+        + `<td>${escapeHtml(row.source || '')}</td>`
+        + `<td>${escapeHtml(row.source_keyword || '')}</td>`
+        + `<td>${escapeHtml(formatDate(row.last_seen_at))}</td>`
+        + `<td>${escapeHtml(formatDate(row.detail_started_at))}</td>`
+        + `<td>${escapeHtml(formatDate(row.detail_completed_at))}</td>`
+        + `<td class="cell-text">${escapeHtml(backlogTitle(row))}${queued ? ' · queued' : ''}</td>`
+        + '<td><div class="row-actions">'
+        + `<button type="button" class="secondary backlog-queue-one-button" data-listing-id="${escapeHtml(listingId)}"${queued || !state.resolveQueueAvailable ? ' disabled' : ''}>Queue</button>`
+        + (row.href ? `<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
+        + '</div></td>'
+        + '</tr>';
+    }).join('');
+    syncBacklogSelectionControls();
+  }
+
+  function backlogUrl() {
+    const params = new URLSearchParams({
+      statusFilter: els.backlogStatusFilter.value,
+      sourceFilter: els.backlogSourceFilter.value,
+      keywordFilter: els.backlogKeywordFilter.value.trim(),
+      backlogOrder: els.backlogOrder.value,
+      seenTimeField: els.backlogSeenTimeField.value,
+      seenAfter: els.backlogSeenAfter.value.trim(),
+      seenBefore: els.backlogSeenBefore.value.trim(),
+      limit: els.backlogLimit.value,
+      retryDelaySeconds: els.backlogRetryDelaySeconds.value || '0',
+    });
+    if (els.backlogMaxAttempts.value) {
+      params.set('maxAttempts', els.backlogMaxAttempts.value);
+    }
+    return `/api/backlog?${params.toString()}`;
+  }
+
+  async function loadBacklogQueue() {
+    els.backlogMeta.textContent = 'Loading backlog queue...';
+    const payload = await fetchJson(backlogUrl());
+    state.backlogRows = payload.rows || [];
+    const visibleIds = new Set(state.backlogRows.map((row) => row.listing_id).filter(Boolean));
+    state.selectedBacklogQueueIds = state.selectedBacklogQueueIds.filter((id) => visibleIds.has(id));
+    const opts = payload.options || {};
+    els.backlogMeta.textContent = `${state.backlogRows.length} candidates · status: ${opts.statusFilter || ''} · order: ${opts.backlogOrder || ''} · time: ${opts.seenTimeField || ''} · query: ${payload.stats?.elapsedMs ?? 0}ms`;
+    renderBacklogRows();
+  }
+
+  async function queueBacklogIds(listingIds, label) {
+    const ids = [...new Set(listingIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (!ids.length) return;
+    const result = await fetchJson('/api/resolve-queue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listingIds: ids }),
+    });
+    applyResolveQueuePayload(result);
+    state.selectedBacklogQueueIds = state.selectedBacklogQueueIds.filter((id) => !ids.includes(id));
+    renderResolveControls(result.addedCount > 0
+      ? `${label}: added ${result.addedCount} listing(s) to the audited resolve queue.`
+      : `${label}: selected rows are already in the resolve queue.`);
+    renderBacklogRows();
+    if (state.hideQueuedResolve) {
+      await loadRows();
     }
   }
 
@@ -445,10 +719,12 @@ export function createListingsViewer() {
     stopResolveWatcher();
     if (proc.status === 'failed' || proc.status === 'error' || proc.status === 'lost') {
       renderResolveControls(`Resolve worker failed: ${summarizeProcessFailure(proc)}`);
+      await loadResolveQueue();
       return;
     }
 
     renderResolveControls(`Resolve worker ${proc.id} finished with status ${proc.status}.`);
+    await loadResolveQueue();
     await loadRows();
   }
 
@@ -496,6 +772,83 @@ export function createListingsViewer() {
     }
   }
 
+  async function queueSelectedForResolve() {
+    if (!state.resolveQueueAvailable) {
+      renderResolveControls('Resolve queue controls are unavailable on this server. Direct resolve still works.');
+      return;
+    }
+    const selectedRows = state.table?.getSelectedData?.() || [];
+    const listingIds = selectedRows
+      .filter((row) => isBacklogRow(row))
+      .map((row) => row.listing_id)
+      .filter(Boolean);
+    if (listingIds.length === 0) {
+      renderResolveControls('Selected rows do not contain backlog items.');
+      return;
+    }
+    const result = await fetchJson('/api/resolve-queue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listingIds }),
+    });
+    applyResolveQueuePayload(result);
+    renderResolveControls(result.addedCount > 0
+      ? `Added ${result.addedCount} listing(s) to the resolve queue.`
+      : 'Selected backlog rows are already in the resolve queue.');
+    if (state.hideQueuedResolve) {
+      state.table?.deselectRow?.();
+      await loadRows();
+    }
+  }
+
+  async function clearResolveQueue(listingIds = []) {
+    if (!state.resolveQueueAvailable) {
+      renderResolveControls('Resolve queue controls are unavailable on this server. Direct resolve still works.');
+      return;
+    }
+    const result = await fetchJson('/api/resolve-queue', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ listingIds }),
+    });
+    applyResolveQueuePayload(result);
+    renderResolveControls(result.clearedCount > 0
+      ? `Cleared ${result.clearedCount} resolve queue row(s).`
+      : 'Resolve queue is already clear.');
+    await loadRows();
+  }
+
+  async function resolveQueued() {
+    if (!state.resolveQueueAvailable) {
+      renderResolveControls('Resolve queue controls are unavailable on this server. Direct resolve still works.');
+      return;
+    }
+    const queuedCount = state.resolveQueueItems.filter((item) => item.status === 'queued').length;
+    if (queuedCount === 0) {
+      renderResolveControls('Resolve queue is empty.');
+      return;
+    }
+    state.resolving = true;
+    renderResolveControls('Dispatching resolve queue...');
+    try {
+      const result = await fetchJson('/api/resolve-queue/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      applyResolveQueuePayload(result.queue || {});
+      const processId = result.process?.id || '';
+      renderResolveControls(`Dispatched ${result.listingCount} queued listing(s)${processId ? ' in ' + processId : ''}.`);
+      watchResolveProcess(processId);
+      await loadRows();
+    } catch (error) {
+      renderResolveControls(`Resolve queue dispatch failed: ${error.message}`);
+      alert(error.message || 'Failed to dispatch queued resolve');
+    } finally {
+      state.resolving = false;
+      renderResolveControls();
+    }
+  }
+
   async function resolveCurrentView() {
     if (state.total === 0) return;
     const label = state.q ? `current query "${state.q}"` : 'all visible query results';
@@ -504,6 +857,7 @@ export function createListingsViewer() {
       await postResolveBatch({
         mode: 'query',
         query: state.q,
+        excludeListingIds: queuedExclusionIds(),
         ...currentSortPayload(),
       });
     } catch (error) {
@@ -553,6 +907,31 @@ export function createListingsViewer() {
     renderQueryBuilder();
   }
 
+  function applyResolveQueuePayload(payload = {}) {
+    state.resolveQueueItems = payload.items || [];
+    state.resolveQueueEvents = payload.events || [];
+    state.resolveQueueCounts = payload.counts || {};
+    state.resolveQueueIds = state.resolveQueueItems
+      .filter((item) => item.status === 'queued')
+      .map((item) => item.listing_id)
+      .filter(Boolean);
+  }
+
+  async function loadResolveQueue() {
+    let payload = {};
+    try {
+      payload = await fetchJson('/api/resolve-queue');
+      state.resolveQueueAvailable = true;
+    } catch (error) {
+      state.resolveQueueAvailable = false;
+      payload = {};
+      state.resolveMessage = 'Resolve queue controls are unavailable on this server. Direct resolve still works.';
+    }
+    applyResolveQueuePayload(payload);
+    renderResolveControls();
+    return payload;
+  }
+
   async function loadRows() {
     if (!state.table) return;
     if (state.currentLimit !== state.limit) {
@@ -564,6 +943,17 @@ export function createListingsViewer() {
   }
 
   function bindEvents() {
+    for (const tab of document.querySelectorAll('.listing-subtabs .subtab')) {
+      tab.addEventListener('click', async () => {
+        for (const item of document.querySelectorAll('.listing-subtabs .subtab')) item.classList.remove('active');
+        for (const view of document.querySelectorAll('.listing-view')) view.classList.remove('active');
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.listingView).classList.add('active');
+        if (tab.dataset.listingView === 'backlogQueueView' && state.backlogRows.length === 0) {
+          await loadBacklogQueue();
+        }
+      });
+    }
     document.getElementById('queryForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       state.q = els.queryInput.value.trim();
@@ -601,8 +991,105 @@ export function createListingsViewer() {
       await loadRows();
     });
     document.getElementById('refreshListingsButton').addEventListener('click', loadRows);
+    els.queueSelectedButton.addEventListener('click', () => {
+      queueSelectedForResolve().catch((error) => {
+        renderResolveControls(`Queue update failed: ${error.message}`);
+        alert(error.message || 'Failed to queue selected rows');
+      });
+    });
+    els.resolveQueuedButton.addEventListener('click', resolveQueued);
+    els.clearResolveQueueButton.addEventListener('click', () => {
+      clearResolveQueue().catch((error) => {
+        renderResolveControls(`Queue clear failed: ${error.message}`);
+        alert(error.message || 'Failed to clear resolve queue');
+      });
+    });
+    els.resolveQueuePanel.addEventListener('click', (event) => {
+      const button = event.target.closest('.resolve-queue-remove-button');
+      if (!button) return;
+      clearResolveQueue([button.dataset.listingId]).catch((error) => {
+        renderResolveControls(`Queue remove failed: ${error.message}`);
+        alert(error.message || 'Failed to remove queued listing');
+      });
+    });
+    els.hideQueuedResolveCheckbox.addEventListener('change', async () => {
+      state.hideQueuedResolve = els.hideQueuedResolveCheckbox.checked;
+      await loadRows();
+    });
     els.resolveSelectedButton.addEventListener('click', resolveSelected);
     els.resolveCurrentButton.addEventListener('click', resolveCurrentView);
+    els.refreshBacklogButton.addEventListener('click', () => {
+      loadBacklogQueue().catch((error) => {
+        els.backlogMeta.textContent = `Failed to load backlog queue: ${error.message}`;
+      });
+    });
+    for (const control of [
+      els.backlogStatusFilter,
+      els.backlogSourceFilter,
+      els.backlogOrder,
+      els.backlogSeenTimeField,
+      els.backlogLimit,
+      els.backlogMaxAttempts,
+      els.backlogRetryDelaySeconds,
+    ]) {
+      control.addEventListener('change', () => {
+        loadBacklogQueue().catch((error) => {
+          els.backlogMeta.textContent = `Failed to load backlog queue: ${error.message}`;
+        });
+      });
+    }
+    for (const control of [els.backlogKeywordFilter, els.backlogSeenAfter, els.backlogSeenBefore]) {
+      control.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        loadBacklogQueue().catch((error) => {
+          els.backlogMeta.textContent = `Failed to load backlog queue: ${error.message}`;
+        });
+      });
+    }
+    els.selectAllBacklogRows.addEventListener('change', () => {
+      const queuedIds = new Set(state.resolveQueueIds);
+      const visibleIds = state.backlogRows
+        .map((row) => row.listing_id)
+        .filter((listingId) => listingId && !queuedIds.has(listingId));
+      state.selectedBacklogQueueIds = els.selectAllBacklogRows.checked ? visibleIds : [];
+      renderBacklogRows();
+    });
+    els.backlogTableBody.addEventListener('change', (event) => {
+      const checkbox = event.target.closest('.backlog-row-checkbox');
+      if (!checkbox) return;
+      const listingId = checkbox.dataset.listingId;
+      if (checkbox.checked) {
+        state.selectedBacklogQueueIds = [...new Set([...state.selectedBacklogQueueIds, listingId])];
+      } else {
+        state.selectedBacklogQueueIds = state.selectedBacklogQueueIds.filter((id) => id !== listingId);
+      }
+      syncBacklogSelectionControls();
+    });
+    els.backlogTableBody.addEventListener('click', (event) => {
+      const button = event.target.closest('.backlog-queue-one-button');
+      if (!button) return;
+      queueBacklogIds([button.dataset.listingId], 'Backlog row').catch((error) => {
+        renderResolveControls(`Backlog queue action failed: ${error.message}`);
+        alert(error.message || 'Failed to queue backlog row');
+      });
+    });
+    els.queueBacklogSelectedButton.addEventListener('click', () => {
+      queueBacklogIds(state.selectedBacklogQueueIds, 'Backlog selection').catch((error) => {
+        renderResolveControls(`Backlog queue action failed: ${error.message}`);
+        alert(error.message || 'Failed to queue selected backlog rows');
+      });
+    });
+    els.queueBacklogVisibleButton.addEventListener('click', () => {
+      const queuedIds = new Set(state.resolveQueueIds);
+      const visibleIds = state.backlogRows
+        .map((row) => row.listing_id)
+        .filter((listingId) => listingId && !queuedIds.has(listingId));
+      queueBacklogIds(visibleIds, 'Backlog visible rows').catch((error) => {
+        renderResolveControls(`Backlog queue action failed: ${error.message}`);
+        alert(error.message || 'Failed to queue visible backlog rows');
+      });
+    });
     document.getElementById('closeSnapshotButton').addEventListener('click', () => {
       state.selectedSnapshotListingId = '';
       renderSnapshotPanel(null);
@@ -612,12 +1099,16 @@ export function createListingsViewer() {
       state.selectedSnapshotListingId = '';
       renderSnapshotPanel(null);
     });
+    window.addEventListener('resize', positionSnapshotPanel);
+    window.addEventListener('scroll', positionSnapshotPanel, { passive: true });
   }
 
   return {
     bindEvents,
     renderHead,
     loadQueryFields,
+    loadResolveQueue,
+    loadBacklogQueue,
     loadRows,
   };
 }

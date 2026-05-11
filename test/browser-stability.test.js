@@ -202,10 +202,20 @@ test('expandMarketplaceListingDetails clicks expandable controls across passes',
 test('inferMarketplaceAreaFromLocation normalizes city names for Marketplace route slugs', () => {
   assert.equal(inferMarketplaceAreaFromLocation('Ottawa, Ontario'), 'ottawa');
   assert.equal(inferMarketplaceAreaFromLocation(' North Vancouver, BC '), 'north-vancouver');
+  assert.equal(inferMarketplaceAreaFromLocation('Montréal, Québec'), 'montreal');
+  assert.equal(inferMarketplaceAreaFromLocation('Calgary, Alberta'), 'calgary');
+  assert.equal(inferMarketplaceAreaFromLocation('Vancouver, WA'), 'vancouver-wa');
+  assert.equal(inferMarketplaceAreaFromLocation('New York, NY'), 'nyc');
+  assert.equal(inferMarketplaceAreaFromLocation('Brooklyn, New York'), 'nyc');
+  assert.equal(inferMarketplaceAreaFromLocation('Seattle, Washington'), 'seattle');
+  assert.equal(inferMarketplaceAreaFromLocation('Portland, Oregon'), 'portland');
+  assert.equal(inferMarketplaceAreaFromLocation('Los Angeles, California'), 'los-angeles');
 });
 
 test('urlMatchesMarketplaceArea recognizes Marketplace area routes', () => {
   assert.equal(urlMatchesMarketplaceArea('https://www.facebook.com/marketplace/ottawa/search/?query=canon', 'Ottawa, Ontario'), true);
+  assert.equal(urlMatchesMarketplaceArea('https://www.facebook.com/marketplace/nyc/search/?query=canon', 'New York, NY'), true);
+  assert.equal(urlMatchesMarketplaceArea('https://www.facebook.com/marketplace/vancouver-wa/', 'Vancouver, WA'), true);
   assert.equal(urlMatchesMarketplaceArea('https://www.facebook.com/marketplace/vancouver/', 'Ottawa, Ontario'), false);
 });
 
