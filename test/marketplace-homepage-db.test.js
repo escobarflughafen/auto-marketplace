@@ -16,10 +16,13 @@ const {
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
   markHomepageListingFailed,
+  releaseHomepageListingClaim,
   markHomepageListingInactive,
   getHomepageListingCounts,
   runTransaction,
   appendListingEvent,
+  appendWorkflowEvent,
+  listWorkflowEvents,
   getListingEvents,
   getLatestListingEvent,
   hashContent,
@@ -372,6 +375,8 @@ test('schema includes read-path and audit indexes', () => {
     assert.ok(indexes.includes('idx_homepage_listings_completed'));
     assert.ok(indexes.includes('idx_listing_events_workflow_time'));
     assert.ok(indexes.includes('idx_listing_events_worker_time'));
+    assert.ok(indexes.includes('idx_workflow_events_run_time'));
+    assert.ok(indexes.includes('idx_workflow_events_type_time'));
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
@@ -519,6 +524,36 @@ test('upsertHomepageListingWithStatus stores source and source keyword for searc
   }
 });
 
+test('workflow events are append-only lifecycle history', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    appendWorkflowEvent(db, {
+      workflowRunId: 'worker-run-1',
+      eventType: 'browser_context_launch_started',
+      eventAt: '2026-05-11T00:00:00.000Z',
+      status: 'starting',
+      content: { headless: true },
+    });
+    appendWorkflowEvent(db, {
+      workflowRunId: 'worker-run-1',
+      eventType: 'browser_context_ready',
+      eventAt: '2026-05-11T00:00:01.000Z',
+      status: 'running',
+      content: { pageCount: 1 },
+    });
+
+    const events = listWorkflowEvents(db, 'worker-run-1');
+    assert.equal(events.length, 2);
+    assert.equal(events[0].event_type, 'browser_context_ready');
+    assert.deepEqual(events[0].content, { pageCount: 1 });
+    assert.equal(events[1].event_type, 'browser_context_launch_started');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
 test('search keyword helpers keep title bag and listing keyword associations', () => {
   const dbPath = createTempDbPath();
   const { db } = openMarketplaceHomepageDatabase(dbPath);
@@ -612,6 +647,45 @@ test('claimNextPendingHomepageListing prioritizes pending rows and tracks failur
       claimedAt: '2026-04-27T02:05:00.000Z',
     });
     assert.equal(next.listing_id, '200');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('releaseHomepageListingClaim returns interrupted claims to backlog without spending attempts', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'interrupt-1',
+      href: 'https://www.facebook.com/marketplace/item/9001/',
+      title: 'Interrupted row',
+      text: 'Card text',
+      rank: 1,
+    });
+
+    const claimed = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-interrupt',
+      staleAfterSeconds: 60,
+      claimedAt: '2026-05-11T01:00:00.000Z',
+    });
+    assert.equal(claimed.detail_status, 'processing');
+    assert.equal(claimed.detail_attempts, 1);
+
+    const released = releaseHomepageListingClaim(db, claimed.listing_id, {
+      workerId: 'worker-interrupt',
+      nextStatus: 'pending',
+      reason: 'worker_shutdown:SIGTERM',
+      decrementAttempts: true,
+      completedAt: '2026-05-11T01:00:05.000Z',
+    });
+
+    assert.equal(released.changed, true);
+    assert.equal(released.listing.detail_status, 'pending');
+    assert.equal(released.listing.claimed_by, '');
+    assert.equal(released.listing.detail_attempts, 0);
+    assert.equal(released.listing.detail_last_error, 'worker_shutdown:SIGTERM');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

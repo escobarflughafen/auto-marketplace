@@ -22,11 +22,13 @@ const {
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
   markHomepageListingFailed,
+  releaseHomepageListingClaim,
   markHomepageListingInactive,
   getHomepageListingCounts,
   hashContent,
   runTransaction,
   appendListingEvent,
+  appendWorkflowEvent,
   getLatestListingEvent,
 } = require('./marketplace-homepage-db');
 const {
@@ -516,15 +518,21 @@ async function processBatch(page, db, options, state = {}) {
   let activePage = page;
   let processedCount = 0;
   let attemptedCount = 0;
+  const lifecycle = state.lifecycle || {};
   const remainingLimit = Number.isFinite(state.remainingLimit) ? state.remainingLimit : Infinity;
   const batchLimit = Math.min(options.batchSize, remainingLimit);
 
   for (let index = 0; index < batchLimit; index += 1) {
+    if (lifecycle.shutdownRequested) {
+      break;
+    }
+
     const listing = claimNextPendingHomepageListing(db, buildClaimOptions(options));
 
     if (!listing) {
       break;
     }
+    lifecycle.activeListing = listing;
 
     await appendLog(
       options.logFile,
@@ -573,6 +581,7 @@ async function processBatch(page, db, options, state = {}) {
           options.logFile,
           `job_bypassed listing_id=${listing.listing_id} availability=${inactiveStatus} reason=${capture.detailRecord.listingContent?.availabilityReason || inactiveStatus} screenshot=${capture.detailRecord.screenshotPath}`,
         );
+        lifecycle.activeListing = null;
         continue;
       }
 
@@ -621,8 +630,64 @@ async function processBatch(page, db, options, state = {}) {
         options.logFile,
         `job_done listing_id=${listing.listing_id} title="${capture.detailRecord.title}" screenshot=${capture.detailRecord.screenshotPath}`,
       );
+      lifecycle.activeListing = null;
       processedCount += 1;
     } catch (error) {
+      if (isFatalBrowserContextError(error) || lifecycle.shutdownRequested) {
+        const reason = lifecycle.shutdownRequested
+          ? `worker_shutdown:${lifecycle.signal || 'requested'}`
+          : 'fatal_browser_context_error';
+        runTransaction(db, () => {
+          appendListingEvent(db, {
+            workflowRunId: options.workerId,
+            listingId: listing.listing_id,
+            eventType: 'detail_capture_interrupted',
+            workerId: options.workerId,
+            sourceUrl: listing.href,
+            attempt: listing.detail_attempts,
+            status: 'interrupted',
+            content: buildJobCardEventContent(listing, options.workerId, {
+              interruption: {
+                reason,
+                retryable: true,
+              },
+              error: {
+                type: error?.code || 'INTERRUPTED',
+                message: error instanceof Error ? error.message : String(error),
+              },
+            }),
+            error: error instanceof Error ? error.message : String(error),
+          });
+          releaseHomepageListingClaim(db, listing.listing_id, {
+            workerId: options.workerId,
+            nextStatus: 'pending',
+            reason,
+            decrementAttempts: true,
+          });
+        });
+        lifecycle.activeListing = null;
+        await appendLog(
+          options.logFile,
+          `job_interrupted listing_id=${listing.listing_id} reason=${reason} error="${error instanceof Error ? error.message : String(error)}"`,
+        );
+        appendWorkflowLifecycleEvent(db, options, lifecycle.shutdownRequested ? 'active_claim_interrupted' : 'browser_context_failed', {
+          status: lifecycle.shutdownRequested ? 'interrupted' : 'error',
+          error,
+          content: {
+            listingId: listing.listing_id,
+            reason,
+          },
+        });
+        await appendLog(
+          options.logFile,
+          `backlog_exit reason=${reason} listing_id=${listing.listing_id} error="${error instanceof Error ? error.message : String(error)}"`,
+        );
+        if (lifecycle.shutdownRequested) {
+          break;
+        }
+        throw error;
+      }
+
       const eventType = error?.code === 'LISTING_UNAVAILABLE'
         ? 'listing_unavailable'
         : 'detail_capture_failed';
@@ -650,6 +715,7 @@ async function processBatch(page, db, options, state = {}) {
         options.logFile,
         `job_error listing_id=${listing.listing_id} error="${error instanceof Error ? error.message : String(error)}"`,
       );
+      lifecycle.activeListing = null;
     }
   }
 
@@ -661,8 +727,22 @@ async function processBatch(page, db, options, state = {}) {
   };
 }
 
-async function sleep(ms) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function sleep(ms, lifecycle = null) {
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    if (lifecycle) {
+      lifecycle.wakeShutdown = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      if (lifecycle.shutdownRequested) {
+        lifecycle.wakeShutdown();
+      }
+    }
+  });
+  if (lifecycle) {
+    lifecycle.wakeShutdown = null;
+  }
 }
 
 function installListingIdTempTable(db, listingIds) {
@@ -714,6 +794,56 @@ function shouldDelayBetweenItems(options, result, remainingLimit) {
   return true;
 }
 
+function isFatalBrowserContextError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /(?:Target page, context or browser has been closed|Browser has been closed|browser has disconnected)/iu.test(message);
+}
+
+function appendWorkflowLifecycleEvent(db, options, eventType, event = {}) {
+  try {
+    return appendWorkflowEvent(db, {
+      workflowRunId: options.workerId,
+      eventType,
+      status: event.status || '',
+      content: event.content || {},
+      error: event.error instanceof Error ? event.error.message : String(event.error || ''),
+    });
+  } catch (error) {
+    log(`workflow_event_append_failed type=${eventType} error=${error.message}`);
+    return null;
+  }
+}
+
+function installShutdownHandlers(db, options, lifecycle) {
+  const handleSignal = (signal) => {
+    if (lifecycle.shutdownRequested) {
+      return;
+    }
+    lifecycle.shutdownRequested = true;
+    lifecycle.signal = signal;
+    appendWorkflowLifecycleEvent(db, options, 'shutdown_requested', {
+      status: 'stopping',
+      content: {
+        signal,
+        activeListingId: lifecycle.activeListing?.listing_id || '',
+      },
+    });
+    if (typeof lifecycle.wakeShutdown === 'function') {
+      lifecycle.wakeShutdown();
+    }
+    if (lifecycle.context) {
+      lifecycle.context.close().catch(() => {});
+    }
+  };
+
+  process.once('SIGINT', handleSignal);
+  process.once('SIGTERM', handleSignal);
+  return () => {
+    process.off('SIGINT', handleSignal);
+    process.off('SIGTERM', handleSignal);
+  };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(options.captureDir);
@@ -724,20 +854,52 @@ async function main() {
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
-  if (options.listingIds.length > 0) {
-    options.listingIdTable = installListingIdTempTable(db, options.listingIds);
-    options.listingIds = [];
-  }
-  const resolvedUserDataDir = path.isAbsolute(options.userDataDir)
-    ? options.userDataDir
-    : path.join(process.cwd(), options.userDataDir);
-
-  const context = await chromium.launchPersistentContext(resolvedUserDataDir, {
-    headless: options.headless,
-    viewport: { width: 1440, height: 1200 },
-  });
-
+  const lifecycle = {
+    shutdownRequested: false,
+    signal: '',
+    activeListing: null,
+    context: null,
+    wakeShutdown: null,
+  };
+  const uninstallShutdownHandlers = installShutdownHandlers(db, options, lifecycle);
+  let context = null;
   try {
+    if (options.listingIds.length > 0) {
+      options.listingIdTable = installListingIdTempTable(db, options.listingIds);
+      options.listingIds = [];
+    }
+    const resolvedUserDataDir = path.isAbsolute(options.userDataDir)
+      ? options.userDataDir
+      : path.join(process.cwd(), options.userDataDir);
+
+    appendWorkflowLifecycleEvent(db, options, 'worker_started', {
+      status: 'running',
+      content: {
+        mode: options.drain ? 'drain' : options.once ? 'once' : 'continuous',
+        batchSize: options.batchSize,
+        limit: options.limit,
+      },
+    });
+    appendWorkflowLifecycleEvent(db, options, 'browser_context_launch_started', {
+      status: 'starting',
+      content: {
+        userDataDir: resolvedUserDataDir,
+        headless: options.headless,
+      },
+    });
+    context = await chromium.launchPersistentContext(resolvedUserDataDir, {
+      headless: options.headless,
+      viewport: { width: 1440, height: 1200 },
+    });
+    lifecycle.context = context;
+    appendWorkflowLifecycleEvent(db, options, 'browser_context_ready', {
+      status: 'running',
+      content: {
+        userDataDir: resolvedUserDataDir,
+        headless: options.headless,
+      },
+    });
+
     let page = await ensureFacebookMarketplaceLogin(context, {
       useCredentials: options.useCredentials,
       credentialsPath: options.credentialsPath,
@@ -752,6 +914,14 @@ async function main() {
       options.logFile,
       `worker_session_ready signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} current_url=${sessionSummary.currentUrl || 'n/a'}`,
     );
+    appendWorkflowLifecycleEvent(db, options, 'session_ready', {
+      status: sessionSummary.loggedIn && sessionSummary.signedInUserId ? 'authenticated' : 'unauthenticated',
+      content: {
+        loggedIn: sessionSummary.loggedIn,
+        signedInUserId: sessionSummary.signedInUserId || '',
+        currentUrl: sessionSummary.currentUrl || '',
+      },
+    });
     if (!sessionSummary.loggedIn || !sessionSummary.signedInUserId) {
       throw new Error('Facebook session is not fully authenticated; refresh the signed-in persistent profile or run a headed worker and complete Facebook verification before processing backlog.');
     }
@@ -765,7 +935,7 @@ async function main() {
         break;
       }
 
-      const result = await processBatch(page, db, options, { remainingLimit });
+      const result = await processBatch(page, db, options, { remainingLimit, lifecycle });
       page = result.page;
       totalProcessed += result.processedCount;
       totalAttempted += result.attemptedCount;
@@ -779,6 +949,11 @@ async function main() {
 
       if (options.once) {
         await appendLog(options.logFile, 'backlog_exit mode=once');
+        break;
+      }
+
+      if (lifecycle.shutdownRequested) {
+        await appendLog(options.logFile, `backlog_exit reason=shutdown_requested signal=${lifecycle.signal || 'n/a'} attempted=${totalAttempted} processed=${totalProcessed}`);
         break;
       }
 
@@ -804,7 +979,7 @@ async function main() {
             options.logFile,
             `backlog_item_sleep seconds=${Math.ceil(waitMs / 1000)} base_item_delay_seconds=${options.itemDelaySeconds} jitter_multiplier=${multiplier.toFixed(3)} attempted=${totalAttempted} processed=${totalProcessed}`,
           );
-          await sleep(waitMs);
+          await sleep(waitMs, lifecycle);
         }
         continue;
       }
@@ -818,11 +993,48 @@ async function main() {
         options.logFile,
         `backlog_sleep seconds=${Math.ceil(waitMs / 1000)} base_poll_interval_seconds=${options.pollIntervalSeconds} jitter_multiplier=${multiplier.toFixed(3)} pending=${result.counts.pending} processing=${result.counts.processing} error=${result.counts.error}`,
       );
-      await sleep(waitMs);
+      await sleep(waitMs, lifecycle);
     } while (true);
+    appendWorkflowLifecycleEvent(db, options, 'worker_completed', {
+      status: lifecycle.shutdownRequested ? 'stopped' : 'completed',
+      content: {
+        signal: lifecycle.signal || '',
+      },
+    });
+  } catch (error) {
+    if (lifecycle.shutdownRequested) {
+      appendWorkflowLifecycleEvent(db, options, 'worker_completed', {
+        status: 'stopped',
+        content: {
+          signal: lifecycle.signal || '',
+          activeListingId: lifecycle.activeListing?.listing_id || '',
+          stopError: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return;
+    }
+    appendWorkflowLifecycleEvent(db, options, 'worker_failed', {
+      status: 'error',
+      error,
+      content: {
+        shutdownRequested: lifecycle.shutdownRequested,
+        signal: lifecycle.signal || '',
+        activeListingId: lifecycle.activeListing?.listing_id || '',
+      },
+    });
+    throw error;
   } finally {
+    uninstallShutdownHandlers();
+    if (context) {
+      appendWorkflowLifecycleEvent(db, options, 'browser_context_closing', {
+        status: 'stopping',
+      });
+      await context.close().catch(() => {});
+      appendWorkflowLifecycleEvent(db, options, 'browser_context_closed', {
+        status: 'stopped',
+      });
+    }
     closeMarketplaceHomepageDatabase(db);
-    await context.close();
   }
 }
 
@@ -843,4 +1055,6 @@ module.exports = {
   buildClaimOptions,
   computeJitteredPollMs,
   shouldDelayBetweenItems,
+  isFatalBrowserContextError,
+  appendWorkflowLifecycleEvent,
 };

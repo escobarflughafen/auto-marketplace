@@ -12,6 +12,7 @@ const {
   buildClaimOptions,
   computeJitteredPollMs,
   shouldDelayBetweenItems,
+  isFatalBrowserContextError,
 } = require('../scripts/process-marketplace-homepage-backlog');
 
 test('parseArgs enables drain mode for backlog resolution', () => {
@@ -255,4 +256,19 @@ test('buildJobCardEventContent includes source and attempt context', () => {
   assert.equal(content.card.attemptsBeforeCapture, 4);
   assert.equal(content.runtime.workerId, 'worker-2');
   assert.equal(content.error.message, 'failed');
+});
+
+test('isFatalBrowserContextError classifies closed browser failures', () => {
+  assert.equal(
+    isFatalBrowserContextError(new Error('browserContext.newPage: Target page, context or browser has been closed')),
+    true,
+  );
+  assert.equal(
+    isFatalBrowserContextError(new Error('page.screenshot: Target page, context or browser has been closed')),
+    true,
+  );
+  assert.equal(
+    isFatalBrowserContextError(new Error('Timeout 30000ms exceeded while waiting for selector')),
+    false,
+  );
 });

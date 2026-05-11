@@ -233,6 +233,28 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_updated
     ON workflow_runs (status, updated_at DESC);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_events (
+      event_id TEXT PRIMARY KEY,
+      workflow_run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      content_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT ''
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_workflow_events_run_time
+    ON workflow_events (workflow_run_id, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_workflow_events_type_time
+    ON workflow_events (event_type, event_at DESC);
+  `);
 }
 
 function ensureColumn(db, tableName, columnName, definitionSql) {
@@ -815,6 +837,46 @@ function markHomepageListingFailed(db, listingId, error) {
   return getHomepageListing(db, listingId);
 }
 
+function releaseHomepageListingClaim(db, listingId, options = {}) {
+  const completedAt = options.completedAt || new Date().toISOString();
+  const workerId = String(options.workerId || '').trim();
+  const nextStatus = String(options.nextStatus || 'pending').trim();
+  const reason = String(options.reason || 'claim released').trim();
+  const decrementAttempts = options.decrementAttempts === true;
+  if (!['pending', 'error'].includes(nextStatus)) {
+    throw new Error(`Unsupported released listing status: ${nextStatus}`);
+  }
+
+  const result = db.prepare(`
+    UPDATE homepage_listings
+    SET
+      detail_status = ?,
+      detail_last_error = ?,
+      detail_completed_at = ?,
+      claimed_by = '',
+      detail_attempts = CASE
+        WHEN ? THEN max(detail_attempts - 1, 0)
+        ELSE detail_attempts
+      END
+    WHERE listing_id = ?
+      AND detail_status = 'processing'
+      AND (? = '' OR claimed_by = ?)
+  `).run(
+    nextStatus,
+    reason,
+    completedAt,
+    decrementAttempts ? 1 : 0,
+    listingId,
+    workerId,
+    workerId,
+  );
+
+  return {
+    changed: result.changes > 0,
+    listing: getHomepageListing(db, listingId),
+  };
+}
+
 function markHomepageListingInactive(db, listingId, status, detailRecord, reason = '') {
   const inactiveStatus = status === 'pending_sale' ? 'pending_sale' : 'sold';
   const completedAt = new Date().toISOString();
@@ -1094,6 +1156,85 @@ function normalizeListingEventRow(row) {
   };
 }
 
+function normalizeWorkflowEventRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    event_id: row.event_id,
+    workflow_run_id: row.workflow_run_id,
+    event_type: row.event_type,
+    event_at: row.event_at,
+    status: row.status,
+    content: parseJsonObject(row.content_json),
+    error: row.error,
+  };
+}
+
+function buildWorkflowEventId(eventAt, runId, eventType) {
+  const entropy = crypto.randomBytes(8).toString('hex');
+  return [
+    String(eventAt || new Date().toISOString()).replace(/[^0-9A-Za-z]/g, ''),
+    String(runId || 'unknown'),
+    String(eventType || 'event'),
+    entropy,
+  ].join('-');
+}
+
+function appendWorkflowEvent(db, event) {
+  const eventAt = event.eventAt || event.event_at || new Date().toISOString();
+  const workflowRunId = String(event.workflowRunId || event.workflow_run_id || '').trim();
+  if (!workflowRunId) {
+    throw new Error('appendWorkflowEvent requires workflowRunId');
+  }
+
+  const eventType = normalizeKeyword(event.eventType || event.event_type || 'workflow_event');
+  const content = event.content || event.contentJson || {};
+  const eventId = String(event.eventId || event.event_id || buildWorkflowEventId(eventAt, workflowRunId, eventType));
+
+  db.prepare(`
+    INSERT INTO workflow_events (
+      event_id,
+      workflow_run_id,
+      event_type,
+      event_at,
+      status,
+      content_json,
+      error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    eventId,
+    workflowRunId,
+    eventType,
+    eventAt,
+    String(event.status || '').trim(),
+    serializeJson(content),
+    String(event.error || '').trim(),
+  );
+
+  return getWorkflowEvent(db, eventId);
+}
+
+function getWorkflowEvent(db, eventId) {
+  return normalizeWorkflowEventRow(db.prepare(`
+    SELECT *
+    FROM workflow_events
+    WHERE event_id = ?
+  `).get(String(eventId)));
+}
+
+function listWorkflowEvents(db, workflowRunId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
+  return db.prepare(`
+    SELECT *
+    FROM workflow_events
+    WHERE workflow_run_id = ?
+    ORDER BY event_at DESC
+    LIMIT ?
+  `).all(String(workflowRunId), limit).map(normalizeWorkflowEventRow);
+}
+
 function eventTypesForCategory(category) {
   switch (normalizeKeyword(category || 'all').toLowerCase()) {
     case 'done':
@@ -1103,7 +1244,7 @@ function eventTypesForCategory(category) {
       return ['detail_capture_bypassed', 'listing_unavailable'];
     case 'error':
     case 'errors':
-      return ['detail_capture_failed'];
+      return ['detail_capture_failed', 'detail_capture_interrupted'];
     case 'started':
     case 'active':
       return ['detail_capture_started'];
@@ -1508,11 +1649,15 @@ module.exports = {
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
   markHomepageListingFailed,
+  releaseHomepageListingClaim,
   markHomepageListingInactive,
   getHomepageListingCounts,
   hashContent,
   runTransaction,
   appendListingEvent,
+  appendWorkflowEvent,
+  getWorkflowEvent,
+  listWorkflowEvents,
   getListingEvent,
   getListingEvents,
   getLatestListingEvent,
