@@ -16,6 +16,7 @@ const SORT_BY_FIELD = {
 };
 
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
+const RESOLVED_POV_STATUSES = new Set(['done', 'sold', 'pending_sale']);
 
 const COLUMNS = [
   {
@@ -141,10 +142,10 @@ function dateFormatter(cell) {
 function actionsFormatter(cell) {
   const row = cell.getData();
   const actions = [];
-  if (BACKLOG_STATUSES.has(row.detail_status)) {
+  if (isBacklogRow(row)) {
     actions.push(`<button type="button" class="secondary row-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">Fetch</button>`);
   }
-  if (row.screenshotPath || row.snapshotPath) {
+  if (isResolvedPovRow(row)) {
     actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">POV</button>`);
   }
   if (row.href) {
@@ -169,6 +170,16 @@ function operatorsForField(field) {
   return ['contains', '!contains', '==', '!=', '=~', '!~', 'startswith', 'endswith', 'in', '!in'];
 }
 
+function isResolvedPovRow(row) {
+  if (!row) return false;
+  if (row.screenshotUrl || row.snapshotUrl || row.screenshotPath || row.snapshotPath) return true;
+  return RESOLVED_POV_STATUSES.has(String(row.detail_status || '').toLowerCase());
+}
+
+function isBacklogRow(row) {
+  return BACKLOG_STATUSES.has(String(row?.detail_status || '').toLowerCase());
+}
+
 function quoteQueryValue(value) {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -186,6 +197,7 @@ export function createListingsViewer() {
     queryFields: [],
     selectedSnapshotListingId: '',
     selectedIds: [],
+    selectedBacklogIds: [],
     resolving: false,
     resolveMessage: 'No listing resolve batch queued.',
     resolveProcessId: '',
@@ -200,6 +212,7 @@ export function createListingsViewer() {
     queryOperatorSelect: document.getElementById('queryOperatorSelect'),
     queryValueInput: document.getElementById('queryValueInput'),
     queryJoinSelect: document.getElementById('queryJoinSelect'),
+    listingsMain: document.getElementById('listingsMain'),
     snapshotPanel: document.getElementById('snapshotPanel'),
     snapshotTitle: document.getElementById('snapshotTitle'),
     snapshotMeta: document.getElementById('snapshotMeta'),
@@ -245,6 +258,8 @@ export function createListingsViewer() {
     const selectedSnapshot = state.rows.find((row) => row.listing_id === state.selectedSnapshotListingId);
     if (selectedSnapshot) {
       renderSnapshotPanel(selectedSnapshot);
+    } else if (state.selectedSnapshotListingId) {
+      renderSnapshotPanel(null);
     }
     return {
       data: state.rows,
@@ -275,6 +290,15 @@ export function createListingsViewer() {
     });
     state.table.on('rowSelectionChanged', (data) => {
       state.selectedIds = data.map((row) => row.listing_id).filter(Boolean);
+      state.selectedBacklogIds = data
+        .filter((row) => isBacklogRow(row))
+        .map((row) => row.listing_id)
+        .filter(Boolean);
+      const focused = data.find((row) => row.listing_id === state.selectedSnapshotListingId);
+      const selectedForPov = isResolvedPovRow(focused)
+        ? focused
+        : data.slice().reverse().find((row) => isResolvedPovRow(row));
+      renderSnapshotPanel(selectedForPov || null);
       renderResolveControls();
     });
     state.table._marketplaceViewer = {
@@ -294,13 +318,18 @@ export function createListingsViewer() {
   }
 
   function renderSnapshotPanel(row) {
-    if (!row) {
+    if (!isResolvedPovRow(row)) {
+      state.selectedSnapshotListingId = '';
       els.snapshotPanel.hidden = true;
+      els.listingsMain.classList.remove('snapshot-open');
+      document.body.classList.remove('listing-pov-open');
       return;
     }
 
     state.selectedSnapshotListingId = row.listing_id || '';
     els.snapshotPanel.hidden = false;
+    els.listingsMain.classList.add('snapshot-open');
+    document.body.classList.add('listing-pov-open');
     els.snapshotTitle.textContent = displayTitleForRow(row);
     els.snapshotMeta.textContent = `${row.listing_id} · ${row.detail_status} · ${row.source || 'unknown source'}${row.source_keyword ? ' · ' + row.source_keyword : ''}`;
     els.snapshotImageWrap.innerHTML = row.screenshotUrl
@@ -332,7 +361,7 @@ export function createListingsViewer() {
     if (message) {
       state.resolveMessage = message;
     }
-    const count = state.selectedIds.length;
+    const count = state.selectedBacklogIds.length;
     els.resolveSelectedButton.disabled = state.resolving || count === 0;
     els.resolveCurrentButton.disabled = state.resolving || state.total === 0;
     if (count > 0 && !state.resolving) {
@@ -436,7 +465,7 @@ export function createListingsViewer() {
   }
 
   async function resolveListing(row) {
-    if (!row?.listing_id || !BACKLOG_STATUSES.has(row.detail_status)) return;
+    if (!row?.listing_id || !isBacklogRow(row)) return;
     try {
       await postResolveBatch({
         mode: 'listing',
@@ -450,7 +479,7 @@ export function createListingsViewer() {
   async function resolveSelected() {
     const selectedRows = state.table?.getSelectedData?.() || [];
     const listingIds = selectedRows
-      .filter((row) => BACKLOG_STATUSES.has(row.detail_status))
+      .filter((row) => isBacklogRow(row))
       .map((row) => row.listing_id)
       .filter(Boolean);
     if (listingIds.length === 0) {
@@ -575,6 +604,11 @@ export function createListingsViewer() {
     els.resolveSelectedButton.addEventListener('click', resolveSelected);
     els.resolveCurrentButton.addEventListener('click', resolveCurrentView);
     document.getElementById('closeSnapshotButton').addEventListener('click', () => {
+      state.selectedSnapshotListingId = '';
+      renderSnapshotPanel(null);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || els.snapshotPanel.hidden) return;
       state.selectedSnapshotListingId = '';
       renderSnapshotPanel(null);
     });

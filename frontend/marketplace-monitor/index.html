@@ -85,25 +85,29 @@
         <button type="button" class="secondary" id="resolveCurrentButton">Resolve All In View</button>
         <div class="process-meta" id="listingResolveMeta">No listing resolve batch queued.</div>
       </div>
-      <div class="results-meta" id="resultsMeta"></div>
-      <div id="listingsTable" class="utility-table"></div>
-      <div class="card snapshot-panel" id="snapshotPanel" hidden>
-        <div class="snapshot-header">
-          <div>
-            <div class="label">Worker POV</div>
-            <h2 id="snapshotTitle">Listing snapshot</h2>
-            <div class="process-meta" id="snapshotMeta"></div>
-          </div>
-          <button type="button" class="secondary" id="closeSnapshotButton">Close</button>
+      <div class="listings-main" id="listingsMain">
+        <div class="listings-table-pane">
+          <div class="results-meta" id="resultsMeta"></div>
+          <div id="listingsTable" class="utility-table"></div>
         </div>
-        <div class="snapshot-grid">
-          <div class="snapshot-image-wrap" id="snapshotImageWrap"></div>
-          <div>
-            <div class="label">Captured Details</div>
-            <dl class="detail-list" id="snapshotDetails"></dl>
-            <div class="builder-actions" id="snapshotLinks"></div>
+        <aside class="card snapshot-panel" id="snapshotPanel" hidden role="dialog" aria-labelledby="snapshotTitle">
+          <div class="snapshot-header">
+            <div>
+              <div class="label">Worker POV</div>
+              <h2 id="snapshotTitle">Listing snapshot</h2>
+              <div class="process-meta" id="snapshotMeta"></div>
+            </div>
+            <button type="button" class="secondary" id="closeSnapshotButton">Close</button>
           </div>
-        </div>
+          <div class="snapshot-grid">
+            <div class="snapshot-image-wrap" id="snapshotImageWrap"></div>
+            <div>
+              <div class="label">Captured Details</div>
+              <dl class="detail-list" id="snapshotDetails"></dl>
+              <div class="builder-actions" id="snapshotLinks"></div>
+            </div>
+          </div>
+        </aside>
       </div>
       </section>
 

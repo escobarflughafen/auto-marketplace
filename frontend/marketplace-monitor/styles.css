@@ -23,7 +23,7 @@ body {
   font-family: var(--sans);
   color: var(--ink);
   background: var(--bg);
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 body.worker-inspector-open {
   overflow: hidden;
@@ -215,7 +215,7 @@ button:not(:disabled):hover,
 }
 .query-tools {
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(340px, 0.6fr);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.55fr);
   gap: 0;
   margin: 0;
   align-items: start;
@@ -230,7 +230,7 @@ button:not(:disabled):hover,
 }
 .builder-row {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(110px, 150px) minmax(160px, 1fr) minmax(72px, 100px);
+  grid-template-columns: minmax(120px, 1fr) minmax(96px, 140px) minmax(120px, 1fr) minmax(68px, 92px);
   gap: 6px;
 }
 .builder-actions, .pager {
@@ -329,7 +329,7 @@ button:not(:disabled):hover,
 .utility-table {
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow: auto;
 }
 .tabulator {
   border: 0;
@@ -476,7 +476,7 @@ a:hover { text-decoration: underline; }
 }
 .worker-control-columns {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
   min-width: 0;
 }
 .worker-control-column {
@@ -794,8 +794,23 @@ textarea {
   font-size: 12px;
   line-height: 1.35;
 }
+.listings-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+.listings-main.snapshot-open {
+  min-height: 0;
+}
+.listings-table-pane {
+  min-width: 0;
+  overflow: hidden;
+}
 .snapshot-panel {
   margin: 0;
+  min-width: 0;
+  max-height: none;
+  overflow: auto;
   border-left: 0;
   border-right: 0;
   border-bottom: 0;
@@ -810,11 +825,13 @@ textarea {
 }
 .snapshot-header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 16px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 .snapshot-grid {
   display: grid;
-  grid-template-columns: minmax(280px, 1.2fr) minmax(260px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   margin-top: 10px;
   border: 1px solid var(--line);
@@ -831,7 +848,7 @@ textarea {
 .snapshot-image-wrap {
   min-height: 220px;
   border: 0;
-  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
   border-radius: 0;
   background: var(--fill);
   overflow: auto;
@@ -839,6 +856,7 @@ textarea {
 .snapshot-image {
   display: block;
   width: 100%;
+  max-width: 100%;
   height: auto;
 }
 .empty-state {
@@ -897,10 +915,56 @@ textarea {
   border-radius: 0;
   white-space: nowrap;
 }
+@media (min-width: 1180px) {
+  .listings-main.snapshot-open {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  }
+  .snapshot-panel {
+    max-height: min(70vh, 760px);
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+}
+@media (max-width: 1179px) {
+  body.listing-pov-open {
+    overflow: hidden;
+  }
+  .snapshot-panel:not([hidden]) {
+    position: fixed;
+    top: 12px;
+    bottom: 12px;
+    left: 50%;
+    z-index: 70;
+    width: min(980px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    transform: translateX(-50%);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 70px rgba(15, 23, 42, 0.28);
+  }
+  .snapshot-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+}
 @media (max-width: 800px) {
   .shell { padding: 12px; }
-  .hero { padding: 16px; }
+  .hero { padding: 0 2px; }
   .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-control-columns { grid-template-columns: 1fr; }
+  .querybar button,
+  .snapshot-header button {
+    width: 100%;
+  }
+  .querybar {
+    grid-template-columns: minmax(0, 1fr) minmax(72px, auto) minmax(66px, auto);
+  }
+  .tips {
+    overflow-x: auto;
+  }
   .worker-control-title {
     align-items: stretch;
     flex-direction: column;
@@ -952,5 +1016,9 @@ textarea {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
-  h1 { font-size: 30px; }
+  .snapshot-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  h1 { font-size: 24px; }
 }
