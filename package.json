@@ -9,11 +9,13 @@
     "marketplace:home:collect": "node scripts/collect-marketplace-homepage.js",
     "marketplace:search:explore": "node scripts/collect-marketplace-search-explorer.js",
     "marketplace:home:process": "node scripts/process-marketplace-homepage-backlog.js",
+    "marketplace:home:backlog:indexes": "node scripts/marketplace-homepage-backlog-indexes.js",
     "marketplace:home:export": "node scripts/export-marketplace-homepage.js",
     "marketplace:home:serve": "node scripts/serve-marketplace-homepage.js",
     "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh"
   },
   "dependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "tabulator-tables": "^6.4.0"
   }
 }

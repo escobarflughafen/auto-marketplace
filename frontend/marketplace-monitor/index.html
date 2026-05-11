@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marketplace Monitor</title>
+  <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
+  <link rel="stylesheet" href="/app/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Marketplace Monitor</h1>
+      <div class="sub">Browse collected rows, watch queue state, and manage Marketplace workers.</div>
+    </section>
+
+    <section class="workspace-surface">
+      <div class="workspace-row query-row">
+        <form class="querybar" id="queryForm">
+          <input id="queryInput" name="q" placeholder='Try: title contains "pentax 67" and price >= 2000 or status =~ pending sort:recent'>
+          <button type="submit">Search</button>
+          <button type="button" class="secondary" id="clearButton">Clear</button>
+        </form>
+        <div class="tips">
+          KQL-style search: <code>status != done</code> <code>price >= 2000</code> <code>source_keyword in ("nikon","leica")</code>
+        </div>
+      </div>
+
+      <section class="summary workspace-row" id="summary"></section>
+
+      <nav class="tabs workspace-row">
+        <button type="button" class="tab active" data-panel="listingsPanel">Listings</button>
+        <button type="button" class="tab" data-panel="opsPanel">Workers</button>
+      </nav>
+
+      <section class="panel active" id="listingsPanel">
+      <div class="query-tools">
+        <div class="card">
+          <div class="label">Query Builder</div>
+          <div class="builder-row">
+            <select id="queryFieldSelect"></select>
+            <select id="queryOperatorSelect"></select>
+            <input id="queryValueInput" type="text" placeholder="Value">
+            <select id="queryJoinSelect">
+              <option value="and">AND</option>
+              <option value="or">OR</option>
+            </select>
+          </div>
+          <div class="builder-actions">
+            <button type="button" id="addClauseButton">Add Clause</button>
+            <button type="button" class="secondary" id="wrapQueryButton">Wrap</button>
+          </div>
+        </div>
+        <div class="card query-helper">
+          <div class="label">Shortcuts</div>
+          <button type="button" class="example-query" data-query='status == pending sort:rank'>Pending by rank</button>
+          <button type="button" class="example-query" data-query='status != done and source == search'>Search backlog</button>
+          <button type="button" class="example-query" data-query='title contains "pentax" and price >= 2000'>Pentax over 2000</button>
+        </div>
+      </div>
+
+      <div class="listings-toolbar">
+        <div class="segmented" id="listingStatusTools">
+          <button type="button" class="secondary" data-query="">All</button>
+          <button type="button" class="secondary" data-query="status == pending sort:rank">Pending</button>
+          <button type="button" class="secondary" data-query="status == error sort:recent">Errors</button>
+          <button type="button" class="secondary" data-query="status == sold sort:recent">Sold</button>
+          <button type="button" class="secondary" data-query="status == pending_sale sort:recent">Pending sale</button>
+          <button type="button" class="secondary" data-query="status == done sort:completed">Done</button>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <label class="inline-control">
+          Rows
+          <select id="listingLimitSelect">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <button type="button" class="secondary" id="refreshListingsButton">Refresh</button>
+      </div>
+      <div class="resolve-toolbar">
+        <button type="button" class="secondary" id="resolveSelectedButton" disabled>Resolve Selected</button>
+        <button type="button" class="secondary" id="resolveCurrentButton">Resolve All In View</button>
+        <div class="process-meta" id="listingResolveMeta">No listing resolve batch queued.</div>
+      </div>
+      <div class="results-meta" id="resultsMeta"></div>
+      <div id="listingsTable" class="utility-table"></div>
+      <div class="card snapshot-panel" id="snapshotPanel" hidden>
+        <div class="snapshot-header">
+          <div>
+            <div class="label">Worker POV</div>
+            <h2 id="snapshotTitle">Listing snapshot</h2>
+            <div class="process-meta" id="snapshotMeta"></div>
+          </div>
+          <button type="button" class="secondary" id="closeSnapshotButton">Close</button>
+        </div>
+        <div class="snapshot-grid">
+          <div class="snapshot-image-wrap" id="snapshotImageWrap"></div>
+          <div>
+            <div class="label">Captured Details</div>
+            <dl class="detail-list" id="snapshotDetails"></dl>
+            <div class="builder-actions" id="snapshotLinks"></div>
+          </div>
+        </div>
+      </div>
+      </section>
+
+      <section class="panel" id="opsPanel">
+      <div class="ops-grid">
+        <div id="workerControl" class="worker-control"></div>
+        <select id="workflowSelect" hidden></select>
+        <div id="workflowForm" hidden></div>
+        <textarea id="workflowArgsPreview" hidden readonly></textarea>
+        <button type="button" id="startWorkflowButton" hidden>Start Worker</button>
+        <button type="button" class="secondary" id="refreshWorkflowsButton" hidden>Refresh</button>
+        <button type="button" class="secondary" id="reconcileWorkflowsButton" hidden>OS Check</button>
+        <div id="processList" class="process-list"></div>
+      </div>
+      </section>
+    </section>
+  </div>
+
+  <script type="module" src="/app/app.js"></script>
+</body>
+</html>

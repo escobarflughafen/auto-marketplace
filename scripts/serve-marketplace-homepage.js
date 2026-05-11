@@ -13,11 +13,19 @@ const {
   updateWorkflowRun,
   getWorkflowRun,
   listWorkflowRuns,
+  resolveWorkerEventIdsForRun,
+  listWorkerListingEvents,
+  getWorkerListingEventStats,
 } = require('./marketplace-homepage-db');
 const {
   buildListingsQuery,
+  buildListingIdsQuery,
   buildCountQuery,
 } = require('./marketplace-homepage-query');
+
+const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
+const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
+const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
 
 function readFlagValue(argv, index, flagName) {
   const value = argv[index + 1];
@@ -119,10 +127,88 @@ const WORKFLOWS = {
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
-  'backlog-worker': {
-    label: 'Backlog Detail Worker',
+  'backlog-resolve': {
+    label: 'Resolve Pending Backlog',
     script: 'marketplace:home:process',
     fields: [
+      { id: 'useCredentials', label: 'Use credentials', kind: 'boolean', flag: '--use-credentials', defaultValue: true },
+      {
+        id: 'browserMode',
+        label: 'Browser mode',
+        kind: 'choice',
+        defaultValue: 'headless',
+        options: [
+          { value: 'headless', label: 'Headless', args: ['--headless'] },
+          { value: 'headed', label: 'Headed', args: ['--headed'] },
+        ],
+      },
+      { id: 'drain', label: 'Drain eligible backlog then exit', kind: 'boolean', flag: '--drain', defaultValue: true },
+      { id: 'batchSize', label: 'Batch size', kind: 'number', flag: '--batch-size', defaultValue: 5, min: 1 },
+      { id: 'limit', label: 'Max items for this run', kind: 'number', flag: '--limit', defaultValue: 50, min: 0 },
+      {
+        id: 'statusFilter',
+        label: 'Queue status',
+        kind: 'choice',
+        defaultValue: 'pending',
+        options: [
+          { value: 'pending', label: 'Pending only', args: ['--status-filter', 'pending'] },
+          { value: 'all', label: 'All eligible', args: ['--status-filter', 'all'] },
+          { value: 'error', label: 'Retry errors', args: ['--status-filter', 'error'] },
+          { value: 'processing', label: 'Stale processing', args: ['--status-filter', 'processing'] },
+          { value: 'sold', label: 'Sold rows', args: ['--status-filter', 'sold'] },
+          { value: 'pending_sale', label: 'Pending-sale rows', args: ['--status-filter', 'pending_sale'] },
+        ],
+      },
+      {
+        id: 'sourceFilter',
+        label: 'Source',
+        kind: 'choice',
+        defaultValue: '',
+        options: [
+          { value: '', label: 'All sources', args: [] },
+          { value: 'homepage', label: 'Homepage', args: ['--source-filter', 'homepage'] },
+          { value: 'search', label: 'Search', args: ['--source-filter', 'search'] },
+        ],
+      },
+      { id: 'keywordFilter', label: 'Keyword filter', kind: 'text', flag: '--keyword-filter', defaultValue: '' },
+      {
+        id: 'backlogOrder',
+        label: 'Backlog start',
+        kind: 'choice',
+        defaultValue: 'priority',
+        options: [
+          { value: 'priority', label: 'Priority index', args: ['--backlog-order', 'priority'] },
+          { value: 'rank', label: 'Rank index', args: ['--backlog-order', 'rank'] },
+          { value: 'latest', label: 'Latest first', args: ['--backlog-order', 'latest'] },
+          { value: 'earliest', label: 'Earliest first', args: ['--backlog-order', 'earliest'] },
+        ],
+      },
+      {
+        id: 'seenTimeField',
+        label: 'Time index',
+        kind: 'choice',
+        defaultValue: 'last_seen',
+        options: [
+          { value: 'last_seen', label: 'Last seen', args: ['--seen-time-field', 'last_seen'] },
+          { value: 'first_seen', label: 'First seen', args: ['--seen-time-field', 'first_seen'] },
+        ],
+      },
+      { id: 'seenAfter', label: 'Seen after', kind: 'text', flag: '--seen-after', defaultValue: '' },
+      { id: 'seenBefore', label: 'Seen before', kind: 'text', flag: '--seen-before', defaultValue: '' },
+      { id: 'maxAttempts', label: 'Max attempts', kind: 'number', flag: '--max-attempts', defaultValue: 5, min: 1 },
+      { id: 'retryDelaySeconds', label: 'Retry delay seconds', kind: 'number', flag: '--retry-delay-seconds', defaultValue: 300, min: 0 },
+      { id: 'itemDelaySeconds', label: 'Delay between items', kind: 'number', flag: '--item-delay-seconds', defaultValue: 8, min: 0, step: 0.5 },
+      { id: 'itemJitterMin', label: 'Item jitter min', kind: 'number', flag: '--item-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'itemJitterMax', label: 'Item jitter max', kind: 'number', flag: '--item-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'resolveInactive', label: 'Resolve sold/pending signals', kind: 'boolean', flag: '--resolve-inactive', defaultValue: false },
+      { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
+    ],
+  },
+  'backlog-worker': {
+    label: 'Continuous Backlog Worker',
+    script: 'marketplace:home:process',
+    fields: [
+      { id: 'useCredentials', label: 'Use credentials', kind: 'boolean', flag: '--use-credentials', defaultValue: true },
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -138,8 +224,62 @@ const WORKFLOWS = {
       { id: 'pollJitterMin', label: 'Poll jitter min', kind: 'number', flag: '--poll-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
       { id: 'pollJitterMax', label: 'Poll jitter max', kind: 'number', flag: '--poll-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
       { id: 'limit', label: 'Limit', kind: 'number', flag: '--limit', defaultValue: '', min: 0 },
-      { id: 'sourceFilter', label: 'Source filter', kind: 'text', flag: '--source-filter', defaultValue: '' },
+      {
+        id: 'statusFilter',
+        label: 'Queue status',
+        kind: 'choice',
+        defaultValue: 'pending',
+        options: [
+          { value: 'pending', label: 'Pending only', args: ['--status-filter', 'pending'] },
+          { value: 'all', label: 'All eligible', args: ['--status-filter', 'all'] },
+          { value: 'error', label: 'Retry errors', args: ['--status-filter', 'error'] },
+          { value: 'processing', label: 'Stale processing', args: ['--status-filter', 'processing'] },
+          { value: 'sold', label: 'Sold rows', args: ['--status-filter', 'sold'] },
+          { value: 'pending_sale', label: 'Pending-sale rows', args: ['--status-filter', 'pending_sale'] },
+        ],
+      },
+      {
+        id: 'sourceFilter',
+        label: 'Source',
+        kind: 'choice',
+        defaultValue: '',
+        options: [
+          { value: '', label: 'All sources', args: [] },
+          { value: 'homepage', label: 'Homepage', args: ['--source-filter', 'homepage'] },
+          { value: 'search', label: 'Search', args: ['--source-filter', 'search'] },
+        ],
+      },
       { id: 'keywordFilter', label: 'Keyword filter', kind: 'text', flag: '--keyword-filter', defaultValue: '' },
+      {
+        id: 'backlogOrder',
+        label: 'Backlog start',
+        kind: 'choice',
+        defaultValue: 'priority',
+        options: [
+          { value: 'priority', label: 'Priority index', args: ['--backlog-order', 'priority'] },
+          { value: 'rank', label: 'Rank index', args: ['--backlog-order', 'rank'] },
+          { value: 'latest', label: 'Latest first', args: ['--backlog-order', 'latest'] },
+          { value: 'earliest', label: 'Earliest first', args: ['--backlog-order', 'earliest'] },
+        ],
+      },
+      {
+        id: 'seenTimeField',
+        label: 'Time index',
+        kind: 'choice',
+        defaultValue: 'last_seen',
+        options: [
+          { value: 'last_seen', label: 'Last seen', args: ['--seen-time-field', 'last_seen'] },
+          { value: 'first_seen', label: 'First seen', args: ['--seen-time-field', 'first_seen'] },
+        ],
+      },
+      { id: 'seenAfter', label: 'Seen after', kind: 'text', flag: '--seen-after', defaultValue: '' },
+      { id: 'seenBefore', label: 'Seen before', kind: 'text', flag: '--seen-before', defaultValue: '' },
+      { id: 'maxAttempts', label: 'Max attempts', kind: 'number', flag: '--max-attempts', defaultValue: 5, min: 1 },
+      { id: 'retryDelaySeconds', label: 'Retry delay seconds', kind: 'number', flag: '--retry-delay-seconds', defaultValue: 300, min: 0 },
+      { id: 'itemDelaySeconds', label: 'Delay between items', kind: 'number', flag: '--item-delay-seconds', defaultValue: 8, min: 0, step: 0.5 },
+      { id: 'itemJitterMin', label: 'Item jitter min', kind: 'number', flag: '--item-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'itemJitterMax', label: 'Item jitter max', kind: 'number', flag: '--item-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'resolveInactive', label: 'Resolve sold/pending signals', kind: 'boolean', flag: '--resolve-inactive', defaultValue: false },
       { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
@@ -148,15 +288,17 @@ const WORKFLOWS = {
 
 const QUERY_FIELDS = [
   { value: 'id', label: 'Listing ID', type: 'text' },
-  { value: 'status', label: 'Status', type: 'enum', values: ['pending', 'processing', 'done', 'error'] },
+  { value: 'status', label: 'Status', type: 'enum', values: ['pending', 'processing', 'done', 'error', 'sold', 'pending_sale'] },
   { value: 'title', label: 'Title', type: 'text' },
   { value: 'text', label: 'Card/detail text', type: 'text' },
   { value: 'seller', label: 'Seller', type: 'text' },
   { value: 'location', label: 'Location', type: 'text' },
+  { value: 'condition', label: 'Condition', type: 'text' },
   { value: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search'] },
   { value: 'keyword', label: 'Source keyword', type: 'text' },
   { value: 'price', label: 'Price', type: 'number' },
   { value: 'rank', label: 'Rank', type: 'number' },
+  { value: 'attempts', label: 'Attempts', type: 'number' },
   { value: 'before', label: 'Seen before', type: 'date' },
   { value: 'after', label: 'Seen after', type: 'date' },
 ];
@@ -296,6 +438,13 @@ function publicWorkflowRunRecord(run) {
   };
 }
 
+function publicWorkflowRunRecordWithStats(db, run) {
+  const record = publicWorkflowRunRecord(run);
+  const workerIds = resolveWorkerEventIdsForRun(db, run.run_id);
+  record.eventStats = getWorkerListingEventStats(db, run.run_id, { workerIds });
+  return record;
+}
+
 function reconcileWorkflowRuns(db) {
   const now = nowIso();
   const runs = listWorkflowRuns(db, { limit: 50 });
@@ -326,7 +475,7 @@ function reconcileWorkflowRuns(db) {
     }
   }
 
-  return listWorkflowRuns(db, { limit: 50 }).map(publicWorkflowRunRecord);
+  return listWorkflowRuns(db, { limit: 50 }).map((run) => publicWorkflowRunRecordWithStats(db, run));
 }
 
 function listManagedProcesses(db) {
@@ -336,6 +485,18 @@ function listManagedProcesses(db) {
 function getRunningManagedProcesses(db) {
   const runs = reconcileWorkflowRuns(db);
   return runs.filter((record) => isManagedStatusActive(record.status) && (record.osAlive || record.managed));
+}
+
+function ensureManagedWorkerIdArg(args, runId, workflow) {
+  if (workflow.script !== 'marketplace:home:process') {
+    return args;
+  }
+
+  if (args.includes('--worker-id')) {
+    return args;
+  }
+
+  return [...args, '--worker-id', runId];
 }
 
 function normalizeWorkflowArgs(value) {
@@ -350,6 +511,117 @@ function normalizeWorkflowArgs(value) {
   return value.match(/(?:[^\s"]+|"[^"]*")+/g)
     ?.map((arg) => arg.replace(/^"|"$/g, ''))
     .filter(Boolean) || [];
+}
+
+function normalizeListingIds(value) {
+  const source = Array.isArray(value) ? value : [value];
+  return [...new Set(source
+    .flatMap((item) => String(item || '').split(','))
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+function placeholdersFor(values) {
+  return values.map(() => '?').join(', ');
+}
+
+function getBacklogListingIdsByIds(db, listingIds) {
+  const ids = normalizeListingIds(listingIds);
+  if (ids.length === 0) {
+    return [];
+  }
+
+  return db.prepare(`
+    SELECT listing_id
+    FROM homepage_listings
+    WHERE listing_id IN (${placeholdersFor(ids)})
+      AND detail_status IN ('pending', 'error', 'processing')
+    ORDER BY
+      CASE detail_status
+        WHEN 'pending' THEN 0
+        WHEN 'error' THEN 1
+        ELSE 2
+      END,
+      COALESCE(last_seen_rank, 999999) ASC,
+      last_seen_at DESC,
+      first_seen_at ASC
+  `).all(...ids).map((row) => row.listing_id);
+}
+
+function getBacklogListingIdsByQuery(db, options = {}) {
+  const query = buildListingIdsQuery({
+    query: options.query || '',
+    sort: options.sort || '',
+    sortDirection: options.sortDirection || options.sortDir || '',
+    backlogOnly: true,
+  });
+  return db.prepare(query.sql).all(...query.params).map((row) => row.listing_id);
+}
+
+function writeResolveBatchFile(listingIds, metadata = {}) {
+  fs.mkdirSync(RESOLVE_BATCH_DIR, { recursive: true });
+  const createdAt = new Date().toISOString();
+  const safeStamp = createdAt.replace(/[^0-9A-Za-z]/g, '');
+  const filePath = path.join(RESOLVE_BATCH_DIR, `resolve-${safeStamp}-${cryptoRandomSuffix()}.json`);
+  fs.writeFileSync(filePath, JSON.stringify({
+    createdAt,
+    listingIds,
+    metadata,
+  }, null, 2));
+  return filePath;
+}
+
+function cryptoRandomSuffix() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function resolveListingsFromViewer(db, body = {}) {
+  const mode = String(body.mode || '').trim();
+  const requestedIds = normalizeListingIds(body.listingIds || body.listingId);
+  const sort = String(body.sort || '').trim();
+  const sortDirection = String(body.sortDirection || body.sortDir || '').trim();
+  const query = String(body.query || body.q || '').trim();
+  let listingIds = [];
+
+  if (mode === 'listing' || mode === 'selected') {
+    listingIds = getBacklogListingIdsByIds(db, requestedIds);
+  } else if (mode === 'query') {
+    listingIds = getBacklogListingIdsByQuery(db, { query, sort, sortDirection });
+  } else {
+    const error = new Error('Expected resolve mode to be listing, selected, or query');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (listingIds.length === 0) {
+    const error = new Error('No pending, error, or processing backlog rows matched the resolve request');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const filePath = writeResolveBatchFile(listingIds, {
+    mode,
+    query,
+    sort,
+    sortDirection,
+    requestedCount: mode === 'query' ? null : requestedIds.length,
+  });
+  const args = [
+    '--use-credentials',
+    '--drain',
+    '--status-filter', 'all',
+    '--listing-id-file', filePath,
+    '--limit', String(listingIds.length),
+    '--batch-size', mode === 'listing' ? '1' : '3',
+  ];
+
+  const started = startManagedWorkflow(db, mode === 'listing' ? 'backlog-resolve' : 'backlog-worker', args);
+  return {
+    process: started,
+    listingIds,
+    listingCount: listingIds.length,
+    batchFile: filePath,
+  };
 }
 
 function startManagedWorkflow(db, workflowId, extraArgs = []) {
@@ -367,8 +639,10 @@ function startManagedWorkflow(db, workflowId, extraArgs = []) {
     throw error;
   }
 
-  const args = extraArgs.length > 0 ? extraArgs : buildDefaultArgsFromFields(workflow.fields);
-  const record = buildManagedProcessRecord(workflowId, args);
+  const initialArgs = extraArgs.length > 0 ? extraArgs : buildDefaultArgsFromFields(workflow.fields);
+  const record = buildManagedProcessRecord(workflowId, initialArgs);
+  const args = ensureManagedWorkerIdArg(initialArgs, record.id, workflow);
+  record.args = args;
   const child = spawn('npm', ['run', workflow.script, '--', ...args], {
     cwd: process.cwd(),
     env: process.env,
@@ -496,13 +770,64 @@ function writeJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload, null, 2));
 }
 
-function escapeHtml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+function contentTypeForPath(filePath) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.js':
+    case '.mjs':
+      return 'text/javascript; charset=utf-8';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.md':
+      return 'text/markdown; charset=utf-8';
+    case '.txt':
+      return 'text/plain; charset=utf-8';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function serveStaticFrontend(response, relativePath) {
+  const requestedPath = path.resolve(FRONTEND_DIR, relativePath);
+  const relative = path.relative(FRONTEND_DIR, requestedPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    writeJson(response, 404, { error: 'Not found' });
+    return;
+  }
+
+  if (!fs.existsSync(requestedPath) || !fs.statSync(requestedPath).isFile()) {
+    writeJson(response, 404, { error: 'Not found' });
+    return;
+  }
+
+  response.writeHead(200, { 'content-type': contentTypeForPath(requestedPath) });
+  fs.createReadStream(requestedPath).pipe(response);
+}
+
+function serveVendorAsset(response, relativePath) {
+  const vendorRoot = path.join(process.cwd(), 'node_modules', 'tabulator-tables', 'dist');
+  const requestedPath = path.resolve(vendorRoot, relativePath);
+  const relative = path.relative(vendorRoot, requestedPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    writeJson(response, 404, { error: 'Not found' });
+    return;
+  }
+
+  if (!fs.existsSync(requestedPath) || !fs.statSync(requestedPath).isFile()) {
+    writeJson(response, 404, { error: 'Not found' });
+    return;
+  }
+
+  response.writeHead(200, { 'content-type': contentTypeForPath(requestedPath) });
+  fs.createReadStream(requestedPath).pipe(response);
 }
 
 function formatPathLink(filePath) {
@@ -516,825 +841,36 @@ function formatPathLink(filePath) {
   return `/files/${relativePath.split(path.sep).map(encodeURIComponent).join('/')}`;
 }
 
-function buildIndexHtml() {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Marketplace Monitor</title>
-  <style>
-    :root {
-      --bg: #f4f6f8;
-      --panel: #ffffff;
-      --ink: #18202a;
-      --muted: #5d6978;
-      --line: #d7dde5;
-      --accent: #0f766e;
-      --warm: #a16207;
-      --bad: #b91c1c;
-      --mono: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
-      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    * { box-sizing: border-box; }
-    html { min-width: 0; }
-    body {
-      margin: 0;
-      font-family: var(--sans);
-      color: var(--ink);
-      background:
-        var(--bg);
-      overflow-x: hidden;
-    }
-    .shell {
-      width: min(1280px, 100%);
-      margin: 0 auto;
-      padding: 24px;
-    }
-    .hero {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 24px;
-      box-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);
-    }
-    h1 {
-      margin: 0 0 8px;
-      font-size: clamp(28px, 4vw, 44px);
-      line-height: 1;
-    }
-    .sub {
-      color: var(--muted);
-      margin-bottom: 18px;
-    }
-    .querybar {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      gap: 12px;
-    }
-    input, button {
-      font: inherit;
-      border-radius: 6px;
-      border: 1px solid var(--line);
-      padding: 12px 14px;
-      background: #fff;
-    }
-    button {
-      cursor: pointer;
-      background: var(--accent);
-      color: #fff;
-      border-color: var(--accent);
-    }
-    .secondary {
-      background: transparent;
-      color: var(--ink);
-      border-color: var(--line);
-    }
-    .tips {
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .tips code {
-      font-family: var(--mono);
-      background: rgba(15,118,110,0.08);
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
-    .summary {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 12px;
-      margin: 20px 0;
-    }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
-    }
-    .card .label {
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 6px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-    .card .value {
-      font-size: 28px;
-      font-weight: 700;
-    }
-    .results-meta {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      align-items: center;
-      color: var(--muted);
-      margin: 16px 0;
-    }
-    .query-tools {
-      display: grid;
-      grid-template-columns: minmax(280px, 1fr) minmax(260px, 360px);
-      gap: 12px;
-      margin: 16px 0;
-      align-items: start;
-    }
-    .builder-row {
-      display: grid;
-      grid-template-columns: minmax(120px, 1fr) minmax(110px, 150px) minmax(120px, 1fr) minmax(80px, 110px);
-      gap: 8px;
-    }
-    .builder-actions {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-      flex-wrap: wrap;
-    }
-    .query-helper {
-      display: grid;
-      gap: 8px;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .query-helper button {
-      text-align: left;
-      color: var(--ink);
-      background: #fff;
-      border-color: var(--line);
-      padding: 8px 10px;
-    }
-    .tablewrap {
-      overflow: auto;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.72);
-      backdrop-filter: blur(6px);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      min-width: 1080px;
-    }
-    th, td {
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      vertical-align: top;
-      text-align: left;
-    }
-    th {
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-      position: sticky;
-      top: 0;
-      background: #fdf8ef;
-    }
-    td code {
-      font-family: var(--mono);
-      font-size: 12px;
-    }
-    .status {
-      display: inline-block;
-      padding: 4px 8px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-family: var(--mono);
-      border: 1px solid var(--line);
-      background: #fff;
-    }
-    .status.pending { color: var(--warm); }
-    .status.processing { color: var(--accent); }
-    .status.error { color: var(--bad); }
-    .status.done { color: #166534; }
-    .cell-text {
-      max-width: 460px;
-      white-space: normal;
-      line-height: 1.4;
-    }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .pager {
-      display: flex;
-      gap: 12px;
-      justify-content: flex-end;
-      margin-top: 14px;
-    }
-    .tabs {
-      display: flex;
-      gap: 8px;
-      margin: 20px 0;
-    }
-    .tab {
-      color: var(--ink);
-      background: var(--panel);
-      border-color: var(--line);
-    }
-    .tab.active {
-      color: #fff;
-      background: var(--accent);
-      border-color: var(--accent);
-    }
-    .panel { display: none; }
-    .panel.active { display: block; }
-    .ops-grid {
-      display: grid;
-      grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
-      gap: 16px;
-      align-items: start;
-    }
-    .control-stack {
-      display: grid;
-      gap: 10px;
-    }
-    .workflow-form {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .field {
-      min-width: 0;
-    }
-    .field.full {
-      grid-column: 1 / -1;
-    }
-    .field.check {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-height: 42px;
-      padding: 8px 0;
-    }
-    .field label {
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 4px;
-    }
-    .field.check label {
-      color: var(--ink);
-      font-size: 14px;
-      margin: 0;
-    }
-    select, textarea, input[type="number"], input[type="text"] {
-      font: inherit;
-      border-radius: 6px;
-      border: 1px solid var(--line);
-      padding: 10px 12px;
-      background: #fff;
-      width: 100%;
-      min-width: 0;
-    }
-    input[type="checkbox"] {
-      width: 18px;
-      height: 18px;
-      flex: 0 0 auto;
-    }
-    textarea {
-      min-height: 88px;
-      font-family: var(--mono);
-      font-size: 13px;
-      resize: vertical;
-    }
-    .danger {
-      background: var(--bad);
-      border-color: var(--bad);
-    }
-    .process-list {
-      display: grid;
-      gap: 12px;
-      min-width: 0;
-    }
-    .process-card {
-      min-width: 0;
-      overflow: hidden;
-    }
-    .process-header {
-      display: flex;
-      gap: 12px;
-      justify-content: space-between;
-      align-items: start;
-    }
-    .process-title {
-      min-width: 0;
-    }
-    .process-meta {
-      color: var(--muted);
-      font-family: var(--mono);
-      font-size: 12px;
-      margin-top: 4px;
-      overflow-wrap: anywhere;
-    }
-    .process-command {
-      max-height: 62px;
-      overflow: auto;
-    }
-    pre.logs {
-      margin: 12px 0 0;
-      max-height: min(42vh, 360px);
-      overflow: auto;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      background: #101826;
-      color: #dbeafe;
-      padding: 12px;
-      border-radius: 6px;
-      font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    @media (max-width: 800px) {
-      .shell { padding: 12px; }
-      .hero { padding: 16px; }
-      .querybar { grid-template-columns: 1fr; }
-      .query-tools { grid-template-columns: 1fr; }
-      .builder-row { grid-template-columns: 1fr; }
-      .ops-grid { grid-template-columns: 1fr; }
-      .workflow-form { grid-template-columns: 1fr; }
-      .process-header { align-items: stretch; flex-direction: column; }
-      .process-header button { width: 100%; }
-      h1 { font-size: 30px; }
-    }
-    .pager button:disabled {
-      opacity: 0.45;
-      cursor: default;
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <section class="hero">
-      <h1>Marketplace Monitor</h1>
-      <div class="sub">Browse collected rows, watch queue state, and start one managed Marketplace workflow on the server.</div>
-      <form class="querybar" id="queryForm">
-        <input id="queryInput" name="q" placeholder='Try: title contains "pentax 67" and price >= 2000 or status =~ pending sort:recent'>
-        <button type="submit">Search</button>
-        <button type="button" class="secondary" id="clearButton">Clear</button>
-      </form>
-      <div class="tips">
-        KQL-style search: <code>title contains "pentax"</code> <code>status != done</code> <code>price >= 2000</code> <code>source_keyword in ("nikon","leica")</code> with <code>and</code>, <code>or</code>, and parentheses. Existing <code>field:value</code> filters still work.
-      </div>
-    </section>
-    <section class="summary" id="summary"></section>
-    <nav class="tabs">
-      <button type="button" class="tab active" data-panel="listingsPanel">Listings</button>
-      <button type="button" class="tab" data-panel="opsPanel">Workflows</button>
-    </nav>
-    <section class="panel active" id="listingsPanel">
-      <div class="query-tools">
-        <div class="card">
-          <div class="label">Query Builder</div>
-          <div class="builder-row">
-            <select id="queryFieldSelect"></select>
-            <select id="queryOperatorSelect"></select>
-            <input id="queryValueInput" type="text" placeholder="Value">
-            <select id="queryJoinSelect">
-              <option value="and">AND</option>
-              <option value="or">OR</option>
-            </select>
-          </div>
-          <div class="builder-actions">
-            <button type="button" id="addClauseButton">Add Clause</button>
-            <button type="button" class="secondary" id="wrapQueryButton">Wrap</button>
-          </div>
-        </div>
-        <div class="card query-helper">
-          <div class="label">Helper</div>
-          <button type="button" class="example-query" data-query='title contains "pentax" and price >= 2000'>Pentax over 2000</button>
-          <button type="button" class="example-query" data-query='status != done and source == search'>Search backlog</button>
-          <button type="button" class="example-query" data-query='source_keyword in ("nikon","leica") or seller contains "camera"'>Keyword group</button>
-        </div>
-      </div>
-      <div class="results-meta" id="resultsMeta"></div>
-      <div class="tablewrap">
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Status</th>
-            <th>Source</th>
-            <th>Keyword</th>
-            <th>Rank</th>
-            <th>Price</th>
-            <th>Title</th>
-            <th>Card Text</th>
-            <th>Location</th>
-            <th>Seen</th>
-            <th>Links</th>
-          </tr>
-        </thead>
-        <tbody id="resultsBody"></tbody>
-      </table>
-      </div>
-      <div class="pager">
-        <button type="button" class="secondary" id="prevButton">Previous</button>
-        <button type="button" class="secondary" id="nextButton">Next</button>
-      </div>
-    </section>
-    <section class="panel" id="opsPanel">
-      <div class="ops-grid">
-        <div class="card">
-          <div class="label">Start Workflow</div>
-          <div class="control-stack">
-            <select id="workflowSelect"></select>
-            <div id="workflowForm" class="workflow-form"></div>
-            <textarea id="workflowArgsPreview" readonly></textarea>
-            <button type="button" id="startWorkflowButton">Start</button>
-            <button type="button" class="secondary" id="refreshWorkflowsButton">Refresh</button>
-            <button type="button" class="secondary" id="reconcileWorkflowsButton">OS Check</button>
-          </div>
-          <div class="tips">Only one workflow is allowed from this page right now to avoid browser profile locks. Use separate profiles before enabling parallel workers.</div>
-        </div>
-        <div id="processList" class="process-list"></div>
-      </div>
-    </section>
-  </div>
-  <script>
-    const state = { q: '', limit: 50, offset: 0, total: 0 };
-    const summaryEl = document.getElementById('summary');
-    const resultsMetaEl = document.getElementById('resultsMeta');
-    const resultsBodyEl = document.getElementById('resultsBody');
-    const queryInputEl = document.getElementById('queryInput');
-    const prevButtonEl = document.getElementById('prevButton');
-    const nextButtonEl = document.getElementById('nextButton');
-    const processListEl = document.getElementById('processList');
-    const workflowSelectEl = document.getElementById('workflowSelect');
-    const workflowFormEl = document.getElementById('workflowForm');
-    const workflowArgsPreviewEl = document.getElementById('workflowArgsPreview');
-    const queryFieldSelectEl = document.getElementById('queryFieldSelect');
-    const queryOperatorSelectEl = document.getElementById('queryOperatorSelect');
-    const queryValueInputEl = document.getElementById('queryValueInput');
-    const queryJoinSelectEl = document.getElementById('queryJoinSelect');
-    let queryFields = [];
-    let workflowsState = [];
-    let workflowsInitialized = false;
+function isPriceLike(value) {
+  const text = String(value || '').trim();
+  return /^(?:CA\$|\$)\s*[\d,]+(?:\.\d{2})?$/.test(text)
+    || /^(?:CA\$|\$)?\s*[\d,]+\s*(?:-|to|–|—)\s*(?:CA\$|\$)?\s*[\d,]+$/i.test(text)
+    || /^(?:CA\$|\$)\s*[\d,]+(?:CA\$|\$)\s*[\d,]+$/i.test(text)
+    || /^free$/i.test(text);
+}
 
-    function formatDate(value) {
-      if (!value) return '';
-      const date = new Date(value);
-      return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-    }
+function isFreshnessLike(value) {
+  return /^(?:just listed|new listing|today|yesterday|listed .* ago|刚刚上架|刚刚发布|剛剛上架|剛剛發布)$/i
+    .test(String(value || '').trim());
+}
 
-    function html(value) {
-      return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-      }[char]));
-    }
+function displayTitleForRow(row) {
+  if (row.detail_title) {
+    return row.detail_title;
+  }
 
-    function renderSummary(summary) {
-      const counts = summary.queueCounts || {};
-      const cards = [
-        ['Total', summary.totalRows || 0],
-        ['Pending', counts.pending || 0],
-        ['Processing', counts.processing || 0],
-        ['Done', counts.done || 0],
-        ['Error', counts.error || 0],
-      ];
-      summaryEl.innerHTML = cards.map(([label, value]) => (
-        '<div class="card"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>'
-      )).join('');
-    }
+  const candidates = String(row.card_text || '')
+    .split(/\s+\|\s+|\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (row.card_title) {
+    candidates.push(String(row.card_title).trim());
+  }
 
-    function renderRows(rows) {
-      resultsBodyEl.innerHTML = rows.map((row) => {
-        const hrefLink = row.href ? '<a href="' + html(row.href) + '" target="_blank" rel="noreferrer">listing</a>' : '';
-        const screenshotLink = row.screenshotPath ? '<a href="' + html(row.screenshotUrl) + '" target="_blank" rel="noreferrer">screenshot</a>' : '';
-        const snapshotLink = row.snapshotPath ? '<a href="' + html(row.snapshotUrl) + '" target="_blank" rel="noreferrer">snapshot</a>' : '';
-        const joinedLinks = [hrefLink, screenshotLink, snapshotLink].filter(Boolean).join(' · ');
-        return '<tr>'
-          + '<td><code>' + html(row.listing_id) + '</code></td>'
-          + '<td><span class="status ' + html(row.detail_status) + '">' + html(row.detail_status) + '</span></td>'
-          + '<td>' + html(row.source) + '</td>'
-          + '<td class="cell-text">' + html(row.source_keyword) + '</td>'
-          + '<td>' + html(row.last_seen_rank) + '</td>'
-          + '<td>' + html(row.detail_price || row.numeric_price) + '</td>'
-          + '<td class="cell-text">' + html(row.detail_title || row.card_title) + '</td>'
-          + '<td class="cell-text">' + html(row.card_text) + '</td>'
-          + '<td>' + html(row.detail_location) + '</td>'
-          + '<td>' + html(formatDate(row.last_seen_at)) + '</td>'
-          + '<td>' + joinedLinks + '</td>'
-          + '</tr>';
-      }).join('');
-    }
-
-    function updatePager() {
-      prevButtonEl.disabled = state.offset < state.limit;
-      nextButtonEl.disabled = (state.offset + state.limit) >= state.total;
-    }
-
-    function quoteQueryValue(value) {
-      const text = String(value || '').trim();
-      if (!text) return '';
-      if (/^[0-9.:-]+$/.test(text)) return text;
-      return '"' + text.replace(/"/g, '\\"') + '"';
-    }
-
-    function operatorsForField(field) {
-      if (field?.type === 'number' || field?.type === 'date') {
-        return ['==', '!=', '>', '>=', '<', '<='];
-      }
-      if (field?.type === 'enum') {
-        return ['==', '!=', '=~', 'in', '!in'];
-      }
-      return ['contains', '!contains', '==', '!=', '=~', '!~', 'startswith', 'endswith', 'in', '!in'];
-    }
-
-    function renderQueryBuilder() {
-      queryFieldSelectEl.innerHTML = queryFields.map((field) => (
-        '<option value="' + html(field.value) + '">' + html(field.label) + '</option>'
-      )).join('');
-      updateQueryOperatorOptions();
-    }
-
-    function updateQueryOperatorOptions() {
-      const field = queryFields.find((item) => item.value === queryFieldSelectEl.value);
-      queryOperatorSelectEl.innerHTML = operatorsForField(field).map((operator) => (
-        '<option value="' + html(operator) + '">' + html(operator) + '</option>'
-      )).join('');
-      if (field?.values?.length) {
-        queryValueInputEl.placeholder = field.values.join(', ');
-      } else if (field?.type === 'date') {
-        queryValueInputEl.placeholder = '2026-05-08';
-      } else {
-        queryValueInputEl.placeholder = 'Value';
-      }
-    }
-
-    function addQueryClause() {
-      const field = queryFieldSelectEl.value;
-      const operator = queryOperatorSelectEl.value;
-      const rawValue = queryValueInputEl.value.trim();
-      if (!field || !operator || !rawValue) return;
-
-      const values = rawValue.split(',').map((item) => item.trim()).filter(Boolean);
-      const value = operator === 'in' || operator === '!in'
-        ? '(' + values.map(quoteQueryValue).join(', ') + ')'
-        : quoteQueryValue(rawValue);
-      const clause = field + ' ' + operator + ' ' + value;
-      const current = queryInputEl.value.trim();
-      queryInputEl.value = current ? current + ' ' + queryJoinSelectEl.value + ' ' + clause : clause;
-      queryValueInputEl.value = '';
-    }
-
-    async function loadQueryFields() {
-      const response = await fetch('/api/query-fields');
-      const payload = await response.json();
-      queryFields = payload.fields || [];
-      renderQueryBuilder();
-    }
-
-    function activeWorkflow() {
-      return workflowsState.find((workflow) => workflow.id === workflowSelectEl.value) || workflowsState[0];
-    }
-
-    function fieldInputId(field) {
-      return 'workflowField-' + field.id;
-    }
-
-    function renderField(field) {
-      const id = fieldInputId(field);
-      if (field.kind === 'boolean') {
-        return '<div class="field check">'
-          + '<input id="' + html(id) + '" data-field-id="' + html(field.id) + '" type="checkbox"' + (field.defaultValue ? ' checked' : '') + '>'
-          + '<label for="' + html(id) + '">' + html(field.label) + '</label>'
-          + '</div>';
-      }
-
-      if (field.kind === 'choice') {
-        const options = (field.options || []).map((option) => (
-          '<option value="' + html(option.value) + '"' + (option.value === field.defaultValue ? ' selected' : '') + '>' + html(option.label) + '</option>'
-        )).join('');
-        return '<div class="field"><label for="' + html(id) + '">' + html(field.label) + '</label>'
-          + '<select id="' + html(id) + '" data-field-id="' + html(field.id) + '">' + options + '</select></div>';
-      }
-
-      const type = field.kind === 'number' ? 'number' : 'text';
-      const step = field.step !== undefined ? ' step="' + html(field.step) + '"' : '';
-      const min = field.min !== undefined ? ' min="' + html(field.min) + '"' : '';
-      const cssClass = field.kind === 'text' ? 'field full' : 'field';
-      return '<div class="' + cssClass + '"><label for="' + html(id) + '">' + html(field.label) + '</label>'
-        + '<input id="' + html(id) + '" data-field-id="' + html(field.id) + '" type="' + type + '" value="' + html(field.defaultValue ?? '') + '"' + min + step + '></div>';
-    }
-
-    function renderWorkflowForm(workflow) {
-      if (!workflow) {
-        workflowFormEl.innerHTML = '';
-        workflowArgsPreviewEl.value = '';
-        return;
-      }
-
-      workflowFormEl.innerHTML = (workflow.fields || []).map(renderField).join('');
-      for (const input of workflowFormEl.querySelectorAll('input, select')) {
-        input.addEventListener('input', updateArgsPreview);
-        input.addEventListener('change', updateArgsPreview);
-      }
-      updateArgsPreview();
-    }
-
-    function buildWorkflowArgs() {
-      const workflow = activeWorkflow();
-      if (!workflow) return [];
-
-      const args = [];
-      for (const field of workflow.fields || []) {
-        const input = document.getElementById(fieldInputId(field));
-        if (!input) continue;
-
-        if (field.kind === 'boolean') {
-          if (input.checked && field.flag) args.push(field.flag);
-          continue;
-        }
-
-        if (field.kind === 'choice') {
-          const option = (field.options || []).find((item) => item.value === input.value);
-          args.push(...(option?.args || []));
-          continue;
-        }
-
-        const value = input.value.trim();
-        if (value) args.push(field.flag, value);
-      }
-      return args;
-    }
-
-    function updateArgsPreview() {
-      workflowArgsPreviewEl.value = buildWorkflowArgs().join(' ');
-    }
-
-    function renderWorkflowOptions(workflows) {
-      const selected = workflowSelectEl.value;
-      workflowSelectEl.innerHTML = workflows.map((workflow) => (
-        '<option value="' + html(workflow.id) + '">' + html(workflow.label) + '</option>'
-      )).join('');
-      if (selected && workflows.some((workflow) => workflow.id === selected)) {
-        workflowSelectEl.value = selected;
-      }
-    }
-
-    function renderProcesses(processes) {
-      if (!processes.length) {
-        processListEl.innerHTML = '<div class="card"><div class="label">Processes</div><div>No managed workflows have been started from this server session.</div></div>';
-        return;
-      }
-
-      processListEl.innerHTML = processes.map((proc) => {
-        const running = proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping';
-        const logs = (proc.logs || []).slice(-80).join('\\n');
-        return '<div class="card process-card">'
-          + '<div class="process-header">'
-          + '<div class="process-title"><strong>' + html(proc.label) + '</strong><div class="process-meta">' + html(proc.id) + ' · pid=' + html(proc.pid) + ' · ' + html(proc.status) + ' · os=' + (proc.osAlive ? 'alive' : 'not running') + (proc.managed ? ' · managed' : ' · recovered') + '</div></div>'
-          + (running ? '<button type="button" class="danger stop-button" data-id="' + html(proc.id) + '">Stop</button>' : '')
-          + '</div>'
-          + '<div class="process-meta process-command">npm run ' + html(proc.script) + ' -- ' + html((proc.args || []).join(' ')) + '</div>'
-          + '<div class="process-meta">started ' + html(proc.startedAt) + (proc.exitedAt ? ' · exited ' + html(proc.exitedAt) : '') + (proc.osCheckedAt ? ' · checked ' + html(proc.osCheckedAt) : '') + '</div>'
-          + '<pre class="logs">' + html(logs) + '</pre>'
-          + '</div>';
-      }).join('');
-
-      for (const button of document.querySelectorAll('.stop-button')) {
-        button.addEventListener('click', async () => {
-          await fetch('/api/workflows/stop', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ processId: button.dataset.id }),
-          });
-          await loadWorkflows();
-        });
-      }
-    }
-
-    async function loadSummary() {
-      const response = await fetch('/api/summary');
-      const payload = await response.json();
-      renderSummary(payload);
-    }
-
-    async function loadRows() {
-      const params = new URLSearchParams({
-        q: state.q,
-        limit: String(state.limit),
-        offset: String(state.offset),
-      });
-      const response = await fetch('/api/listings?' + params.toString());
-      const payload = await response.json();
-      if (!response.ok) {
-        resultsMetaEl.textContent = 'Query error: ' + (payload.error || response.statusText);
-        resultsBodyEl.innerHTML = '';
-        return;
-      }
-      state.total = payload.total;
-      renderRows(payload.rows);
-      const stats = payload.stats || {};
-      resultsMetaEl.textContent = 'Showing ' + payload.rows.length + ' of ' + payload.total + ' rows'
-        + (payload.query ? ' for query: ' + payload.query : '')
-        + ' · sort: ' + payload.sort
-        + ' · query: ' + (stats.elapsedMs ?? 0) + 'ms'
-        + ' · scanned result window: ' + (stats.limit ?? state.limit);
-      updatePager();
-    }
-
-    async function loadWorkflows() {
-      const response = await fetch('/api/workflows');
-      const payload = await response.json();
-      const nextWorkflowSignature = JSON.stringify((payload.workflows || []).map((workflow) => ({
-        id: workflow.id,
-        fields: workflow.fields,
-      })));
-      const currentWorkflowSignature = JSON.stringify(workflowsState.map((workflow) => ({
-        id: workflow.id,
-        fields: workflow.fields,
-      })));
-      workflowsState = payload.workflows || [];
-      if (!workflowsInitialized || nextWorkflowSignature !== currentWorkflowSignature) {
-        renderWorkflowOptions(workflowsState);
-        renderWorkflowForm(activeWorkflow());
-        workflowsInitialized = true;
-      }
-      renderProcesses(payload.processes);
-    }
-
-    document.getElementById('queryForm').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      state.q = queryInputEl.value.trim();
-      state.offset = 0;
-      await loadRows();
-    });
-
-    document.getElementById('clearButton').addEventListener('click', async () => {
-      queryInputEl.value = '';
-      state.q = '';
-      state.offset = 0;
-      await loadRows();
-    });
-
-    queryFieldSelectEl.addEventListener('change', updateQueryOperatorOptions);
-    document.getElementById('addClauseButton').addEventListener('click', addQueryClause);
-    document.getElementById('wrapQueryButton').addEventListener('click', () => {
-      const current = queryInputEl.value.trim();
-      if (current) queryInputEl.value = '(' + current + ')';
-    });
-    for (const button of document.querySelectorAll('.example-query')) {
-      button.addEventListener('click', async () => {
-        queryInputEl.value = button.dataset.query;
-        state.q = queryInputEl.value;
-        state.offset = 0;
-        await loadRows();
-      });
-    }
-
-    prevButtonEl.addEventListener('click', async () => {
-      state.offset = Math.max(0, state.offset - state.limit);
-      await loadRows();
-    });
-
-    nextButtonEl.addEventListener('click', async () => {
-      state.offset += state.limit;
-      await loadRows();
-    });
-
-    for (const tab of document.querySelectorAll('.tab')) {
-      tab.addEventListener('click', () => {
-        for (const item of document.querySelectorAll('.tab')) item.classList.remove('active');
-        for (const panel of document.querySelectorAll('.panel')) panel.classList.remove('active');
-        tab.classList.add('active');
-        document.getElementById(tab.dataset.panel).classList.add('active');
-      });
-    }
-
-    document.getElementById('startWorkflowButton').addEventListener('click', async () => {
-      const response = await fetch('/api/workflows/start', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          workflowId: workflowSelectEl.value,
-          args: buildWorkflowArgs(),
-        }),
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        alert(payload.error || 'Failed to start workflow');
-      }
-      await loadWorkflows();
-      await loadSummary();
-    });
-
-    document.getElementById('refreshWorkflowsButton').addEventListener('click', loadWorkflows);
-    document.getElementById('reconcileWorkflowsButton').addEventListener('click', async () => {
-      await fetch('/api/workflows/reconcile', { method: 'POST' });
-      await loadWorkflows();
-    });
-    workflowSelectEl.addEventListener('change', () => renderWorkflowForm(activeWorkflow()));
-
-    loadSummary().then(loadQueryFields).then(loadRows).then(loadWorkflows);
-    setInterval(loadSummary, 10000);
-    setInterval(loadWorkflows, 5000);
-  </script>
-</body>
-</html>`;
+  return candidates.find((line) => !isPriceLike(line) && !isFreshnessLike(line))
+    || row.card_title
+    || row.listing_id
+    || '';
 }
 
 function resolveFilePathFromRequest(urlPath) {
@@ -1355,21 +891,47 @@ function resolveFilePathFromRequest(urlPath) {
 function enrichRowPaths(row) {
   return {
     ...row,
+    displayTitle: displayTitleForRow(row),
+    screenshotPath: row.screenshot_path,
+    snapshotPath: row.snapshot_path,
     screenshotUrl: formatPathLink(row.screenshot_path),
     snapshotUrl: formatPathLink(row.snapshot_path),
   };
 }
 
+function enrichEventPaths(event) {
+  if (!event) {
+    return null;
+  }
+  const screenshotPath = event?.screenshot_path || event?.listing?.screenshot_path || '';
+  const snapshotPath = event?.snapshot_path || event?.listing?.snapshot_path || '';
+  return {
+    ...event,
+    screenshotPath,
+    snapshotPath,
+    screenshotUrl: formatPathLink(screenshotPath),
+    snapshotUrl: formatPathLink(snapshotPath),
+  };
+}
+
 function createServer(options) {
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
-  const html = buildIndexHtml();
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
     if (requestUrl.pathname === '/') {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      response.end(html);
+      serveStaticFrontend(response, 'index.html');
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith('/app/')) {
+      serveStaticFrontend(response, decodeURIComponent(requestUrl.pathname.replace(/^\/app\//, '')));
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith('/vendor/tabulator/')) {
+      serveVendorAsset(response, decodeURIComponent(requestUrl.pathname.replace(/^\/vendor\/tabulator\//, '')));
       return;
     }
 
@@ -1396,10 +958,12 @@ function createServer(options) {
       const query = requestUrl.searchParams.get('q') || '';
       const limit = requestUrl.searchParams.get('limit') || '50';
       const offset = requestUrl.searchParams.get('offset') || '0';
+      const sort = requestUrl.searchParams.get('sort') || '';
+      const sortDirection = requestUrl.searchParams.get('sortDir') || '';
 
       try {
         const startedAt = process.hrtime.bigint();
-        const listingsQuery = buildListingsQuery({ query, limit, offset });
+        const listingsQuery = buildListingsQuery({ query, limit, offset, sort, sortDirection });
         const countQuery = buildCountQuery({ query });
         const rows = db.prepare(listingsQuery.sql).all(...listingsQuery.params).map(enrichRowPaths);
         const total = db.prepare(countQuery.sql).get(...countQuery.params).total;
@@ -1409,6 +973,7 @@ function createServer(options) {
           query,
           parsedQuery: listingsQuery.parsedQuery,
           sort: listingsQuery.parsedQuery.sort,
+          sortDirection: listingsQuery.parsedQuery.sortDirection,
           limit: listingsQuery.limit,
           offset: listingsQuery.offset,
           total,
@@ -1430,6 +995,17 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/listings/resolve' && request.method === 'POST') {
+      try {
+        const body = await readRequestJson(request);
+        const result = resolveListingsFromViewer(db, body);
+        writeJson(response, 201, result);
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
       writeJson(response, 200, {
         workflows: Object.entries(WORKFLOWS).map(([id, workflow]) => ({
@@ -1447,6 +1023,37 @@ function createServer(options) {
     if (requestUrl.pathname === '/api/workflows/reconcile' && request.method === 'POST') {
       writeJson(response, 200, {
         processes: reconcileWorkflowRuns(db),
+      });
+      return;
+    }
+
+    const workerStatsMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)\/stats$/);
+    if (workerStatsMatch && request.method === 'GET') {
+      const workerId = decodeURIComponent(workerStatsMatch[1]);
+      const workerIds = resolveWorkerEventIdsForRun(db, workerId);
+      const stats = getWorkerListingEventStats(db, workerId, { workerIds });
+      writeJson(response, 200, {
+        workerId,
+        stats: {
+          ...stats,
+          latestEvent: enrichEventPaths(stats.latestEvent),
+          latestPreviewEvent: enrichEventPaths(stats.latestPreviewEvent),
+        },
+      });
+      return;
+    }
+
+    const workerEventsMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)\/events$/);
+    if (workerEventsMatch && request.method === 'GET') {
+      const workerId = decodeURIComponent(workerEventsMatch[1]);
+      const category = requestUrl.searchParams.get('category') || 'all';
+      const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '50', 10);
+      const workerIds = resolveWorkerEventIdsForRun(db, workerId);
+      writeJson(response, 200, {
+        workerId,
+        category,
+        workerIds,
+        events: listWorkerListingEvents(db, workerId, { category, limit, workerIds }).map(enrichEventPaths),
       });
       return;
     }
