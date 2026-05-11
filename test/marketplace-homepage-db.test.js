@@ -12,9 +12,11 @@ const {
   normalizeKeyword,
   upsertHomepageListingWithStatus,
   upsertHomepageListing,
+  listBacklogCandidates,
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
   markHomepageListingFailed,
+  markHomepageListingInactive,
   getHomepageListingCounts,
   appendListingEvent,
   getListingEvents,
@@ -29,6 +31,9 @@ const {
   updateWorkflowRun,
   getWorkflowRun,
   listWorkflowRuns,
+  resolveWorkerEventIdsForRun,
+  listWorkerListingEvents,
+  getWorkerListingEventStats,
 } = require('../scripts/marketplace-homepage-db');
 
 function createTempDbPath() {
@@ -106,6 +111,127 @@ test('listing events are append-only detail history', () => {
       eventType: 'detail_capture_succeeded',
     });
     assert.equal(latestSuccess.event_id, event.event_id);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('worker event helpers group audit events by category', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'worker-event-1',
+      href: 'https://www.facebook.com/marketplace/item/611/',
+      title: 'Worker event row',
+      text: 'CA$ 100 | Worker event row',
+      rank: 1,
+    });
+
+    appendListingEvent(db, {
+      listingId: 'worker-event-1',
+      eventType: 'detail_capture_started',
+      workerId: 'run-worker-1',
+      status: 'processing',
+      content: { detail: { title: 'Worker event row' } },
+    });
+    appendListingEvent(db, {
+      listingId: 'worker-event-1',
+      eventType: 'detail_capture_succeeded',
+      workerId: 'run-worker-1',
+      status: 'done',
+      content: { detail: { title: 'Worker event row', price: 'CA$ 100' } },
+      screenshotPath: '/tmp/611.png',
+    });
+    appendListingEvent(db, {
+      listingId: 'worker-event-1',
+      eventType: 'detail_capture_bypassed',
+      workerId: 'run-worker-1',
+      status: 'sold',
+      content: { detail: { availabilityReason: 'sold_signal' } },
+    });
+
+    const stats = getWorkerListingEventStats(db, 'run-worker-1');
+    assert.equal(stats.started, 1);
+    assert.equal(stats.done, 1);
+    assert.equal(stats.skipped, 1);
+    assert.equal(stats.total, 3);
+
+    const doneEvents = listWorkerListingEvents(db, 'run-worker-1', { category: 'done' });
+    assert.equal(doneEvents.length, 1);
+    assert.equal(doneEvents[0].content.detail.price, 'CA$ 100');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('worker event helpers link legacy pid audit rows to workflow runs', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'legacy-worker-1',
+      href: 'https://www.facebook.com/marketplace/item/621/',
+      title: 'Legacy worker row',
+      text: 'CA$ 100 | Legacy worker row',
+      rank: 1,
+    });
+
+    insertWorkflowRun(db, {
+      runId: 'workflow-run-legacy',
+      workflowId: 'backlog-worker',
+      label: 'Continuous Backlog Worker',
+      script: 'marketplace:home:process',
+      args: ['--headless'],
+      pid: 9001,
+      status: 'failed',
+      startedAt: '2026-05-09T00:00:00.000Z',
+      logs: [
+        '[2026-05-09T00:00:10.000Z] job_start listing_id=legacy-worker-1 attempt=1',
+        '[2026-05-09T00:00:11.000Z] job_error listing_id=legacy-worker-1 error="closed"',
+      ],
+    });
+    updateWorkflowRun(db, 'workflow-run-legacy', {
+      exitedAt: '2026-05-09T00:02:00.000Z',
+      status: 'failed',
+    });
+
+    appendListingEvent(db, {
+      listingId: 'legacy-worker-1',
+      eventType: 'detail_capture_succeeded',
+      eventAt: '2026-05-09T00:00:20.000Z',
+      workerId: 'pid-9002',
+      status: 'done',
+      content: { detail: { title: 'Legacy worker row', price: 'CA$ 100' } },
+      screenshotPath: '/tmp/legacy-worker-1.png',
+    });
+    appendListingEvent(db, {
+      listingId: 'legacy-worker-1',
+      eventType: 'detail_capture_failed',
+      eventAt: '2026-05-09T00:00:40.000Z',
+      workerId: 'pid-9002',
+      status: 'error',
+      error: 'browser closed',
+    });
+
+    const workerIds = resolveWorkerEventIdsForRun(db, 'workflow-run-legacy');
+    assert.deepEqual(workerIds, ['workflow-run-legacy', 'pid-9002']);
+
+    const stats = getWorkerListingEventStats(db, 'workflow-run-legacy', { workerIds });
+    assert.equal(stats.total, 2);
+    assert.equal(stats.done, 1);
+    assert.equal(stats.error, 1);
+    assert.equal(stats.latestEvent.event_type, 'detail_capture_failed');
+    assert.equal(stats.latestPreviewEvent.event_type, 'detail_capture_succeeded');
+
+    const errorEvents = listWorkerListingEvents(db, 'workflow-run-legacy', {
+      category: 'error',
+      workerIds,
+    });
+    assert.equal(errorEvents.length, 1);
+    assert.equal(errorEvents[0].worker_id, 'pid-9002');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
@@ -414,6 +540,220 @@ test('claimNextPendingHomepageListing respects max attempts and source filters',
       claimedAt: '2026-05-07T00:02:00.000Z',
     });
     assert.equal(homepageClaim.listing_id, 'source-home');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('claimNextPendingHomepageListing can filter queue status', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'status-pending',
+      href: 'https://www.facebook.com/marketplace/item/801/',
+      title: 'Pending row',
+      text: 'Pending card',
+      rank: 1,
+    });
+    upsertHomepageListing(db, {
+      listingId: 'status-error',
+      href: 'https://www.facebook.com/marketplace/item/802/',
+      title: 'Error row',
+      text: 'Error card',
+      rank: 2,
+    });
+
+    const errorClaimSeed = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-seed',
+      statusFilter: 'pending',
+      claimedAt: '2026-05-07T00:00:00.000Z',
+    });
+    assert.equal(errorClaimSeed.listing_id, 'status-pending');
+    markHomepageListingFailed(db, 'status-pending', 'temporary failure');
+
+    const pendingClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-pending',
+      statusFilter: 'pending',
+      claimedAt: '2026-05-07T00:01:00.000Z',
+    });
+    assert.equal(pendingClaim.listing_id, 'status-error');
+
+    const errorClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-error',
+      statusFilter: 'error',
+      retryDelaySeconds: 0,
+      claimedAt: '2026-05-07T00:02:00.000Z',
+    });
+    assert.equal(errorClaim.listing_id, 'status-pending');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('claimNextPendingHomepageListing can start from latest, earliest, and a seen range', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'old-row',
+      href: 'https://www.facebook.com/marketplace/item/811/',
+      title: 'Old row',
+      text: 'Old card',
+      rank: 3,
+    }, {
+      seenAt: '2026-05-07T00:00:00.000Z',
+    });
+    upsertHomepageListing(db, {
+      listingId: 'middle-row',
+      href: 'https://www.facebook.com/marketplace/item/812/',
+      title: 'Middle row',
+      text: 'Middle card',
+      rank: 2,
+    }, {
+      seenAt: '2026-05-07T01:00:00.000Z',
+    });
+    upsertHomepageListing(db, {
+      listingId: 'new-row',
+      href: 'https://www.facebook.com/marketplace/item/813/',
+      title: 'New row',
+      text: 'New card',
+      rank: 1,
+    }, {
+      seenAt: '2026-05-07T02:00:00.000Z',
+    });
+
+    const preview = listBacklogCandidates(db, {
+      statusFilter: 'pending',
+      backlogOrder: 'latest',
+      seenTimeField: 'last_seen',
+      seenAfter: '2026-05-07T00:30:00.000Z',
+      seenBefore: '2026-05-07T02:30:00.000Z',
+      limit: 10,
+    });
+    assert.deepEqual(preview.map((row) => row.listing_id), ['new-row', 'middle-row']);
+
+    const latestClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-latest',
+      statusFilter: 'pending',
+      backlogOrder: 'latest',
+      seenTimeField: 'last_seen',
+      seenAfter: '2026-05-07T00:30:00.000Z',
+      seenBefore: '2026-05-07T02:30:00.000Z',
+      claimedAt: '2026-05-07T03:00:00.000Z',
+    });
+    assert.equal(latestClaim.listing_id, 'new-row');
+
+    const earliestClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-earliest',
+      statusFilter: 'pending',
+      backlogOrder: 'earliest',
+      seenTimeField: 'last_seen',
+      seenAfter: '2026-05-07T00:30:00.000Z',
+      seenBefore: '2026-05-07T02:30:00.000Z',
+      claimedAt: '2026-05-07T03:01:00.000Z',
+    });
+    assert.equal(earliestClaim.listing_id, 'middle-row');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('claimNextPendingHomepageListing can restrict claims to explicit listing ids', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'target-a',
+      href: 'https://www.facebook.com/marketplace/item/821/',
+      title: 'Target A',
+      text: 'Target A card',
+      rank: 1,
+    });
+    upsertHomepageListing(db, {
+      listingId: 'target-b',
+      href: 'https://www.facebook.com/marketplace/item/822/',
+      title: 'Target B',
+      text: 'Target B card',
+      rank: 2,
+    });
+    upsertHomepageListing(db, {
+      listingId: 'outside',
+      href: 'https://www.facebook.com/marketplace/item/823/',
+      title: 'Outside',
+      text: 'Outside card',
+      rank: 0,
+    });
+
+    const claimed = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-selected',
+      statusFilter: 'pending',
+      listingIds: ['target-b'],
+      claimedAt: '2026-05-07T03:00:00.000Z',
+    });
+    assert.equal(claimed.listing_id, 'target-b');
+
+    const next = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-selected',
+      statusFilter: 'pending',
+      listingIds: ['target-b'],
+      claimedAt: '2026-05-07T03:01:00.000Z',
+    });
+    assert.equal(next, null);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('inactive listings are counted and only claimed when requested', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'inactive-sold',
+      href: 'https://www.facebook.com/marketplace/item/901/',
+      title: 'Sold row',
+      text: 'Sold card',
+      rank: 1,
+    });
+    markHomepageListingInactive(db, 'inactive-sold', 'sold', {
+      title: 'Sold row',
+      listingContent: {
+        title: 'Sold row',
+        availabilityStatus: 'sold',
+        availabilityReason: 'sold_signal',
+      },
+      screenshotPath: '/tmp/sold.png',
+      snapshotPath: '/tmp/sold.md',
+    }, 'sold_signal');
+
+    const counts = getHomepageListingCounts(db);
+    assert.equal(counts.sold, 1);
+
+    const refreshed = upsertHomepageListing(db, {
+      listingId: 'inactive-sold',
+      href: 'https://www.facebook.com/marketplace/item/901/?ref=feed',
+      title: 'Sold row seen again',
+      text: 'Sold card seen again',
+      rank: 2,
+    });
+    assert.equal(refreshed.detail_status, 'sold');
+
+    const defaultClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-default',
+      statusFilter: 'all',
+    });
+    assert.equal(defaultClaim, null);
+
+    const soldClaim = claimNextPendingHomepageListing(db, {
+      workerId: 'worker-sold',
+      statusFilter: 'sold',
+    });
+    assert.equal(soldClaim.listing_id, 'inactive-sold');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

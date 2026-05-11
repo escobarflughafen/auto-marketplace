@@ -42,13 +42,31 @@ async function readBodyText(page) {
   return page.locator('body').innerText().catch(() => '');
 }
 
+async function hasSignedInUserCookie(context) {
+  const cookies = await context.cookies('https://www.facebook.com').catch(() => []);
+  return cookies.some((cookie) => cookie.name === 'c_user' && cookie.value);
+}
+
+async function isFacebookAdditionalVerificationPage(page) {
+  const currentUrl = page.url();
+  const body = await readBodyText(page);
+  return /\/checkpoint\/|\/two_step_verification\//i.test(currentUrl)
+    || /two-factor|two step|check your notifications|enter login code|approve your login|authentication app/i.test(body);
+}
+
 async function isLoggedOut(page) {
   const currentUrl = page.url();
   const body = await readBodyText(page);
-  return currentUrl.includes('/login') || /Log In|Email or phone number|Forgot password\?/i.test(body);
+  return currentUrl.includes('/login')
+    || /Log In|Email or phone number|Forgot password\?/i.test(body)
+    || await isFacebookAdditionalVerificationPage(page);
 }
 
 async function findLoggedInPage(context) {
+  if (!await hasSignedInUserCookie(context)) {
+    return null;
+  }
+
   const pages = [...context.pages()].reverse();
   for (const page of pages) {
     if (page.isClosed()) {
@@ -84,6 +102,7 @@ async function firstVisibleLocator(locatorFactories, timeout = 4000) {
 async function loginWithCredentials(context, credentials, options = {}) {
   const {
     loginTimeoutMs = DEFAULT_LOGIN_TIMEOUT_MS,
+    failOnAdditionalVerification = false,
     logger = null,
   } = options;
 
@@ -150,10 +169,16 @@ async function loginWithCredentials(context, credentials, options = {}) {
       return loggedInPage;
     }
 
-    const currentUrl = page.url();
-    const body = await readBodyText(page);
-    if (/two-factor|check your notifications|enter login code|approve/i.test(body) || /login|checkpoint/i.test(currentUrl)) {
-      console.log('Facebook requires additional verification. Complete it in the browser window if one is shown.');
+    if (await isFacebookAdditionalVerificationPage(page)) {
+      const message = 'Facebook requires additional verification before this session can access Marketplace.';
+      if (logger) {
+        logger(`login_additional_verification_required url=${page.url()}`);
+      } else {
+        console.log(`${message} Complete it in the browser window if one is shown.`);
+      }
+      if (failOnAdditionalVerification) {
+        throw new Error(`${message} Start a headed worker or refresh the persistent profile, complete Facebook verification, then retry Fetch.`);
+      }
     }
 
     await page.waitForTimeout(2000);
@@ -168,6 +193,7 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
     useCredentials = false,
     credentialsPath = DEFAULT_CREDENTIALS_PATH,
     loginTimeoutMs = DEFAULT_LOGIN_TIMEOUT_MS,
+    failOnAdditionalVerification = false,
     logger = null,
   } = options;
 
@@ -185,7 +211,7 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
     minBodyTextLength: 20,
   });
 
-  if (!await isLoggedOut(page)) {
+  if (await hasSignedInUserCookie(context) && !await isLoggedOut(page)) {
     if (logger) {
       logger(`session_reuse_success source=navigate_marketplace url=${page.url()}`);
     }
@@ -202,6 +228,7 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
   }
   return loginWithCredentials(context, credentials, {
     loginTimeoutMs,
+    failOnAdditionalVerification,
     logger,
   });
 }
@@ -219,12 +246,13 @@ async function describeFacebookMarketplaceSession(context, page, options = {}) {
 
   const cookies = await context.cookies('https://www.facebook.com').catch(() => []);
   const userCookie = cookies.find((cookie) => cookie.name === 'c_user');
+  const authenticated = Boolean(userCookie?.value && page && !await isLoggedOut(page));
 
   return {
     loadedEmail,
     signedInUserId: userCookie?.value || '',
     currentUrl: page?.url?.() || '',
-    loggedIn: Boolean(page && !await isLoggedOut(page)),
+    loggedIn: authenticated,
   };
 }
 
@@ -233,6 +261,8 @@ module.exports = {
   DEFAULT_LOGIN_TIMEOUT_MS,
   DEFAULT_CREDENTIALS_PATH,
   readCredentials,
+  hasSignedInUserCookie,
+  isFacebookAdditionalVerificationPage,
   ensureFacebookMarketplaceLogin,
   describeFacebookMarketplaceSession,
 };

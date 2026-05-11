@@ -719,6 +719,35 @@ function extractByRegex(pageText, patterns) {
   return '';
 }
 
+function detectListingAvailability(pageText, title = '') {
+  const text = cleanText(`${title || ''} ${pageText || ''}`);
+  if (/(?:^|\s|·)(?:Sold|已售|售出|已卖)(?:\s|·|$)/iu.test(text)) {
+    return {
+      status: 'sold',
+      reason: 'sold_signal',
+    };
+  }
+
+  if (/(?:^|\s|·)(?:Pending|待处理|交易待定|待定)(?:\s|·|$)/iu.test(text)) {
+    return {
+      status: 'pending_sale',
+      reason: 'pending_signal',
+    };
+  }
+
+  if (/(?:^|\s|·)(?:Available|有货)(?:\s|·|$)/iu.test(text)) {
+    return {
+      status: 'available',
+      reason: 'available_signal',
+    };
+  }
+
+  return {
+    status: 'unknown',
+    reason: 'no_signal',
+  };
+}
+
 function extractListingContent(pageText, fallbackTitle = '') {
   const text = cleanText(pageText);
   const title = extractByRegex(text, [
@@ -782,9 +811,12 @@ function extractListingContent(pageText, fallbackTitle = '') {
     /加入 Facebook 的时间：(.+?)\s+(?:赞助内容|发消息给卖家)/u,
     /Joined Facebook in (.+?)\s+(?:Sponsored|Message seller)/u,
   ]);
+  const availability = detectListingAvailability(text, title);
 
   return {
     title,
+    availabilityStatus: availability.status,
+    availabilityReason: availability.reason,
     price: primaryPrice,
     previousPrice,
     listedAgo,
@@ -947,6 +979,7 @@ module.exports = {
   captureListingThumbnails,
   cleanText,
   readListingTitle,
+  detectListingAvailability,
   extractListingContent,
   writeListingSnapshot,
 };

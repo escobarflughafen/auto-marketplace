@@ -9,6 +9,7 @@ const {
   waitForPageReady,
   scrollMarketplaceResults,
   expandMarketplaceListingDetails,
+  detectListingAvailability,
   extractListingContent,
   urlMatchesMarketplaceArea,
 } = require('../scripts/marketplace-utils');
@@ -227,6 +228,7 @@ test('extractListingContent parses localized sold listing details without foldin
   const listing = extractListingContent(text);
 
   assert.equal(listing.title, '已售 · Plaubel Makina IIs 6x9cm Camera Outfit, Circa 1940');
+  assert.equal(listing.availabilityStatus, 'sold');
   assert.equal(listing.price, 'CA$ 1,950');
   assert.equal(listing.previousPrice, 'CA$ 2,100');
   assert.equal(listing.listedAgo, '1 周前');
@@ -250,10 +252,17 @@ test('extractListingContent parses available localized listing location', () => 
   const listing = extractListingContent(text);
 
   assert.equal(listing.title, 'Vintage Eddie Bauer down jacket talon zipper');
+  assert.equal(listing.availabilityStatus, 'available');
   assert.equal(listing.price, 'CA$ 80');
   assert.equal(listing.listedAgo, '');
   assert.equal(listing.location, 'Vancouver, BC');
   assert.equal(listing.condition, '二手 - 成色好');
   assert.equal(listing.description, 'Size medium. Fair bit of wear but it’s a great jacket.');
   assert.equal(listing.sellerName, 'Max Ke');
+});
+
+test('detectListingAvailability recognizes pending Marketplace listings', () => {
+  const availability = detectListingAvailability('Marketplace Pending · Leica M6 CA$ 3,800 Vancouver, BC');
+  assert.equal(availability.status, 'pending_sale');
+  assert.equal(availability.reason, 'pending_signal');
 });

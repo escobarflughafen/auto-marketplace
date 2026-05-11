@@ -13,6 +13,10 @@ const FIELD_ALIASES = {
   card_text: 'card_text',
   seller: 'detail_seller_name',
   location: 'detail_location',
+  condition: 'detail_condition',
+  attempts: 'detail_attempts',
+  first_seen: 'first_seen_at',
+  completed: 'detail_completed_at',
   price: 'price',
   rank: 'last_seen_rank',
   source: 'source',
@@ -32,6 +36,7 @@ const TEXT_FIELDS = new Set([
   'detail_title',
   'detail_location',
   'detail_seller_name',
+  'detail_condition',
   'source',
   'source_keyword',
   'detail_json',
@@ -40,6 +45,28 @@ const TEXT_FIELDS = new Set([
 const NUMERIC_FIELDS = new Set([
   'price',
   'last_seen_rank',
+  'detail_attempts',
+]);
+
+const SORT_FIELDS = new Set([
+  'id',
+  'listing_id',
+  'status',
+  'source',
+  'keyword',
+  'source_keyword',
+  'rank',
+  'price',
+  'title',
+  'seller',
+  'condition',
+  'attempts',
+  'location',
+  'first_seen',
+  'completed',
+  'seen',
+  'recent',
+  'oldest',
 ]);
 
 function tokenizeQuery(query) {
@@ -129,6 +156,7 @@ function normalizeSort(value) {
   switch (normalized) {
     case 'recent':
     case 'new':
+    case 'seen':
       return 'recent';
     case 'oldest':
       return 'oldest';
@@ -136,9 +164,44 @@ function normalizeSort(value) {
       return 'rank';
     case 'price':
       return 'price';
+    case 'id':
+    case 'listing_id':
+      return 'id';
+    case 'status':
+      return 'status';
+    case 'source':
+      return 'source';
+    case 'keyword':
+    case 'source_keyword':
+      return 'keyword';
+    case 'title':
+      return 'title';
+    case 'seller':
+      return 'seller';
+    case 'condition':
+      return 'condition';
+    case 'attempts':
+      return 'attempts';
+    case 'location':
+      return 'location';
+    case 'first_seen':
+      return 'first_seen';
+    case 'completed':
+      return 'completed';
     default:
       return 'recent';
   }
+}
+
+function normalizeSortDirection(value, fallback = 'desc') {
+  const normalized = String(value || '').toLowerCase();
+  if (normalized === 'asc' || normalized === 'ascending') {
+    return 'asc';
+  }
+  if (normalized === 'desc' || normalized === 'descending') {
+    return 'desc';
+  }
+  return fallback;
 }
 
 function parseNumericPriceText(text) {
@@ -580,17 +643,40 @@ function buildWhereClause(parsedQuery) {
   };
 }
 
-function buildOrderBy(sort) {
+function buildOrderBy(sort, sortDirection = '') {
+  const direction = normalizeSortDirection(sortDirection);
   switch (sort) {
     case 'oldest':
       return 'ORDER BY last_seen_at ASC, first_seen_at ASC';
     case 'rank':
-      return 'ORDER BY COALESCE(last_seen_rank, 999999) ASC, last_seen_at DESC';
+      return `ORDER BY COALESCE(last_seen_rank, 999999) ${direction.toUpperCase()}, last_seen_at DESC`;
     case 'price':
-      return `ORDER BY ${buildPriceExpression()} DESC NULLS LAST, last_seen_at DESC`;
+      return `ORDER BY ${buildPriceExpression()} ${direction.toUpperCase()} NULLS LAST, last_seen_at DESC`;
+    case 'id':
+      return `ORDER BY listing_id ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'status':
+      return `ORDER BY detail_status ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'source':
+      return `ORDER BY source ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'keyword':
+      return `ORDER BY source_keyword ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'title':
+      return `ORDER BY LOWER(COALESCE(NULLIF(detail_title, ''), NULLIF(card_title, ''), '')) ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'location':
+      return `ORDER BY LOWER(COALESCE(NULLIF(detail_location, ''), '')) ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'seller':
+      return `ORDER BY LOWER(COALESCE(NULLIF(detail_seller_name, ''), '')) ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'condition':
+      return `ORDER BY LOWER(COALESCE(NULLIF(detail_condition, ''), '')) ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'attempts':
+      return `ORDER BY detail_attempts ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'first_seen':
+      return `ORDER BY first_seen_at ${direction.toUpperCase()}, last_seen_at DESC`;
+    case 'completed':
+      return `ORDER BY COALESCE(NULLIF(detail_completed_at, ''), '') ${direction.toUpperCase()}, last_seen_at DESC`;
     case 'recent':
     default:
-      return 'ORDER BY last_seen_at DESC, first_seen_at DESC';
+      return `ORDER BY last_seen_at ${direction.toUpperCase()}, first_seen_at ${direction.toUpperCase()}`;
   }
 }
 
@@ -605,6 +691,13 @@ function clampLimit(limit) {
 
 function buildListingsQuery(options = {}) {
   const parsedQuery = parseQuery(options.query || '');
+  if (SORT_FIELDS.has(String(options.sort || '').toLowerCase())) {
+    parsedQuery.sort = normalizeSort(options.sort);
+  }
+  parsedQuery.sortDirection = normalizeSortDirection(
+    options.sortDirection || options.sortDir,
+    parsedQuery.sort === 'rank' ? 'asc' : 'desc',
+  );
   const where = buildWhereClause(parsedQuery);
   const limit = clampLimit(options.limit);
   const offset = Math.max(0, Number.parseInt(options.offset, 10) || 0);
@@ -623,6 +716,7 @@ function buildListingsQuery(options = {}) {
       detail_attempts,
       detail_last_error,
       detail_completed_at,
+      detail_listed_ago,
       detail_title,
       detail_price,
       detail_location,
@@ -633,7 +727,7 @@ function buildListingsQuery(options = {}) {
       ${buildPriceExpression()} AS numeric_price
     FROM homepage_listings
     ${where.sql}
-    ${buildOrderBy(parsedQuery.sort)}
+    ${buildOrderBy(parsedQuery.sort, parsedQuery.sortDirection)}
     LIMIT ? OFFSET ?
   `;
 
@@ -643,6 +737,37 @@ function buildListingsQuery(options = {}) {
     params: [...where.params, limit, offset],
     limit,
     offset,
+  };
+}
+
+function buildListingIdsQuery(options = {}) {
+  const parsedQuery = parseQuery(options.query || '');
+  if (SORT_FIELDS.has(String(options.sort || '').toLowerCase())) {
+    parsedQuery.sort = normalizeSort(options.sort);
+  }
+  parsedQuery.sortDirection = normalizeSortDirection(
+    options.sortDirection || options.sortDir,
+    parsedQuery.sort === 'rank' ? 'asc' : 'desc',
+  );
+  const where = buildWhereClause(parsedQuery);
+  const extraClauses = [];
+  if (options.backlogOnly !== false) {
+    extraClauses.push("detail_status IN ('pending', 'error', 'processing')");
+  }
+
+  const whereSql = [where.sql.replace(/^WHERE\s+/i, ''), ...extraClauses]
+    .filter(Boolean)
+    .join(' AND ');
+
+  return {
+    parsedQuery,
+    sql: `
+      SELECT listing_id
+      FROM homepage_listings
+      ${whereSql ? `WHERE ${whereSql}` : ''}
+      ${buildOrderBy(parsedQuery.sort, parsedQuery.sortDirection)}
+    `,
+    params: where.params,
   };
 }
 
@@ -663,6 +788,7 @@ function buildCountQuery(options = {}) {
 module.exports = {
   parseQuery,
   buildListingsQuery,
+  buildListingIdsQuery,
   buildCountQuery,
   clampLimit,
 };

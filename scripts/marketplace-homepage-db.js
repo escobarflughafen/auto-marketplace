@@ -110,6 +110,21 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_status_last_seen
+    ON homepage_listings (detail_status, last_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_status_first_seen
+    ON homepage_listings (detail_status, first_seen_at ASC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_source_status_last_seen
+    ON homepage_listings (source, detail_status, last_seen_at DESC);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS search_title_bag (
       normalized_keyword TEXT PRIMARY KEY,
       keyword TEXT NOT NULL,
@@ -291,12 +306,12 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
       last_seen_at = excluded.last_seen_at,
       last_seen_rank = excluded.last_seen_rank,
       detail_status = CASE
-        WHEN homepage_listings.detail_status IN ('done', 'processing')
+        WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
           THEN homepage_listings.detail_status
         ELSE 'pending'
       END,
       detail_last_error = CASE
-        WHEN homepage_listings.detail_status IN ('done', 'processing')
+        WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
           THEN homepage_listings.detail_last_error
         ELSE ''
       END
@@ -347,13 +362,80 @@ function getHomepageListing(db, listingId) {
   `).get(listingId);
 }
 
-function claimNextPendingHomepageListing(db, options = {}) {
-  const now = options.claimedAt || new Date().toISOString();
+function normalizeBacklogTimeField(value) {
+  const normalized = normalizeKeyword(value || 'last_seen').toLowerCase().replace(/-/g, '_');
+  switch (normalized) {
+    case '':
+    case 'last':
+    case 'last_seen':
+    case 'last_seen_at':
+      return 'last_seen_at';
+    case 'first':
+    case 'first_seen':
+    case 'first_seen_at':
+      return 'first_seen_at';
+    default:
+      throw new Error(`Unknown backlog time field: ${value}`);
+  }
+}
+
+function normalizeBacklogOrder(value) {
+  const normalized = normalizeKeyword(value || 'priority').toLowerCase().replace(/-/g, '_');
+  switch (normalized) {
+    case '':
+    case 'priority':
+    case 'default':
+      return 'priority';
+    case 'rank':
+    case 'ranked':
+      return 'rank';
+    case 'latest':
+    case 'newest':
+    case 'newest_seen':
+      return 'latest';
+    case 'earliest':
+    case 'oldest':
+    case 'oldest_seen':
+      return 'earliest';
+    default:
+      throw new Error(`Unknown backlog order: ${value}`);
+  }
+}
+
+function buildBacklogClaimOrderSql(order, timeColumn) {
+  const statusPriority = `
+        CASE detail_status
+          WHEN 'pending' THEN 0
+          WHEN 'error' THEN 1
+          ELSE 2
+        END`;
+
+  switch (order) {
+    case 'latest':
+      return `${statusPriority},
+        ${timeColumn} DESC,
+        COALESCE(last_seen_rank, 999999) ASC,
+        first_seen_at ASC`;
+    case 'earliest':
+      return `${statusPriority},
+        ${timeColumn} ASC,
+        COALESCE(last_seen_rank, 999999) ASC,
+        first_seen_at ASC`;
+    case 'rank':
+    case 'priority':
+    default:
+      return `${statusPriority},
+        COALESCE(last_seen_rank, 999999) ASC,
+        last_seen_at DESC,
+        first_seen_at ASC`;
+  }
+}
+
+function buildBacklogCandidateQueryParts(options = {}) {
   const staleAfterSeconds = Number.isFinite(options.staleAfterSeconds)
     ? options.staleAfterSeconds
     : 30 * 60;
   const staleBefore = new Date(Date.now() - (staleAfterSeconds * 1000)).toISOString();
-  const workerId = String(options.workerId || `worker-${process.pid}`);
   const maxAttempts = Number.isFinite(options.maxAttempts)
     ? Math.max(1, options.maxAttempts)
     : null;
@@ -363,8 +445,69 @@ function claimNextPendingHomepageListing(db, options = {}) {
   const retryBefore = new Date(Date.now() - (retryDelaySeconds * 1000)).toISOString();
   const sourceFilter = normalizeKeyword(options.sourceFilter || '');
   const keywordFilter = normalizeKeyword(options.keywordFilter || '').toLowerCase();
-  const params = [staleBefore];
+  const statusFilter = normalizeKeyword(options.statusFilter || 'all').toLowerCase();
+  const backlogOrder = normalizeBacklogOrder(options.backlogOrder || options.order || options.orderBy);
+  const backlogTimeField = normalizeBacklogTimeField(options.seenTimeField || options.timeField || options.backlogTimeField);
+  const seenAfter = normalizeKeyword(options.seenAfter || options.after || '');
+  const seenBefore = normalizeKeyword(options.seenBefore || options.before || '');
+  const listingIds = Array.isArray(options.listingIds)
+    ? [...new Set(options.listingIds.map((id) => String(id || '').trim()).filter(Boolean))]
+    : [];
+  const listingIdTable = String(options.listingIdTable || '').trim();
+  if (listingIdTable && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(listingIdTable)) {
+    throw new Error(`Invalid listingIdTable: ${listingIdTable}`);
+  }
+  const params = [];
   let extraWhereSql = '';
+  let statusWhereSql = '';
+
+  switch (statusFilter) {
+    case '':
+    case 'all':
+    case 'eligible':
+      statusWhereSql = `
+        (
+          detail_status IN ('pending', 'error')
+          OR (
+            detail_status = 'processing'
+            AND COALESCE(detail_started_at, '') != ''
+            AND detail_started_at <= ?
+          )
+        )
+      `;
+      params.push(staleBefore);
+      break;
+    case 'pending':
+      statusWhereSql = "detail_status = 'pending'";
+      break;
+    case 'error':
+    case 'retryable-error':
+    case 'retryable_errors':
+      statusWhereSql = "detail_status = 'error'";
+      break;
+    case 'processing':
+    case 'stale-processing':
+    case 'stale_processing':
+      statusWhereSql = `
+        detail_status = 'processing'
+        AND COALESCE(detail_started_at, '') != ''
+        AND detail_started_at <= ?
+      `;
+      params.push(staleBefore);
+      break;
+    case 'sold':
+      statusWhereSql = "detail_status = 'sold'";
+      break;
+    case 'pending_sale':
+    case 'pending-sale':
+      statusWhereSql = "detail_status = 'pending_sale'";
+      break;
+    case 'inactive':
+      statusWhereSql = "detail_status IN ('sold', 'pending_sale')";
+      break;
+    default:
+      throw new Error(`Unknown statusFilter: ${options.statusFilter}`);
+  }
 
   if (maxAttempts !== null) {
     extraWhereSql += ' AND detail_attempts < ?';
@@ -391,31 +534,80 @@ function claimNextPendingHomepageListing(db, options = {}) {
     params.push(`%${keywordFilter}%`);
   }
 
+  if (listingIds.length > 0) {
+    extraWhereSql += ` AND listing_id IN (${listingIds.map(() => '?').join(', ')})`;
+    params.push(...listingIds);
+  }
+
+  if (listingIdTable) {
+    extraWhereSql += ` AND listing_id IN (SELECT listing_id FROM ${listingIdTable})`;
+  }
+
+  if (seenAfter) {
+    extraWhereSql += ` AND ${backlogTimeField} >= ?`;
+    params.push(seenAfter);
+  }
+
+  if (seenBefore) {
+    extraWhereSql += ` AND ${backlogTimeField} <= ?`;
+    params.push(seenBefore);
+  }
+
+  const orderSql = buildBacklogClaimOrderSql(backlogOrder, backlogTimeField);
+
+  return {
+    statusWhereSql,
+    extraWhereSql,
+    params,
+    orderSql,
+    backlogOrder,
+    backlogTimeField,
+  };
+}
+
+function listBacklogCandidates(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 25;
+  const parts = buildBacklogCandidateQueryParts(options);
+  return db.prepare(`
+    SELECT
+      listing_id,
+      href,
+      source,
+      source_keyword,
+      card_title,
+      detail_title,
+      detail_status,
+      detail_attempts,
+      first_seen_at,
+      last_seen_at,
+      last_seen_rank,
+      detail_started_at,
+      detail_completed_at
+    FROM homepage_listings
+    WHERE ${parts.statusWhereSql}
+      ${parts.extraWhereSql}
+    ORDER BY
+      ${parts.orderSql}
+    LIMIT ?
+  `).all(...parts.params, limit);
+}
+
+function claimNextPendingHomepageListing(db, options = {}) {
+  const now = options.claimedAt || new Date().toISOString();
+  const workerId = String(options.workerId || `worker-${process.pid}`);
+  const parts = buildBacklogCandidateQueryParts(options);
+
   db.exec('BEGIN IMMEDIATE');
   try {
     const candidate = db.prepare(`
       SELECT listing_id
       FROM homepage_listings
-      WHERE (
-          detail_status IN ('pending', 'error')
-          OR (
-            detail_status = 'processing'
-            AND COALESCE(detail_started_at, '') != ''
-            AND detail_started_at <= ?
-          )
-        )
-        ${extraWhereSql}
+      WHERE ${parts.statusWhereSql}
+        ${parts.extraWhereSql}
       ORDER BY
-        CASE detail_status
-          WHEN 'pending' THEN 0
-          WHEN 'error' THEN 1
-          ELSE 2
-        END,
-        COALESCE(last_seen_rank, 999999) ASC,
-        last_seen_at DESC,
-        first_seen_at ASC
+        ${parts.orderSql}
       LIMIT 1
-    `).get(...params);
+    `).get(...parts.params);
 
     if (!candidate) {
       db.exec('COMMIT');
@@ -578,14 +770,59 @@ function markHomepageListingProcessed(db, listingId, detailRecord) {
 }
 
 function markHomepageListingFailed(db, listingId, error) {
+  const completedAt = new Date().toISOString();
   db.prepare(`
     UPDATE homepage_listings
     SET
       detail_status = 'error',
       detail_last_error = ?,
+      detail_completed_at = ?,
       claimed_by = ''
     WHERE listing_id = ?
-  `).run(String(error || 'Unknown processing error').trim(), listingId);
+  `).run(String(error || 'Unknown processing error').trim(), completedAt, listingId);
+
+  return getHomepageListing(db, listingId);
+}
+
+function markHomepageListingInactive(db, listingId, status, detailRecord, reason = '') {
+  const inactiveStatus = status === 'pending_sale' ? 'pending_sale' : 'sold';
+  const completedAt = new Date().toISOString();
+  const detailJson = serializeJson(detailRecord);
+  const listingContent = detailRecord.listingContent || {};
+  const detailLastError = reason || listingContent.availabilityReason || inactiveStatus;
+
+  db.prepare(`
+    UPDATE homepage_listings
+    SET
+      detail_status = ?,
+      detail_last_error = ?,
+      detail_completed_at = ?,
+      claimed_by = '',
+      detail_title = ?,
+      detail_price = ?,
+      detail_location = ?,
+      detail_condition = ?,
+      detail_listed_ago = ?,
+      detail_seller_name = ?,
+      detail_json = ?,
+      screenshot_path = ?,
+      snapshot_path = ?
+    WHERE listing_id = ?
+  `).run(
+    inactiveStatus,
+    String(detailLastError || '').trim(),
+    completedAt,
+    String(detailRecord.title || listingContent.title || '').trim(),
+    String(listingContent.price || '').trim(),
+    String(listingContent.location || '').trim(),
+    String(listingContent.condition || '').trim(),
+    String(listingContent.listedAgo || '').trim(),
+    String(listingContent.sellerName || '').trim(),
+    detailJson,
+    String(detailRecord.screenshotPath || '').trim(),
+    String(detailRecord.snapshotPath || '').trim(),
+    listingId,
+  );
 
   return getHomepageListing(db, listingId);
 }
@@ -605,6 +842,8 @@ function getHomepageListingCounts(db) {
     processing: 0,
     done: 0,
     error: 0,
+    sold: 0,
+    pending_sale: 0,
   });
 }
 
@@ -746,6 +985,15 @@ function parseJsonArray(value) {
   }
 }
 
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
 function normalizeWorkflowRunRow(row) {
   if (!row) {
     return null;
@@ -767,6 +1015,239 @@ function normalizeWorkflowRunRow(row) {
     os_checked_at: row.os_checked_at,
     os_alive: Boolean(row.os_alive),
     logs: parseJsonArray(row.logs_json),
+  };
+}
+
+function normalizeListingEventRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    event_id: row.event_id,
+    listing_id: row.listing_id,
+    event_type: row.event_type,
+    event_at: row.event_at,
+    worker_id: row.worker_id,
+    source_url: row.source_url,
+    attempt: row.attempt,
+    status: row.status,
+    content: parseJsonObject(row.content_json),
+    content_hash: row.content_hash,
+    screenshot_path: row.screenshot_path,
+    snapshot_path: row.snapshot_path,
+    error: row.error,
+    listing: {
+      detail_status: row.detail_status || '',
+      card_title: row.card_title || '',
+      detail_title: row.detail_title || '',
+      detail_price: row.detail_price || '',
+      detail_location: row.detail_location || '',
+      detail_seller_name: row.detail_seller_name || '',
+      screenshot_path: row.listing_screenshot_path || '',
+      snapshot_path: row.listing_snapshot_path || '',
+    },
+  };
+}
+
+function eventTypesForCategory(category) {
+  switch (normalizeKeyword(category || 'all').toLowerCase()) {
+    case 'done':
+      return ['detail_capture_succeeded', 'content_changed'];
+    case 'skipped':
+    case 'skip':
+      return ['detail_capture_bypassed', 'listing_unavailable'];
+    case 'error':
+    case 'errors':
+      return ['detail_capture_failed'];
+    case 'started':
+    case 'active':
+      return ['detail_capture_started'];
+    case 'all':
+    default:
+      return [];
+  }
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function extractListingIdsFromLogs(logs = []) {
+  return uniqueStrings(logs.flatMap((line) => (
+    [...String(line || '').matchAll(/listing_id=([^\s]+)/g)].map((match) => match[1])
+  )));
+}
+
+function resolveWorkerEventIdsForRun(db, workerId) {
+  const primaryWorkerId = String(workerId || '').trim();
+  const ids = primaryWorkerId ? [primaryWorkerId] : [];
+  const run = primaryWorkerId ? getWorkflowRun(db, primaryWorkerId) : null;
+  if (!run) {
+    return ids;
+  }
+
+  const listingIds = extractListingIdsFromLogs(run.logs || []);
+  if (listingIds.length === 0) {
+    return ids;
+  }
+
+  const params = [...listingIds, primaryWorkerId];
+  let timeSql = '';
+  if (run.started_at) {
+    timeSql += ' AND event_at >= ?';
+    params.push(run.started_at);
+  }
+  if (run.exited_at) {
+    timeSql += ' AND event_at <= ?';
+    params.push(run.exited_at);
+  }
+
+  const legacyWorkerIds = db.prepare(`
+    SELECT worker_id, COUNT(*) AS overlap_count
+    FROM listing_events
+    WHERE listing_id IN (${listingIds.map(() => '?').join(', ')})
+      AND worker_id != ?
+      AND worker_id LIKE 'pid-%'
+      ${timeSql}
+    GROUP BY worker_id
+    ORDER BY overlap_count DESC, MAX(event_at) DESC
+    LIMIT 5
+  `).all(...params).map((row) => row.worker_id);
+
+  return uniqueStrings([...ids, ...legacyWorkerIds]);
+}
+
+function workerIdWhereSql(workerIds, params, alias = 'e') {
+  const ids = uniqueStrings(workerIds);
+  if (ids.length === 0) {
+    params.push('');
+    return `${alias}.worker_id = ?`;
+  }
+
+  params.push(...ids);
+  return `${alias}.worker_id IN (${ids.map(() => '?').join(', ')})`;
+}
+
+function listWorkerListingEvents(db, workerId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
+  const eventTypes = eventTypesForCategory(options.category);
+  const workerIds = options.workerIds || [workerId];
+  const params = [];
+  const workerSql = workerIdWhereSql(workerIds, params, 'e');
+  let eventTypeSql = '';
+
+  if (eventTypes.length > 0) {
+    eventTypeSql = `AND e.event_type IN (${eventTypes.map(() => '?').join(', ')})`;
+    params.push(...eventTypes);
+  }
+
+  params.push(limit);
+
+  return db.prepare(`
+    SELECT
+      e.*,
+      h.detail_status,
+      h.card_title,
+      h.detail_title,
+      h.detail_price,
+      h.detail_location,
+      h.detail_seller_name,
+      h.screenshot_path AS listing_screenshot_path,
+      h.snapshot_path AS listing_snapshot_path
+    FROM listing_events e
+    LEFT JOIN homepage_listings h
+      ON h.listing_id = e.listing_id
+    WHERE ${workerSql}
+      ${eventTypeSql}
+    ORDER BY e.event_at DESC
+    LIMIT ?
+  `).all(...params).map(normalizeListingEventRow);
+}
+
+function getWorkerListingEventStats(db, workerId, options = {}) {
+  const workerIds = uniqueStrings(options.workerIds || [workerId]);
+  const statsParams = [];
+  const statsWorkerSql = workerIdWhereSql(workerIds, statsParams, 'listing_events');
+  const rows = db.prepare(`
+    SELECT event_type, COUNT(*) AS count
+    FROM listing_events
+    WHERE ${statsWorkerSql}
+    GROUP BY event_type
+  `).all(...statsParams);
+
+  const stats = {
+    total: 0,
+    done: 0,
+    skipped: 0,
+    error: 0,
+    started: 0,
+    workerIds,
+  };
+
+  for (const row of rows) {
+    stats.total += row.count;
+    if (eventTypesForCategory('done').includes(row.event_type)) {
+      stats.done += row.count;
+    } else if (eventTypesForCategory('skipped').includes(row.event_type)) {
+      stats.skipped += row.count;
+    } else if (eventTypesForCategory('error').includes(row.event_type)) {
+      stats.error += row.count;
+    } else if (eventTypesForCategory('started').includes(row.event_type)) {
+      stats.started += row.count;
+    }
+  }
+
+  const latestParams = [];
+  const latestWorkerSql = workerIdWhereSql(workerIds, latestParams, 'e');
+  const latest = db.prepare(`
+    SELECT
+      e.*,
+      h.detail_status,
+      h.card_title,
+      h.detail_title,
+      h.detail_price,
+      h.detail_location,
+      h.detail_seller_name,
+      h.screenshot_path AS listing_screenshot_path,
+      h.snapshot_path AS listing_snapshot_path
+    FROM listing_events e
+    LEFT JOIN homepage_listings h
+      ON h.listing_id = e.listing_id
+    WHERE ${latestWorkerSql}
+    ORDER BY e.event_at DESC
+    LIMIT 1
+  `).get(...latestParams);
+
+  const latestPreviewParams = [];
+  const latestPreviewWorkerSql = workerIdWhereSql(workerIds, latestPreviewParams, 'e');
+  const latestPreview = db.prepare(`
+    SELECT
+      e.*,
+      h.detail_status,
+      h.card_title,
+      h.detail_title,
+      h.detail_price,
+      h.detail_location,
+      h.detail_seller_name,
+      h.screenshot_path AS listing_screenshot_path,
+      h.snapshot_path AS listing_snapshot_path
+    FROM listing_events e
+    LEFT JOIN homepage_listings h
+      ON h.listing_id = e.listing_id
+    WHERE ${latestPreviewWorkerSql}
+      AND (
+        COALESCE(e.screenshot_path, '') != ''
+        OR COALESCE(h.screenshot_path, '') != ''
+      )
+    ORDER BY e.event_at DESC
+    LIMIT 1
+  `).get(...latestPreviewParams);
+
+  return {
+    ...stats,
+    latestEvent: normalizeListingEventRow(latest),
+    latestPreviewEvent: normalizeListingEventRow(latestPreview),
   };
 }
 
@@ -889,9 +1370,11 @@ module.exports = {
   upsertHomepageListingWithStatus,
   upsertHomepageListing,
   getHomepageListing,
+  listBacklogCandidates,
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
   markHomepageListingFailed,
+  markHomepageListingInactive,
   getHomepageListingCounts,
   hashContent,
   appendListingEvent,
@@ -907,4 +1390,7 @@ module.exports = {
   updateWorkflowRun,
   getWorkflowRun,
   listWorkflowRuns,
+  resolveWorkerEventIdsForRun,
+  listWorkerListingEvents,
+  getWorkerListingEventStats,
 };

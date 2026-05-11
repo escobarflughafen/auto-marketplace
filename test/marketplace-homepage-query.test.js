@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   parseQuery,
   buildListingsQuery,
+  buildListingIdsQuery,
 } = require('../scripts/marketplace-homepage-query');
 
 test('parseQuery extracts plain terms and field filters', () => {
@@ -58,4 +59,51 @@ test('buildListingsQuery supports KQL contains, exact, numeric, in, and or claus
   assert.match(query.sql, /detail_status LIKE \? ESCAPE/);
   assert.match(query.sql, />= \?/);
   assert.deepEqual(query.params.slice(0, 6), ['%pentax 67%', '%pentax 67%', 'nikon', 'leica', '%pend%', 2000]);
+});
+
+test('buildListingsQuery supports explicit table sort fields and direction', () => {
+  const rankDesc = buildListingsQuery({
+    query: 'status:pending',
+    sort: 'rank',
+    sortDirection: 'desc',
+  });
+  assert.equal(rankDesc.parsedQuery.sort, 'rank');
+  assert.equal(rankDesc.parsedQuery.sortDirection, 'desc');
+  assert.match(rankDesc.sql, /COALESCE\(last_seen_rank, 999999\) DESC/);
+
+  const titleAsc = buildListingsQuery({
+    sort: 'title',
+    sortDirection: 'asc',
+  });
+  assert.equal(titleAsc.parsedQuery.sort, 'title');
+  assert.equal(titleAsc.parsedQuery.sortDirection, 'asc');
+  assert.match(titleAsc.sql, /LOWER\(COALESCE/);
+  assert.match(titleAsc.sql, / ASC,/);
+
+  const sellerSort = buildListingsQuery({
+    sort: 'seller',
+    sortDirection: 'asc',
+  });
+  assert.equal(sellerSort.parsedQuery.sort, 'seller');
+  assert.match(sellerSort.sql, /detail_seller_name/);
+
+  const attemptsSort = buildListingsQuery({
+    sort: 'attempts',
+    sortDirection: 'desc',
+  });
+  assert.equal(attemptsSort.parsedQuery.sort, 'attempts');
+  assert.match(attemptsSort.sql, /detail_attempts DESC/);
+});
+
+test('buildListingIdsQuery returns backlog-only ids in viewer order', () => {
+  const query = buildListingIdsQuery({
+    query: 'status != done and title contains "nikon"',
+    sort: 'latest',
+    sortDirection: 'desc',
+  });
+
+  assert.match(query.sql, /SELECT listing_id/);
+  assert.match(query.sql, /detail_status IN \('pending', 'error', 'processing'\)/);
+  assert.match(query.sql, /ORDER BY last_seen_at DESC/);
+  assert.deepEqual(query.params, ['done', '%nikon%', '%nikon%']);
 });

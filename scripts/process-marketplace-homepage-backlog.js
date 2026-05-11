@@ -21,12 +21,16 @@ const {
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
   markHomepageListingFailed,
+  markHomepageListingInactive,
   getHomepageListingCounts,
   hashContent,
   appendListingEvent,
   getLatestListingEvent,
 } = require('./marketplace-homepage-db');
 const {
+  DEFAULT_CREDENTIALS_PATH,
+  DEFAULT_LOGIN_TIMEOUT_MS,
+  ensureFacebookMarketplaceLogin,
   describeFacebookMarketplaceSession,
 } = require('./marketplace-profile-auth');
 
@@ -39,6 +43,24 @@ function readFlagValue(argv, index, flagName) {
   }
 
   return value;
+}
+
+function readListingIdFile(filePath) {
+  const text = fs.readFileSync(path.resolve(filePath), 'utf8').trim();
+  if (!text) {
+    return [];
+  }
+
+  if (text.startsWith('[') || text.startsWith('{')) {
+    const parsed = JSON.parse(text);
+    const listingIds = Array.isArray(parsed) ? parsed : parsed.listingIds;
+    if (!Array.isArray(listingIds)) {
+      throw new Error('Expected listing ID file JSON to be an array or an object with listingIds');
+    }
+    return listingIds.map((value) => String(value || '').trim()).filter(Boolean);
+  }
+
+  return text.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean);
 }
 
 function parseIntegerFlag(value, flagName, minimum = 0) {
@@ -68,15 +90,30 @@ function parseArgs(argv) {
     pollIntervalSeconds: 15,
     pollJitterMin: 1,
     pollJitterMax: 1,
+    itemDelaySeconds: 0,
+    itemJitterMin: 1,
+    itemJitterMax: 1,
     staleAfterSeconds: 30 * 60,
     retryDelaySeconds: 5 * 60,
     maxAttempts: 5,
     batchSize: 3,
     limit: 0,
+    statusFilter: 'all',
     sourceFilter: '',
     keywordFilter: '',
+    backlogOrder: 'priority',
+    seenTimeField: 'last_seen',
+    seenAfter: '',
+    seenBefore: '',
+    listingIds: [],
+    listingIdFile: '',
     workerId: `pid-${process.pid}`,
+    useCredentials: false,
+    credentialsPath: DEFAULT_CREDENTIALS_PATH,
+    loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
     once: false,
+    drain: false,
+    resolveInactive: false,
     headless: true,
   };
 
@@ -111,6 +148,18 @@ function parseArgs(argv) {
         options.pollJitterMax = parseFloatFlag(readFlagValue(argv, index, arg), arg, 0);
         index += 1;
         break;
+      case '--item-delay-seconds':
+        options.itemDelaySeconds = parseFloatFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--item-jitter-min':
+        options.itemJitterMin = parseFloatFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--item-jitter-max':
+        options.itemJitterMax = parseFloatFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
       case '--stale-after-seconds':
         options.staleAfterSeconds = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
         index += 1;
@@ -131,6 +180,10 @@ function parseArgs(argv) {
         options.limit = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
         index += 1;
         break;
+      case '--status-filter':
+        options.statusFilter = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
       case '--source-filter':
         options.sourceFilter = readFlagValue(argv, index, arg);
         index += 1;
@@ -139,12 +192,65 @@ function parseArgs(argv) {
         options.keywordFilter = readFlagValue(argv, index, arg);
         index += 1;
         break;
+      case '--backlog-order':
+      case '--order':
+        options.backlogOrder = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--seen-time-field':
+      case '--time-field':
+        options.seenTimeField = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--seen-after':
+      case '--backlog-after':
+        options.seenAfter = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--seen-before':
+      case '--backlog-before':
+        options.seenBefore = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--listing-id':
+        options.listingIds.push(readFlagValue(argv, index, arg));
+        index += 1;
+        break;
+      case '--listing-ids':
+        options.listingIds.push(...readFlagValue(argv, index, arg).split(',').map((item) => item.trim()).filter(Boolean));
+        index += 1;
+        break;
+      case '--listing-id-file':
+        options.listingIdFile = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
       case '--worker-id':
         options.workerId = readFlagValue(argv, index, arg);
         index += 1;
         break;
+      case '--use-credentials':
+        options.useCredentials = true;
+        break;
+      case '--credentials-path':
+        options.credentialsPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--login-timeout-seconds':
+        options.loginTimeoutMs = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1) * 1000;
+        index += 1;
+        break;
       case '--once':
         options.once = true;
+        break;
+      case '--drain':
+      case '--until-empty':
+        options.drain = true;
+        break;
+      case '--resolve-inactive':
+        options.resolveInactive = true;
+        break;
+      case '--skip-inactive':
+        options.resolveInactive = false;
         break;
       case '--headed':
         options.headless = false;
@@ -160,6 +266,39 @@ function parseArgs(argv) {
   if (options.pollJitterMax < options.pollJitterMin) {
     throw new Error('Expected --poll-jitter-max to be >= --poll-jitter-min');
   }
+
+  if (options.itemJitterMax < options.itemJitterMin) {
+    throw new Error('Expected --item-jitter-max to be >= --item-jitter-min');
+  }
+
+  if (options.once && options.drain) {
+    throw new Error('Use either --once or --drain, not both');
+  }
+
+  const order = String(options.backlogOrder || '').trim().toLowerCase().replace(/-/g, '_');
+  if (!['priority', 'default', 'rank', 'ranked', 'latest', 'newest', 'newest_seen', 'earliest', 'oldest', 'oldest_seen'].includes(order)) {
+    throw new Error('Expected --backlog-order to be one of priority, rank, latest, earliest');
+  }
+
+  const timeField = String(options.seenTimeField || '').trim().toLowerCase().replace(/-/g, '_');
+  if (!['last_seen', 'last_seen_at', 'last', 'first_seen', 'first_seen_at', 'first'].includes(timeField)) {
+    throw new Error('Expected --seen-time-field to be one of last_seen, first_seen');
+  }
+
+  for (const [flagName, value] of [['--seen-after', options.seenAfter], ['--seen-before', options.seenBefore]]) {
+    if (value && Number.isNaN(Date.parse(value))) {
+      throw new Error(`Expected ${flagName} to be an ISO-like date/time`);
+    }
+  }
+
+  if (options.seenAfter && options.seenBefore && Date.parse(options.seenAfter) > Date.parse(options.seenBefore)) {
+    throw new Error('Expected --seen-before to be after --seen-after');
+  }
+
+  if (options.listingIdFile) {
+    options.listingIds.push(...readListingIdFile(options.listingIdFile));
+  }
+  options.listingIds = [...new Set(options.listingIds.map((id) => String(id || '').trim()).filter(Boolean))];
 
   return options;
 }
@@ -213,6 +352,49 @@ async function captureListingRecord(context, page, listing, captureDir) {
 
 function buildDetailEventContent(listing, detailRecord, workerId) {
   const listingContent = detailRecord.listingContent || {};
+  const capturedAt = new Date().toISOString();
+  const detail = {
+    title: detailRecord.title || listingContent.title || '',
+    price: listingContent.price || '',
+    previousPrice: listingContent.previousPrice || '',
+    location: listingContent.location || '',
+    condition: listingContent.condition || '',
+    listedAgo: listingContent.listedAgo || '',
+    sellerName: listingContent.sellerName || '',
+    sellerRating: listingContent.sellerRating || '',
+    sellerJoined: listingContent.sellerJoined || '',
+    availabilityStatus: listingContent.availabilityStatus || '',
+    availabilityReason: listingContent.availabilityReason || '',
+    description: listingContent.description || '',
+    rawText: listingContent.rawText || '',
+  };
+  const comparableDetail = {
+    title: detail.title,
+    price: detail.price,
+    previousPrice: detail.previousPrice,
+    location: detail.location,
+    condition: detail.condition,
+    sellerName: detail.sellerName,
+    sellerRating: detail.sellerRating,
+    sellerJoined: detail.sellerJoined,
+    availabilityStatus: detail.availabilityStatus,
+    availabilityReason: detail.availabilityReason,
+    description: detail.description,
+  };
+  const thumbnailCount = Array.isArray(detailRecord.thumbnails) ? detailRecord.thumbnails.length : 0;
+  const extractedFields = {
+    title: Boolean(detail.title),
+    price: Boolean(detail.price),
+    location: Boolean(detail.location),
+    condition: Boolean(detail.condition),
+    sellerName: Boolean(detail.sellerName),
+    description: Boolean(detail.description),
+    availability: Boolean(detail.availabilityStatus && detail.availabilityStatus !== 'unknown'),
+    screenshot: Boolean(detailRecord.screenshotPath),
+    snapshot: Boolean(detailRecord.snapshotPath),
+    thumbnails: thumbnailCount > 0,
+  };
+  const extractedCount = Object.values(extractedFields).filter(Boolean).length;
   return {
     listingId: listing.listing_id,
     href: listing.href,
@@ -224,16 +406,36 @@ function buildDetailEventContent(listing, detailRecord, workerId) {
       firstSeenAt: listing.first_seen_at || '',
       lastSeenAt: listing.last_seen_at || '',
       lastSeenRank: listing.last_seen_rank ?? null,
+      detailStatusBeforeCapture: listing.detail_status || '',
+      attemptsBeforeCapture: listing.detail_attempts ?? null,
     },
-    detail: {
-      title: detailRecord.title || listingContent.title || '',
-      price: listingContent.price || '',
-      location: listingContent.location || '',
-      condition: listingContent.condition || '',
-      listedAgo: listingContent.listedAgo || '',
-      sellerName: listingContent.sellerName || '',
-      description: listingContent.description || '',
-      rawText: listingContent.rawText || '',
+    detail,
+    comparable: {
+      detail: comparableDetail,
+    },
+    freshness: {
+      sourceFirstSeenAt: listing.first_seen_at || '',
+      sourceLastSeenAt: listing.last_seen_at || '',
+      sourceLastSeenRank: listing.last_seen_rank ?? null,
+      listedAgo: detail.listedAgo,
+      capturedAt,
+      sourceAgeSeconds: listing.last_seen_at
+        ? Math.max(0, Math.round((Date.parse(capturedAt) - Date.parse(listing.last_seen_at)) / 1000))
+        : null,
+    },
+    availability: {
+      status: detail.availabilityStatus || 'unknown',
+      reason: detail.availabilityReason || 'no_signal',
+      isInactive: ['sold', 'pending_sale'].includes(detail.availabilityStatus || ''),
+      isAvailable: detail.availabilityStatus === 'available',
+    },
+    extraction: {
+      extractedFields,
+      extractedCount,
+      totalFields: Object.keys(extractedFields).length,
+      rawTextLength: detail.rawText.length,
+      descriptionLength: detail.description.length,
+      thumbnailCount,
     },
     artifacts: {
       screenshotPath: detailRecord.screenshotPath || '',
@@ -243,8 +445,55 @@ function buildDetailEventContent(listing, detailRecord, workerId) {
     runtime: {
       workerId,
       attempt: listing.detail_attempts,
+      capturedAt,
+      contentHashStrategy: 'comparable.detail.v1',
+    },
+  };
+}
+
+function buildJobCardEventContent(listing, workerId, extra = {}) {
+  return {
+    listingId: listing.listing_id,
+    href: listing.href,
+    card: {
+      title: listing.card_title || '',
+      text: listing.card_text || '',
+      source: listing.source || '',
+      sourceKeyword: listing.source_keyword || '',
+      firstSeenAt: listing.first_seen_at || '',
+      lastSeenAt: listing.last_seen_at || '',
+      lastSeenRank: listing.last_seen_rank ?? null,
+      detailStatusBeforeCapture: listing.detail_status || '',
+      attemptsBeforeCapture: listing.detail_attempts ?? null,
+    },
+    runtime: {
+      workerId,
+      attempt: listing.detail_attempts,
       capturedAt: new Date().toISOString(),
     },
+    ...extra,
+  };
+}
+
+function contentHashForDetailEvent(content) {
+  return hashContent(content.comparable?.detail || content.detail || {});
+}
+
+function buildClaimOptions(options) {
+  return {
+    workerId: options.workerId,
+    staleAfterSeconds: options.staleAfterSeconds,
+    retryDelaySeconds: options.retryDelaySeconds,
+    maxAttempts: options.maxAttempts,
+    statusFilter: options.statusFilter,
+    sourceFilter: options.sourceFilter,
+    keywordFilter: options.keywordFilter,
+    backlogOrder: options.backlogOrder,
+    seenTimeField: options.seenTimeField,
+    seenAfter: options.seenAfter,
+    seenBefore: options.seenBefore,
+    listingIds: options.listingIds,
+    listingIdTable: options.listingIdTable,
   };
 }
 
@@ -256,14 +505,7 @@ async function processBatch(page, db, options, state = {}) {
   const batchLimit = Math.min(options.batchSize, remainingLimit);
 
   for (let index = 0; index < batchLimit; index += 1) {
-    const listing = claimNextPendingHomepageListing(db, {
-      workerId: options.workerId,
-      staleAfterSeconds: options.staleAfterSeconds,
-      retryDelaySeconds: options.retryDelaySeconds,
-      maxAttempts: options.maxAttempts,
-      sourceFilter: options.sourceFilter,
-      keywordFilter: options.keywordFilter,
-    });
+    const listing = claimNextPendingHomepageListing(db, buildClaimOptions(options));
 
     if (!listing) {
       break;
@@ -281,22 +523,49 @@ async function processBatch(page, db, options, state = {}) {
       sourceUrl: listing.href,
       attempt: listing.detail_attempts,
       status: 'processing',
-      content: {
-        listingId: listing.listing_id,
-        href: listing.href,
-        cardTitle: listing.card_title || '',
-        cardText: listing.card_text || '',
-      },
+      content: buildJobCardEventContent(listing, options.workerId),
     });
 
     try {
       const capture = await captureListingRecord(activePage.context(), activePage, listing, options.captureDir);
       activePage = capture.page;
       const content = buildDetailEventContent(listing, capture.detailRecord, options.workerId);
-      const contentHash = hashContent(content.detail);
+      const contentHash = contentHashForDetailEvent(content);
       const previousSuccess = getLatestListingEvent(db, listing.listing_id, {
         eventType: 'detail_capture_succeeded',
       });
+      const availabilityStatus = capture.detailRecord.listingContent?.availabilityStatus || 'unknown';
+      const inactiveStatus = ['sold', 'pending_sale'].includes(availabilityStatus)
+        ? availabilityStatus
+        : '';
+
+      if (inactiveStatus && !options.resolveInactive) {
+        appendListingEvent(db, {
+          listingId: listing.listing_id,
+          eventType: 'detail_capture_bypassed',
+          workerId: options.workerId,
+          sourceUrl: listing.href,
+          attempt: listing.detail_attempts,
+          status: inactiveStatus,
+          content,
+          contentHash,
+          screenshotPath: capture.detailRecord.screenshotPath,
+          snapshotPath: capture.detailRecord.snapshotPath,
+          error: capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
+        });
+        markHomepageListingInactive(
+          db,
+          listing.listing_id,
+          inactiveStatus,
+          capture.detailRecord,
+          capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
+        );
+        await appendLog(
+          options.logFile,
+          `job_bypassed listing_id=${listing.listing_id} availability=${inactiveStatus} reason=${capture.detailRecord.listingContent?.availabilityReason || inactiveStatus} screenshot=${capture.detailRecord.screenshotPath}`,
+        );
+        continue;
+      }
 
       appendListingEvent(db, {
         listingId: listing.listing_id,
@@ -323,6 +592,10 @@ async function processBatch(page, db, options, state = {}) {
             previousContentHash: previousSuccess.content_hash,
             nextContentHash: contentHash,
             detail: content.detail,
+            comparable: content.comparable,
+            freshness: content.freshness,
+            availability: content.availability,
+            extraction: content.extraction,
           },
           contentHash,
           screenshotPath: capture.detailRecord.screenshotPath,
@@ -347,12 +620,12 @@ async function processBatch(page, db, options, state = {}) {
         sourceUrl: listing.href,
         attempt: listing.detail_attempts,
         status: 'error',
-        content: {
-          listingId: listing.listing_id,
-          href: listing.href,
-          cardTitle: listing.card_title || '',
-          cardText: listing.card_text || '',
-        },
+        content: buildJobCardEventContent(listing, options.workerId, {
+          error: {
+            type: error?.code || 'ERROR',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        }),
         error: error instanceof Error ? error.message : String(error),
       });
       markHomepageListingFailed(db, listing.listing_id, error instanceof Error ? error.message : error);
@@ -375,6 +648,31 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function installListingIdTempTable(db, listingIds) {
+  if (!listingIds.length) {
+    return '';
+  }
+
+  db.exec(`
+    CREATE TEMP TABLE IF NOT EXISTS selected_resolve_listing_ids (
+      listing_id TEXT PRIMARY KEY
+    );
+    DELETE FROM selected_resolve_listing_ids;
+  `);
+  const insert = db.prepare('INSERT OR IGNORE INTO selected_resolve_listing_ids (listing_id) VALUES (?)');
+  db.exec('BEGIN');
+  try {
+    for (const listingId of listingIds) {
+      insert.run(listingId);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return 'selected_resolve_listing_ids';
+}
+
 function computeJitteredPollMs(pollIntervalSeconds, jitterMin, jitterMax) {
   const multiplier = jitterMin + (Math.random() * (jitterMax - jitterMin));
   return {
@@ -383,16 +681,36 @@ function computeJitteredPollMs(pollIntervalSeconds, jitterMin, jitterMax) {
   };
 }
 
+function shouldDelayBetweenItems(options, result, remainingLimit) {
+  if (!result.attemptedCount || options.itemDelaySeconds <= 0) {
+    return false;
+  }
+
+  if (options.once) {
+    return false;
+  }
+
+  if (options.limit > 0 && remainingLimit <= 0) {
+    return false;
+  }
+
+  return true;
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(options.captureDir);
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `backlog_start db_path=${options.dbPath} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} batch_size=${options.batchSize} limit=${options.limit} worker_id=${options.workerId} headless=${options.headless}`,
+    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} use_credentials=${options.useCredentials}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
+  if (options.listingIds.length > 0) {
+    options.listingIdTable = installListingIdTempTable(db, options.listingIds);
+    options.listingIds = [];
+  }
   const resolvedUserDataDir = path.isAbsolute(options.userDataDir)
     ? options.userDataDir
     : path.join(process.cwd(), options.userDataDir);
@@ -403,14 +721,22 @@ async function main() {
   });
 
   try {
-    let page = context.pages()[0] || await context.newPage();
-    const sessionSummary = await describeFacebookMarketplaceSession(context, page);
+    let page = await ensureFacebookMarketplaceLogin(context, {
+      useCredentials: options.useCredentials,
+      credentialsPath: options.credentialsPath,
+      loginTimeoutMs: options.loginTimeoutMs,
+      failOnAdditionalVerification: options.headless,
+      logger: (message) => appendLog(options.logFile, message),
+    });
+    const sessionSummary = await describeFacebookMarketplaceSession(context, page, {
+      credentialsPath: options.credentialsPath,
+    });
     await appendLog(
       options.logFile,
       `worker_session_ready signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} current_url=${sessionSummary.currentUrl || 'n/a'}`,
     );
     if (!sessionSummary.loggedIn || !sessionSummary.signedInUserId) {
-      throw new Error('Facebook session is not logged in; run with a signed-in persistent profile before processing backlog.');
+      throw new Error('Facebook session is not fully authenticated; refresh the signed-in persistent profile or run a headed worker and complete Facebook verification before processing backlog.');
     }
 
     let totalProcessed = 0;
@@ -439,7 +765,30 @@ async function main() {
         break;
       }
 
-      if (result.processedCount > 0) {
+      if (options.drain && result.attemptedCount === 0) {
+        await appendLog(
+          options.logFile,
+          `backlog_exit mode=drain reason=no_eligible_jobs attempted=${totalAttempted} processed=${totalProcessed} pending=${result.counts.pending} processing=${result.counts.processing} error=${result.counts.error}`,
+        );
+        break;
+      }
+
+      if (result.attemptedCount > 0) {
+        const nextRemainingLimit = options.limit > 0
+          ? Math.max(0, options.limit - totalAttempted)
+          : Infinity;
+        if (shouldDelayBetweenItems(options, result, nextRemainingLimit)) {
+          const { waitMs, multiplier } = computeJitteredPollMs(
+            options.itemDelaySeconds,
+            options.itemJitterMin,
+            options.itemJitterMax,
+          );
+          await appendLog(
+            options.logFile,
+            `backlog_item_sleep seconds=${Math.ceil(waitMs / 1000)} base_item_delay_seconds=${options.itemDelaySeconds} jitter_multiplier=${multiplier.toFixed(3)} attempted=${totalAttempted} processed=${totalProcessed}`,
+          );
+          await sleep(waitMs);
+        }
         continue;
       }
 
@@ -460,9 +809,21 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`[${new Date().toISOString()}] process_marketplace_homepage_backlog_error ${message}\n`);
-  console.error(message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[${new Date().toISOString()}] process_marketplace_homepage_backlog_error ${message}\n`);
+    console.error(message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseArgs,
+  buildDetailEventContent,
+  buildJobCardEventContent,
+  contentHashForDetailEvent,
+  buildClaimOptions,
+  computeJitteredPollMs,
+  shouldDelayBetweenItems,
+};
