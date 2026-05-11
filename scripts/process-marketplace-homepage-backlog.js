@@ -9,6 +9,7 @@ const {
   expandMarketplaceListingDetails,
   captureListingThumbnails,
   cleanText,
+  detectListingUnavailablePage,
   readListingTitle,
   extractListingContent,
   writeListingSnapshot,
@@ -317,9 +318,12 @@ async function captureListingRecord(context, page, listing, captureDir) {
   await expandMarketplaceListingDetails(activePage, { logger: log });
 
   const pageText = cleanText(await activePage.locator('body').innerText().catch(() => ''));
-  if (/content isn't available|listing isn't available|item isn't available|this content isn't available|此内容目前无法查看|商品不可用/i.test(pageText)) {
-    const error = new Error('Listing page appears unavailable');
+  const unavailable = await detectListingUnavailablePage(activePage, pageText);
+  if (unavailable) {
+    const error = new Error(`Listing page appears unavailable: ${unavailable.reason}`);
     error.code = 'LISTING_UNAVAILABLE';
+    error.reason = unavailable.reason;
+    error.unavailable = unavailable;
     throw error;
   }
 
@@ -632,6 +636,7 @@ async function processBatch(page, db, options, state = {}) {
           attempt: listing.detail_attempts,
           status: 'error',
           content: buildJobCardEventContent(listing, options.workerId, {
+            unavailable: error?.unavailable || null,
             error: {
               type: error?.code || 'ERROR',
               message: error instanceof Error ? error.message : String(error),

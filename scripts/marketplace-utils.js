@@ -780,6 +780,178 @@ function extractMarketplaceStatusMarker(pageText) {
   return null;
 }
 
+function detectListingUnavailable(pageText) {
+  const text = primaryListingTextForAvailability(pageText);
+  if (!text) {
+    return null;
+  }
+
+  const patterns = [
+    /无法购买这件商品/u,
+    /商品可能已售出或过期/u,
+    /看看下面的类似商品/u,
+    /(?:this\s+)?(?:content|listing|item)\s+(?:isn't|is\s+not)\s+available/iu,
+    /(?:this\s+)?item\s+may\s+have\s+been\s+sold\s+or\s+expired/iu,
+    /see\s+similar\s+items\s+below/iu,
+    /此内容目前无法查看/u,
+    /商品不可用/u,
+  ];
+
+  if (patterns.some((pattern) => pattern.test(text))) {
+    return {
+      unavailable: true,
+      reason: 'marketplace_unavailable_banner',
+    };
+  }
+
+  return null;
+}
+
+function detectListingUnavailableUrl(url) {
+  const value = String(url || '').trim();
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (
+      /(?:^|\.)facebook\.com$/iu.test(parsed.hostname)
+      && parsed.pathname.includes('/marketplace/')
+      && parsed.searchParams.get('unavailable_product') === '1'
+    ) {
+      return {
+        unavailable: true,
+        reason: 'marketplace_unavailable_redirect',
+      };
+    }
+  } catch {
+    if (/[?&]unavailable_product=1(?:&|$)/iu.test(value)) {
+      return {
+        unavailable: true,
+        reason: 'marketplace_unavailable_redirect',
+      };
+    }
+  }
+
+  return null;
+}
+
+async function detectListingUnavailablePage(page, pageText = '') {
+  const urlSignal = detectListingUnavailableUrl(typeof page?.url === 'function' ? page.url() : '');
+  if (urlSignal) {
+    return urlSignal;
+  }
+
+  if (typeof page?.evaluate === 'function') {
+    const domSignal = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const titlePatterns = [
+        /无法购买这件商品/u,
+        /商品不可用/u,
+        /(?:this\s+)?(?:content|listing|item)\s+(?:isn't|is\s+not)\s+available/iu,
+        /can't\s+buy\s+this\s+item/iu,
+      ];
+      const detailPatterns = [
+        /商品可能已售出或过期/u,
+        /看看下面的类似商品/u,
+        /item\s+may\s+have\s+been\s+sold\s+or\s+expired/iu,
+        /see\s+similar\s+items\s+below/iu,
+      ];
+      const recommendationPatterns = [
+        /今日精选/u,
+        /today'?s\s+picks/iu,
+        /赞助内容/u,
+        /sponsored/iu,
+      ];
+      const rectSummary = (rect) => ({
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+      const className = (element) => {
+        const raw = element?.className;
+        if (!raw) {
+          return '';
+        }
+        return typeof raw === 'string' ? raw : String(raw.baseVal || '');
+      };
+      const iconSummary = (element) => {
+        const icons = Array.from(element.querySelectorAll('svg,[role="img"],i'));
+        for (const icon of icons) {
+          const rect = icon.getBoundingClientRect();
+          if (rect.width > 0 && rect.width <= 80 && rect.height > 0 && rect.height <= 80) {
+            return {
+              tagName: icon.tagName.toLowerCase(),
+              className: className(icon),
+              id: icon.id || '',
+              role: icon.getAttribute('role') || '',
+              ariaLabel: icon.getAttribute('aria-label') || '',
+              style: icon.getAttribute('style') || '',
+              rect: rectSummary(rect),
+            };
+          }
+        }
+        return null;
+      };
+
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      const textNodes = [];
+      while (walker.nextNode()) {
+        const text = normalize(walker.currentNode.nodeValue);
+        if (titlePatterns.some((pattern) => pattern.test(text))) {
+          textNodes.push(walker.currentNode);
+        }
+      }
+
+      for (const node of textNodes) {
+        let element = node.parentElement;
+        for (let depth = 0; element && depth < 8; depth += 1, element = element.parentElement) {
+          const text = normalize(element.innerText || element.textContent);
+          const rect = element.getBoundingClientRect();
+          if (!text || rect.width < 200 || rect.height < 20 || rect.height > 180) {
+            continue;
+          }
+          if (!titlePatterns.some((pattern) => pattern.test(text))) {
+            continue;
+          }
+          if (recommendationPatterns.some((pattern) => pattern.test(text))) {
+            continue;
+          }
+
+          const icon = iconSummary(element);
+          if (!icon && !detailPatterns.some((pattern) => pattern.test(text))) {
+            continue;
+          }
+
+          return {
+            unavailable: true,
+            reason: 'marketplace_unavailable_dom',
+            signals: {
+              bannerText: text.slice(0, 220),
+              tagName: element.tagName.toLowerCase(),
+              className: className(element),
+              id: element.id || '',
+              role: element.getAttribute('role') || '',
+              rect: rectSummary(rect),
+              icon,
+            },
+          };
+        }
+      }
+
+      return null;
+    }).catch(() => null);
+
+    if (domSignal?.unavailable) {
+      return domSignal;
+    }
+  }
+
+  return detectListingUnavailable(pageText);
+}
+
 function detectListingAvailability(pageText, title = '') {
   void title;
   const marker = extractMarketplaceStatusMarker(pageText);
@@ -1027,6 +1199,9 @@ module.exports = {
   readListingTitle,
   primaryListingTextForAvailability,
   extractMarketplaceStatusMarker,
+  detectListingUnavailable,
+  detectListingUnavailableUrl,
+  detectListingUnavailablePage,
   detectListingAvailability,
   extractListingContent,
   writeListingSnapshot,

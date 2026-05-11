@@ -9,6 +9,9 @@ const {
   waitForPageReady,
   scrollMarketplaceResults,
   expandMarketplaceListingDetails,
+  detectListingUnavailable,
+  detectListingUnavailableUrl,
+  detectListingUnavailablePage,
   detectListingAvailability,
   extractListingContent,
   urlMatchesMarketplaceArea,
@@ -305,4 +308,70 @@ test('detectListingAvailability only trusts Marketplace status markers', () => {
     detectListingAvailability('Marketplace Leica M6 CA$ 3,800 · Available · Vancouver, BC'),
     { status: 'available', reason: 'available_marker' },
   );
+});
+
+test('detectListingUnavailable recognizes taken-off listing banner before recommendations', () => {
+  const text = [
+    '商品交易小组 无法购买这件商品 商品可能已售出或过期。看看下面的类似商品吧！',
+    '今日精选 Ottawa · 72公里 CA$ 20 Figurine Jack Black (Minecraft) QCBlainville',
+    'CA$ 100 Vintage French Provincial Wooden Dresser QCMontréal',
+  ].join(' ');
+
+  assert.deepEqual(
+    detectListingUnavailable(text),
+    { unavailable: true, reason: 'marketplace_unavailable_banner' },
+  );
+  assert.equal(detectListingAvailability(text).status, 'unknown');
+});
+
+test('detectListingUnavailableUrl recognizes marketplace unavailable redirects', () => {
+  assert.deepEqual(
+    detectListingUnavailableUrl('https://www.facebook.com/marketplace/ottawa/?unavailable_product=1'),
+    { unavailable: true, reason: 'marketplace_unavailable_redirect' },
+  );
+  assert.equal(detectListingUnavailableUrl('https://www.facebook.com/marketplace/item/1716046416425552/'), null);
+});
+
+test('detectListingUnavailablePage prefers redirect signal before DOM probing', async () => {
+  let evaluated = false;
+  const result = await detectListingUnavailablePage({
+    url: () => 'https://www.facebook.com/marketplace/ottawa/?unavailable_product=1',
+    evaluate: async () => {
+      evaluated = true;
+      throw new Error('should not evaluate');
+    },
+  });
+
+  assert.deepEqual(result, { unavailable: true, reason: 'marketplace_unavailable_redirect' });
+  assert.equal(evaluated, false);
+});
+
+test('detectListingUnavailablePage accepts compact DOM banner signals', async () => {
+  const domSignal = {
+    unavailable: true,
+    reason: 'marketplace_unavailable_dom',
+    signals: {
+      bannerText: '无法购买这件商品 商品可能已售出或过期。看看下面的类似商品吧！',
+      tagName: 'div',
+      className: 'x9f619 x1n2onr6',
+      id: '',
+      role: '',
+      rect: { x: 384, y: 82, width: 1024, height: 80 },
+      icon: {
+        tagName: 'svg',
+        className: '',
+        id: '',
+        role: '',
+        ariaLabel: '',
+        style: '--x-color:var(--always-white)',
+        rect: { x: 416, y: 96, width: 20, height: 20 },
+      },
+    },
+  };
+  const result = await detectListingUnavailablePage({
+    url: () => 'https://www.facebook.com/marketplace/item/1716046416425552/',
+    evaluate: async () => domSignal,
+  });
+
+  assert.deepEqual(result, domSignal);
 });
