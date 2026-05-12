@@ -727,7 +727,7 @@ td code {
 .status.sold, .status.pending_sale { color: #6b7280; }
 .status.running { color: var(--accent); }
 .status.failed, .status.lost { color: var(--bad); }
-.status.exited { color: #166534; }
+.status.exited, .status.terminated { color: #166534; }
 .cell-text {
   max-width: 460px;
   white-space: normal;
@@ -800,6 +800,9 @@ a:hover { text-decoration: underline; }
   padding: 6px 8px;
 }
 .worker-control-tablewrap {
+  overflow: visible;
+  overscroll-behavior: auto;
+  scrollbar-gutter: auto;
   border: 0;
   border-radius: 0;
   background: #fff;

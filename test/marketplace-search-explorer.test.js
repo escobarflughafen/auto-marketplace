@@ -46,6 +46,16 @@ test('parseArgs preserves explicit area when location is also provided', () => {
   assert.equal(options.location, 'Ottawa, Ontario');
 });
 
+test('parseArgs keeps custom search locations on the default area until UI location is applied', () => {
+  const options = parseArgs([
+    '--query', 'leica m6',
+    '--location', 'Some Custom City, BC',
+  ]);
+
+  assert.equal(options.location, 'Some Custom City, BC');
+  assert.equal(options.area, 'vancouver');
+});
+
 test('parseArgs reads search radius miles', () => {
   const options = parseArgs([
     '--query', 'canon 85 1.4',

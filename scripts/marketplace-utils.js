@@ -277,7 +277,7 @@ function normalizeAreaLookupKey(value) {
     .toLowerCase();
 }
 
-function inferMarketplaceAreaFromLocation(location) {
+function getKnownMarketplaceAreaFromLocation(location) {
   const normalized = cleanText(location).replace(/\s*,\s*/g, ', ');
   if (!normalized) {
     return '';
@@ -290,7 +290,17 @@ function inferMarketplaceAreaFromLocation(location) {
   const combinedKey = regionKey ? `${primaryKey} ${regionKey}` : primaryKey;
   return MARKETPLACE_AREA_SLUGS.get(combinedKey)
     || MARKETPLACE_AREA_SLUGS.get(primaryKey)
-    || slugify(primarySegment);
+    || '';
+}
+
+function inferMarketplaceAreaFromLocation(location) {
+  const normalized = cleanText(location).replace(/\s*,\s*/g, ', ');
+  if (!normalized) {
+    return '';
+  }
+
+  const primarySegment = normalized.split(',')[0].trim();
+  return getKnownMarketplaceAreaFromLocation(location) || slugify(primarySegment);
 }
 
 function buildMarketplaceLocationPatterns(location) {
@@ -365,6 +375,18 @@ async function firstVisibleLocator(locatorFactories, timeout = DEFAULT_READY_TIM
   }
 
   return null;
+}
+
+async function clickLocatorWithFallback(locator, options = {}) {
+  try {
+    await locator.click(options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/intercepts pointer events|Timeout \d+ms exceeded|not receiving pointer events/i.test(message)) {
+      throw error;
+    }
+    await locator.click({ ...options, force: true });
+  }
 }
 
 async function safeGoto(context, page, url) {
@@ -592,6 +614,11 @@ async function setMarketplaceLocation(page, options = {}) {
 
   logger?.(`location_change_start location="${location}"`);
 
+  if (allowMissingControl && fallbackArea && urlMatchesMarketplaceArea(page.url(), fallbackArea)) {
+    logger?.(`location_change_skip reason=area_route_match location="${location}" url=${page.url()}`);
+    return page;
+  }
+
   const locationControl = await firstVisibleLocator([
     () => page.getByRole('button', { name: /location/i }),
     () => page.getByRole('link', { name: /location/i }),
@@ -607,7 +634,7 @@ async function setMarketplaceLocation(page, options = {}) {
     throw new Error(`Could not find Marketplace location control for "${location}"`);
   }
 
-  await locationControl.click({ timeout: 5000 });
+  await clickLocatorWithFallback(locationControl, { timeout: 5000 });
   await page.waitForTimeout(750);
 
   const locationInput = await firstVisibleLocator([
@@ -640,7 +667,7 @@ async function setMarketplaceLocation(page, options = {}) {
       continue;
     }
 
-    await suggestion.click({ timeout: 3000 });
+    await clickLocatorWithFallback(suggestion, { timeout: 3000 });
     suggestionSelected = true;
     break;
   }
@@ -657,7 +684,7 @@ async function setMarketplaceLocation(page, options = {}) {
   ], 2500);
 
   if (applyButton) {
-    await applyButton.click({ timeout: 3000 });
+    await clickLocatorWithFallback(applyButton, { timeout: 3000 });
   } else {
     await locationInput.press('Enter').catch(() => {});
   }
@@ -938,6 +965,154 @@ async function readListingTitle(page, pageText, fallbackTitle) {
   return 'item';
 }
 
+async function readListingDetailPanelText(page) {
+  if (!page || typeof page.evaluate !== 'function') {
+    throw new Error('Cannot read listing detail panel without a Playwright page');
+  }
+
+  const result = await page.evaluate(() => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const rectSummary = (rect) => ({
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    });
+    const elementLabel = (element) => {
+      if (!element) {
+        return '';
+      }
+      const parts = [element.tagName.toLowerCase()];
+      const role = element.getAttribute('role');
+      const ariaLabel = element.getAttribute('aria-label');
+      if (role) {
+        parts.push(`[role="${role}"]`);
+      }
+      if (ariaLabel) {
+        parts.push(`[aria-label="${ariaLabel.slice(0, 80)}"]`);
+      }
+      return parts.join('');
+    };
+    const visible = (element) => {
+      const rect = element?.getBoundingClientRect?.();
+      return Boolean(rect && rect.width >= 40 && rect.height >= 12);
+    };
+    const overlayPattern = /(?:log in|sign in|sign up|create new account|forgot password|see more on facebook|登录|登入|注册|註冊|创建新帐户|建立新帳號|忘记密码|忘記密碼|加入 facebook)/iu;
+    const pricePattern = /(?:CA\$|C\$|\$|€|£)\s?[\d,]+(?:\.\d{2})?|(?:free|免费|免費)/iu;
+    const detailPattern = /(?:Details|Condition|Seller information|Seller details|Listed|Approximate location|Message seller|详细信息|商品状况|賣家資訊|卖家信息|卖家详细信息|大概位置)/iu;
+    const recommendationPattern = /(?:Today's picks|More from seller|Related listings|Sponsored|今日精选|更多卖家商品|相关推荐|赞助内容)/iu;
+    const headings = Array.from(document.querySelectorAll('div[role="main"] h1, main h1, h1'))
+      .filter((heading) => visible(heading))
+      .map((heading) => ({ heading, text: normalize(heading.innerText || heading.textContent) }))
+      .filter(({ text }) => text && !/^Marketplace$/iu.test(text) && !overlayPattern.test(text));
+
+    const scoreElement = (element, titleText) => {
+      const text = normalize(element.innerText || element.textContent);
+      if (!text || text.length < 20 || text.length > 18000) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 180 || rect.height < 40) {
+        return null;
+      }
+      if (titleText && !text.includes(titleText)) {
+        return null;
+      }
+
+      let score = 0;
+      if (titleText) {
+        score += 8;
+      }
+      if (pricePattern.test(text)) {
+        score += 12;
+      }
+      if (detailPattern.test(text)) {
+        score += 8;
+      }
+      if (/(?:Seller details|Seller information|卖家详细信息|卖家信息)/iu.test(text)) {
+        score += 5;
+      }
+      if (/(?:Condition|商品状况)/iu.test(text)) {
+        score += 4;
+      }
+      if (overlayPattern.test(text)) {
+        score -= 18;
+      }
+      if (recommendationPattern.test(text)) {
+        score -= 4;
+      }
+
+      return {
+        element,
+        text,
+        score,
+        length: text.length,
+        rect: rectSummary(rect),
+        label: elementLabel(element),
+      };
+    };
+
+    const candidates = [];
+    for (const { heading, text: titleText } of headings) {
+      let element = heading.parentElement;
+      for (let depth = 0; element && depth < 14; depth += 1, element = element.parentElement) {
+        const candidate = scoreElement(element, titleText);
+        if (candidate && candidate.score >= 18) {
+          candidates.push({
+            ...candidate,
+            title: titleText,
+            depth,
+          });
+        }
+        if (element.matches?.('div[role="main"], main')) {
+          break;
+        }
+      }
+    }
+
+    if (candidates.length === 0) {
+      const main = document.querySelector('div[role="main"], main');
+      const scopedCandidates = Array.from((main || document).querySelectorAll('div, section, article'))
+        .filter(visible)
+        .map((element) => scoreElement(element, ''))
+        .filter((candidate) => candidate && candidate.score >= 16);
+      candidates.push(...scopedCandidates);
+    }
+
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return a.length - b.length;
+    });
+
+    const selected = candidates[0];
+    if (!selected) {
+      return null;
+    }
+
+    return {
+      text: selected.text,
+      title: selected.title || '',
+      selector: selected.label,
+      score: selected.score,
+      rect: selected.rect,
+    };
+  });
+
+  if (!result || !cleanText(result.text)) {
+    throw new Error('Could not locate Marketplace listing detail panel');
+  }
+
+  return {
+    text: cleanText(result.text),
+    title: cleanText(result.title),
+    selector: result.selector || '',
+    score: result.score || 0,
+    rect: result.rect || null,
+  };
+}
+
 function extractByRegex(pageText, patterns) {
   for (const pattern of patterns) {
     const match = pageText.match(pattern);
@@ -985,8 +1160,8 @@ function extractMarketplaceStatusMarker(pageText) {
   }
 
   const titleStatusPatterns = [
-    /(?:^|\s)(?:Marketplace|商品交易小组)\s+(Sold|已售|售出|已卖)\s*·\s+/iu,
-    /(?:^|\s)(?:Marketplace|商品交易小组)\s+(Pending|待处理|交易待定|待定)\s*·\s+/iu,
+    /(?:^|\s)(?:(?:Marketplace|商品交易小组)\s+)?(Sold|已售|售出|已卖)\s*·\s+/iu,
+    /(?:^|\s)(?:(?:Marketplace|商品交易小组)\s+)?(Pending|待处理|交易待定|待定)\s*·\s+/iu,
   ];
 
   for (const pattern of titleStatusPatterns) {
@@ -1412,6 +1587,7 @@ module.exports = {
   createLogger,
   defaultChromiumArgs,
   ensureDir,
+  getKnownMarketplaceAreaFromLocation,
   getMarketplaceLocationOptions,
   inferMarketplaceAreaFromLocation,
   normalizeRadiusMiles,
@@ -1429,6 +1605,7 @@ module.exports = {
   expandMarketplaceListingDetails,
   captureListingThumbnails,
   cleanText,
+  readListingDetailPanelText,
   readListingTitle,
   primaryListingTextForAvailability,
   extractMarketplaceStatusMarker,

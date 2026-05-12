@@ -3,7 +3,7 @@ const path = require('path');
 const { chromium } = require('playwright');
 const {
   buildChromiumLaunchOptions,
-  inferMarketplaceAreaFromLocation,
+  getKnownMarketplaceAreaFromLocation,
   createLogger,
   ensureDir,
   safeGoto,
@@ -245,7 +245,7 @@ function parseArgs(argv) {
 
   options.location = cleanText(options.location);
   if (!options.areaExplicit && options.location) {
-    options.area = inferMarketplaceAreaFromLocation(options.location) || DEFAULT_AREA;
+    options.area = getKnownMarketplaceAreaFromLocation(options.location) || DEFAULT_AREA;
   }
 
   if (options.refreshJitterMax < options.refreshJitterMin) {
@@ -674,12 +674,17 @@ async function main() {
       loginTimeoutMs: options.loginTimeoutMs,
       logger: log,
     });
-    page = await setMarketplaceLocation(page, {
-      location: options.location,
-      fallbackArea: options.area,
-      allowMissingControl: true,
-      logger: log,
-    });
+    const knownLocationArea = getKnownMarketplaceAreaFromLocation(options.location);
+    if (knownLocationArea) {
+      log(`location_change_skip reason=known_route location="${options.location}" area=${knownLocationArea} url=${page.url()}`);
+    } else {
+      page = await setMarketplaceLocation(page, {
+        location: options.location,
+        fallbackArea: options.areaExplicit ? options.area : '',
+        allowMissingControl: true,
+        logger: log,
+      });
+    }
     page = await setMarketplaceRadius(page, {
       radiusMiles: options.radiusMiles,
       logger: log,

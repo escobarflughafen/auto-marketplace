@@ -402,6 +402,7 @@ function buildManagedProcessRecord(workflowId, args) {
     signal: '',
     logs: [],
     child: null,
+    stopRequested: false,
   };
 }
 
@@ -544,7 +545,7 @@ function reconcileWorkflowRuns(db) {
 
     if (active && !alive) {
       updateWorkflowRun(db, run.run_id, {
-        status: 'lost',
+        status: run.status === 'stopping' ? 'terminated' : 'lost',
         exitedAt: now,
         osCheckedAt: now,
         osAlive: false,
@@ -805,7 +806,11 @@ function startManagedWorkflow(db, workflowId, extraArgs = []) {
     syncWorkflowRun(db, record, { osAlive: false });
   });
   child.on('exit', (code, signal) => {
-    record.status = code === 0 ? 'exited' : 'failed';
+    record.status = record.stopRequested || record.status === 'stopping'
+      ? 'terminated'
+      : code === 0
+        ? 'exited'
+        : 'failed';
     record.exitedAt = nowIso();
     record.exitCode = code;
     record.signal = signal || '';
@@ -846,10 +851,17 @@ function stopManagedWorkflow(db, processId) {
         return publicWorkflowRunRecord(getWorkflowRun(db, processId));
       }
     }
+    const nextStatus = alive
+      ? 'stopping'
+      : run.status === 'stopping'
+        ? 'terminated'
+        : 'lost';
     updateWorkflowRun(db, processId, {
-      status: alive ? 'stopping' : 'lost',
+      status: nextStatus,
+      exitedAt: nextStatus === 'terminated' || nextStatus === 'lost' ? nowIso() : run.exited_at,
       osCheckedAt: nowIso(),
       osAlive: alive,
+      logs: alive ? [...run.logs, `[${nowIso()}] stop requested`] : run.logs,
     });
     return publicWorkflowRunRecord(getWorkflowRun(db, processId));
   }
@@ -860,6 +872,7 @@ function stopManagedWorkflow(db, processId) {
   }
 
   record.status = 'stopping';
+  record.stopRequested = true;
   appendProcessLog(record, 'stop requested');
   try {
     if (process.platform === 'win32') {

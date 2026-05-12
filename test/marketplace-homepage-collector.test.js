@@ -44,3 +44,10 @@ test('parseArgs builds homepage route URLs for major city locations', () => {
     'https://www.facebook.com/marketplace/nyc/',
   );
 });
+
+test('parseArgs keeps custom homepage locations on the generic Marketplace URL', () => {
+  const options = parseArgs(['--location', 'Some Custom City, BC']);
+
+  assert.equal(options.location, 'Some Custom City, BC');
+  assert.equal(options.startUrl, 'https://www.facebook.com/marketplace/');
+});

@@ -5,10 +5,12 @@ const {
   buildChromiumLaunchOptions,
   buildMarketplaceRadiusPatterns,
   defaultChromiumArgs,
+  getKnownMarketplaceAreaFromLocation,
   getMarketplaceLocationOptions,
   inferMarketplaceAreaFromLocation,
   normalizeRadiusMiles,
   safeGotoWithOptions,
+  setMarketplaceLocation,
   waitForPageReady,
   scrollMarketplaceResults,
   expandMarketplaceListingDetails,
@@ -17,6 +19,7 @@ const {
   detectListingUnavailablePage,
   detectListingAvailability,
   extractListingContent,
+  readListingDetailPanelText,
   urlMatchesMarketplaceArea,
 } = require('../scripts/marketplace-utils');
 
@@ -230,6 +233,12 @@ test('inferMarketplaceAreaFromLocation normalizes city names for Marketplace rou
   assert.equal(inferMarketplaceAreaFromLocation('Los Angeles, California'), 'los-angeles');
 });
 
+test('getKnownMarketplaceAreaFromLocation only returns configured city route slugs', () => {
+  assert.equal(getKnownMarketplaceAreaFromLocation('Ottawa, Ontario'), 'ottawa');
+  assert.equal(getKnownMarketplaceAreaFromLocation('Some Custom City, BC'), '');
+  assert.equal(inferMarketplaceAreaFromLocation('Some Custom City, BC'), 'some-custom-city');
+});
+
 test('getMarketplaceLocationOptions exposes selectable city labels', () => {
   const options = getMarketplaceLocationOptions();
   const bySlug = new Map(options.map((option) => [option.slug, option]));
@@ -239,6 +248,32 @@ test('getMarketplaceLocationOptions exposes selectable city labels', () => {
   assert.equal(bySlug.get('vancouver-wa')?.value, 'Vancouver, WA');
   assert.equal(bySlug.get('ottawa')?.value, 'Ottawa, ON');
   assert.equal(bySlug.get('nyc')?.value, 'New York, NY');
+});
+
+test('setMarketplaceLocation skips picker when known route is already active', async () => {
+  const messages = [];
+  let pickerTouched = false;
+  const page = {
+    url: () => 'https://www.facebook.com/marketplace/vancouver/',
+    getByRole() {
+      pickerTouched = true;
+      throw new Error('picker should not be touched');
+    },
+    locator() {
+      pickerTouched = true;
+      throw new Error('picker should not be touched');
+    },
+  };
+
+  await setMarketplaceLocation(page, {
+    location: 'Vancouver',
+    fallbackArea: 'vancouver',
+    allowMissingControl: true,
+    logger: (message) => messages.push(message),
+  });
+
+  assert.equal(pickerTouched, false);
+  assert.ok(messages.some((message) => message.includes('location_change_skip reason=area_route_match')));
 });
 
 test('urlMatchesMarketplaceArea recognizes Marketplace area routes', () => {
@@ -309,6 +344,12 @@ test('detectListingAvailability recognizes pending Marketplace listings', () => 
   assert.equal(availability.reason, 'pending_marker');
 });
 
+test('detectListingAvailability recognizes scoped listing status markers without whole-page prefix', () => {
+  const availability = detectListingAvailability('Sold · Leica M6 CA$ 3,800 Vancouver, BC Details Seller information');
+  assert.equal(availability.status, 'sold');
+  assert.equal(availability.reason, 'sold_marker');
+});
+
 test('detectListingAvailability ignores sold signals in recommendations', () => {
   const text = [
     '商品交易小组 0:00 / 0:00 Leica SL2-S CA$ 2,999CA$ 3,300 5周前 · Montréal, QC 发消息',
@@ -369,6 +410,31 @@ test('detectListingUnavailableUrl recognizes marketplace unavailable redirects',
     { unavailable: true, reason: 'marketplace_unavailable_redirect' },
   );
   assert.equal(detectListingUnavailableUrl('https://www.facebook.com/marketplace/item/1716046416425552/'), null);
+});
+
+test('readListingDetailPanelText returns scoped Marketplace detail panel text', async () => {
+  const panel = await readListingDetailPanelText({
+    evaluate: async () => ({
+      text: '  Modular Capsule Home CA$ 42,000 Details Condition New Seller information  ',
+      title: 'Modular Capsule Home',
+      selector: 'div[aria-label="Marketplace item listing"]',
+      score: 32,
+      rect: { x: 0, y: 0, width: 420, height: 800 },
+    }),
+  });
+
+  assert.equal(panel.text, 'Modular Capsule Home CA$ 42,000 Details Condition New Seller information');
+  assert.equal(panel.title, 'Modular Capsule Home');
+  assert.equal(panel.selector, 'div[aria-label="Marketplace item listing"]');
+});
+
+test('readListingDetailPanelText fails when no scoped panel is found', async () => {
+  await assert.rejects(
+    readListingDetailPanelText({
+      evaluate: async () => null,
+    }),
+    /Could not locate Marketplace listing detail panel/,
+  );
 });
 
 test('detectListingUnavailablePage prefers redirect signal before DOM probing', async () => {

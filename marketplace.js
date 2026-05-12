@@ -4,7 +4,7 @@ const { chromium } = require('playwright');
 const {
   buildChromiumLaunchOptions,
   createLogger,
-  inferMarketplaceAreaFromLocation,
+  getKnownMarketplaceAreaFromLocation,
   safeGotoWithOptions,
   setMarketplaceLocation,
   setMarketplaceRadius,
@@ -172,7 +172,10 @@ function parseArgs(argv) {
   }
 
   if (!options.areaExplicit && options.location) {
-    options.area = inferMarketplaceAreaFromLocation(options.location);
+    options.area = getKnownMarketplaceAreaFromLocation(options.location);
+  }
+  if (options.area && !options.startUrlExplicit) {
+    options.startUrl = `https://www.facebook.com/marketplace/${encodeURIComponent(options.area)}/`;
   }
 
   return options;
@@ -604,14 +607,16 @@ async function runWorkflowCycle(page, options, cycleIndex) {
     activePage = await navigateToMarketplace(activePage, options.startUrl);
   }
 
-  if (options.location) {
+  if (options.location && !getKnownMarketplaceAreaFromLocation(options.location)) {
     console.log(`Switching Marketplace location to: ${options.location}`);
     activePage = await setMarketplaceLocation(activePage, {
       location: options.location,
-      fallbackArea: options.area,
+      fallbackArea: options.areaExplicit ? options.area : '',
       allowMissingControl: true,
       logger: log,
     });
+  } else if (options.location) {
+    log(`location_change_skip reason=known_route location="${options.location}" area=${options.area || ''} url=${activePage.url()}`);
   }
 
   if (options.radiusMiles > 0) {

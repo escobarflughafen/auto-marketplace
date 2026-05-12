@@ -11,6 +11,7 @@ const {
   captureListingThumbnails,
   cleanText,
   detectListingUnavailablePage,
+  readListingDetailPanelText,
   readListingTitle,
   extractListingContent,
   writeListingSnapshot,
@@ -341,8 +342,20 @@ async function captureListingRecord(context, page, listing, captureDir) {
     throw error;
   }
 
-  const listingContent = extractListingContent(pageText, listing.card_title || listing.card_text || listing.listing_id);
-  const title = await readListingTitle(activePage, pageText, listingContent.title || listing.card_title || listing.listing_id);
+  const fallbackTitle = listing.card_title || listing.card_text || listing.listing_id;
+  let listingContent;
+  try {
+    const detailPanel = await readListingDetailPanelText(activePage);
+    listingContent = extractListingContent(detailPanel.text, detailPanel.title || fallbackTitle);
+    listingContent.extractionSource = 'listing_detail_panel';
+    listingContent.extractionSelector = detailPanel.selector;
+    listingContent.extractionScore = detailPanel.score;
+  } catch (error) {
+    log(`listing_detail_panel_extract_failed listing_id=${listing.listing_id} fallback=body_text error=${error.message}`);
+    listingContent = extractListingContent(pageText, fallbackTitle);
+    listingContent.extractionSource = 'body_text_fallback';
+  }
+  const title = await readListingTitle(activePage, listingContent.rawText || pageText, listingContent.title || fallbackTitle);
   const baseName = `${listing.listing_id}-${slugify(title)}`;
   const screenshotPath = path.join(captureDir, `${baseName}.png`);
 

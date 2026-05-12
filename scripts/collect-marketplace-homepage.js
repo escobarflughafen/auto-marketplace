@@ -5,7 +5,7 @@ const {
   buildChromiumLaunchOptions,
   createLogger,
   ensureDir,
-  inferMarketplaceAreaFromLocation,
+  getKnownMarketplaceAreaFromLocation,
   safeGoto,
   setMarketplaceLocation,
   setMarketplaceRadius,
@@ -190,9 +190,9 @@ function parseArgs(argv) {
   options.authMode = normalizeAuthMode(options.authMode, options.useCredentials);
 
   if (options.location && !options.startUrlExplicit) {
-    const inferredArea = inferMarketplaceAreaFromLocation(options.location);
-    if (inferredArea) {
-      options.startUrl = `https://www.facebook.com/marketplace/${encodeURIComponent(inferredArea)}/`;
+    const knownArea = getKnownMarketplaceAreaFromLocation(options.location);
+    if (knownArea) {
+      options.startUrl = `https://www.facebook.com/marketplace/${encodeURIComponent(knownArea)}/`;
     }
   }
 
@@ -502,12 +502,17 @@ async function main() {
       loginTimeoutMs: options.loginTimeoutMs,
       logger: log,
     });
-    page = await setMarketplaceLocation(page, {
-      location: options.location,
-      fallbackArea: inferMarketplaceAreaFromLocation(options.location),
-      allowMissingControl: true,
-      logger: log,
-    });
+    const knownLocationArea = getKnownMarketplaceAreaFromLocation(options.location);
+    if (knownLocationArea) {
+      log(`location_change_skip reason=known_route location="${options.location}" area=${knownLocationArea} url=${page.url()}`);
+    } else {
+      page = await setMarketplaceLocation(page, {
+        location: options.location,
+        fallbackArea: '',
+        allowMissingControl: true,
+        logger: log,
+      });
+    }
     page = await setMarketplaceRadius(page, {
       radiusMiles: options.radiusMiles,
       logger: log,
