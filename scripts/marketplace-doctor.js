@@ -9,6 +9,10 @@ const {
   closeMarketplaceHomepageDatabase,
 } = require('./marketplace-homepage-db');
 const {
+  buildChromiumLaunchOptions,
+  defaultChromiumArgs,
+} = require('./marketplace-utils');
+const {
   DEFAULT_CREDENTIALS_PATH,
   readCredentials,
 } = require('./marketplace-profile-auth');
@@ -145,9 +149,9 @@ async function checkHeadlessBrowserLaunch(options) {
 
   try {
     const { chromium } = require('playwright');
-    const browser = await chromium.launch({
+    const browser = await chromium.launch(buildChromiumLaunchOptions({
       headless: true,
-    });
+    }));
 
     try {
       const page = await browser.newPage();
@@ -169,6 +173,51 @@ async function checkHeadlessBrowserLaunch(options) {
       { error: error.message },
     );
   }
+}
+
+async function checkLinuxHostConfig() {
+  if (process.platform !== 'linux') {
+    return makeResult(
+      'linux_host_config',
+      'warn',
+      'Not running on Linux; Ubuntu-only host checks were skipped.',
+      { platform: process.platform },
+    );
+  }
+
+  const details = {
+    platform: process.platform,
+    uid: typeof process.getuid === 'function' ? process.getuid() : '',
+    chromiumArgs: defaultChromiumArgs().join(' '),
+    display: process.env.DISPLAY || '',
+  };
+
+  try {
+    const osRelease = await fs.promises.readFile('/etc/os-release', 'utf8');
+    const prettyName = osRelease.match(/^PRETTY_NAME=(.*)$/m)?.[1]?.replace(/^"|"$/g, '') || '';
+    if (prettyName) {
+      details.osRelease = prettyName;
+    }
+  } catch {
+    details.osRelease = 'unavailable';
+  }
+
+  try {
+    const stat = await fs.promises.statfs('/dev/shm');
+    details.devShmMB = Math.round((stat.bsize * stat.blocks) / 1024 / 1024);
+    if (details.devShmMB > 0 && details.devShmMB < 256) {
+      return makeResult(
+        'linux_host_config',
+        'warn',
+        '/dev/shm is small. Chromium will use --disable-dev-shm-usage, but Docker shm_size: "1gb" is preferred.',
+        details,
+      );
+    }
+  } catch (error) {
+    details.devShmError = error.message;
+  }
+
+  return makeResult('linux_host_config', 'ok', 'Linux host configuration is compatible with headless Chromium.', details);
 }
 
 async function checkDatabase(options) {
@@ -378,6 +427,7 @@ function renderTextReport(report) {
 async function runDoctor(options) {
   const results = [];
   results.push(await checkNodeRuntime());
+  results.push(await checkLinuxHostConfig());
   results.push(await checkPlaywrightModule());
   results.push(await checkHeadlessBrowserLaunch(options));
   results.push(await checkDatabase(options));

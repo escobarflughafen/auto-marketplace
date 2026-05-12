@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const {
+  buildChromiumLaunchOptions,
   createLogger,
   inferMarketplaceAreaFromLocation,
   safeGotoWithOptions,
@@ -351,11 +352,11 @@ async function createBrowserSession(options) {
 
     log(`browser_session_start mode=persistent user_data_dir=${resolvedUserDataDir} headless=${options.headless}`);
     await ensureDir(resolvedUserDataDir);
-    const persistentContext = await chromium.launchPersistentContext(resolvedUserDataDir, {
+    const persistentContext = await chromium.launchPersistentContext(resolvedUserDataDir, buildChromiumLaunchOptions({
       headless: options.headless,
       slowMo: options.slowMo,
       viewport: { width: 1440, height: 1200 },
-    });
+    }));
 
     return {
       browser: persistentContext.browser(),
@@ -368,10 +369,10 @@ async function createBrowserSession(options) {
     };
   }
 
-  const browser = await chromium.launch({
+  const browser = await chromium.launch(buildChromiumLaunchOptions({
     headless: options.headless,
     slowMo: options.slowMo,
-  });
+  }));
   log(`browser_session_start mode=ephemeral headless=${options.headless}`);
 
   return {

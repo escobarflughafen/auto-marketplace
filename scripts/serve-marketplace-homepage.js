@@ -30,10 +30,26 @@ const {
   buildListingIdsQuery,
   buildCountQuery,
 } = require('./marketplace-homepage-query');
+const {
+  getMarketplaceLocationOptions,
+} = require('./marketplace-utils');
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
+const MARKETPLACE_LOCATION_OPTIONS = getMarketplaceLocationOptions();
+const AUTH_MODE_FIELD = {
+  id: 'authMode',
+  label: 'Authentication',
+  kind: 'choice',
+  defaultValue: 'credentials',
+  options: [
+    { value: 'credentials', label: 'Credentials required', args: ['--auth-mode', 'credentials'] },
+    { value: 'required', label: 'Profile required', args: ['--auth-mode', 'required'] },
+    { value: 'optional', label: 'Optional', args: ['--auth-mode', 'optional'] },
+    { value: 'none', label: 'Unauthenticated', args: ['--auth-mode', 'none'] },
+  ],
+};
 
 function readFlagValue(argv, index, flagName) {
   const value = argv[index + 1];
@@ -88,7 +104,7 @@ const WORKFLOWS = {
     label: 'Homepage Collector',
     script: 'marketplace:home:collect',
     fields: [
-      { id: 'useCredentials', label: 'Use credentials', kind: 'boolean', flag: '--use-credentials', defaultValue: true },
+      AUTH_MODE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -100,7 +116,7 @@ const WORKFLOWS = {
         ],
       },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
-      { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '' },
+      { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
       { id: 'radiusMiles', label: 'Radius miles', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
       { id: 'refreshSeconds', label: 'Refresh seconds', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
       { id: 'refreshJitterMin', label: 'Refresh jitter min', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
@@ -113,7 +129,7 @@ const WORKFLOWS = {
     label: 'Search Explorer',
     script: 'marketplace:search:explore',
     fields: [
-      { id: 'useCredentials', label: 'Use credentials', kind: 'boolean', flag: '--use-credentials', defaultValue: true },
+      AUTH_MODE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -125,7 +141,7 @@ const WORKFLOWS = {
         ],
       },
       { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax' },
-      { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '' },
+      { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
       { id: 'radiusMiles', label: 'Radius miles', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
       { id: 'refreshSeconds', label: 'Refresh seconds', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
@@ -139,7 +155,7 @@ const WORKFLOWS = {
     label: 'Resolve Pending Backlog',
     script: 'marketplace:home:process',
     fields: [
-      { id: 'useCredentials', label: 'Use credentials', kind: 'boolean', flag: '--use-credentials', defaultValue: true },
+      AUTH_MODE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -216,7 +232,7 @@ const WORKFLOWS = {
     label: 'Continuous Backlog Worker',
     script: 'marketplace:home:process',
     fields: [
-      { id: 'useCredentials', label: 'Use credentials', kind: 'boolean', flag: '--use-credentials', defaultValue: true },
+      AUTH_MODE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',

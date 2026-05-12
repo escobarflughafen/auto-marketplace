@@ -152,6 +152,7 @@ if [[ "$SYNC_SOURCE" -eq 1 ]]; then
     --exclude profiles \
     --exclude output \
     --exclude credentials.json \
+    --exclude secrets \
     --exclude .DS_Store \
     ./ "$REMOTE:$REMOTE_DIR/"
 fi
@@ -165,12 +166,12 @@ fi
 
 if [[ "$RESTART_SERVICE" -eq 1 ]]; then
   log "rebuilding and restarting remote docker service"
-  run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && docker compose build auto-browser && docker compose up -d auto-browser"
+  run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose build auto-browser && docker compose up -d auto-browser; elif command -v docker-compose >/dev/null 2>&1; then docker-compose build auto-browser && docker-compose up -d auto-browser; else echo 'Docker Compose is not available' >&2; exit 127; fi"
 fi
 
 if [[ "$RUN_REMOTE_MAINTENANCE" -eq 1 ]]; then
   log "running remote DB maintenance/checkpoint inside container"
-  run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && docker compose exec -T auto-browser npm run marketplace:home:db:maintain -- --json"
+  run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose exec -T auto-browser npm run marketplace:home:db:maintain -- --json; elif command -v docker-compose >/dev/null 2>&1; then docker-compose exec -T auto-browser npm run marketplace:home:db:maintain -- --json; else echo 'Docker Compose is not available' >&2; exit 127; fi"
 fi
 
 log "done"

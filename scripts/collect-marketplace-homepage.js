@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const {
+  buildChromiumLaunchOptions,
   createLogger,
   ensureDir,
   inferMarketplaceAreaFromLocation,
@@ -26,6 +27,7 @@ const {
   DEFAULT_LOGIN_TIMEOUT_MS,
   ensureFacebookMarketplaceLogin,
   describeFacebookMarketplaceSession,
+  normalizeAuthMode,
 } = require('./marketplace-profile-auth');
 
 const DEFAULT_HOME_URL = 'https://www.facebook.com/marketplace/';
@@ -71,6 +73,7 @@ function parseArgs(argv) {
     location: '',
     radiusMiles: 0,
     useCredentials: false,
+    authMode: '',
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
     loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
   };
@@ -154,6 +157,14 @@ function parseArgs(argv) {
       case '--use-credentials':
         options.useCredentials = true;
         break;
+      case '--auth-mode':
+        options.authMode = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--unauthenticated':
+      case '--no-auth':
+        options.authMode = 'none';
+        break;
       case '--credentials-path':
         options.credentialsPath = readFlagValue(argv, index, arg);
         index += 1;
@@ -176,6 +187,7 @@ function parseArgs(argv) {
   if (options.refreshJitterMax < options.refreshJitterMin) {
     throw new Error('Expected --refresh-jitter-max to be >= --refresh-jitter-min');
   }
+  options.authMode = normalizeAuthMode(options.authMode, options.useCredentials);
 
   if (options.location && !options.startUrlExplicit) {
     const inferredArea = inferMarketplaceAreaFromLocation(options.location);
@@ -468,7 +480,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} use_credentials=${options.useCredentials}`,
+    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} auth_mode=${options.authMode} use_credentials=${options.useCredentials}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -476,15 +488,16 @@ async function main() {
     ? options.userDataDir
     : path.join(process.cwd(), options.userDataDir);
 
-  const context = await chromium.launchPersistentContext(resolvedUserDataDir, {
+  const context = await chromium.launchPersistentContext(resolvedUserDataDir, buildChromiumLaunchOptions({
     headless: options.headless,
     viewport: { width: 1440, height: 1200 },
-  });
+  }));
 
   try {
     let page = await ensureFacebookMarketplaceLogin(context, {
       startUrl: options.startUrl,
       useCredentials: options.useCredentials,
+      authMode: options.authMode,
       credentialsPath: options.credentialsPath,
       loginTimeoutMs: options.loginTimeoutMs,
       logger: log,

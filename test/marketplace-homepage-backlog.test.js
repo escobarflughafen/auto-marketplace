@@ -56,8 +56,16 @@ test('parseArgs enables drain mode for backlog resolution', () => {
   assert.equal(options.itemJitterMax, 1.5);
   assert.equal(options.resolveInactive, true);
   assert.equal(options.useCredentials, true);
+  assert.equal(options.authMode, 'credentials');
   assert.equal(options.credentialsPath, 'tmp/creds.json');
   assert.equal(options.loginTimeoutMs, 45000);
+});
+
+test('parseArgs supports unauthenticated backlog processing', () => {
+  const options = parseArgs(['--auth-mode', 'none', '--once']);
+
+  assert.equal(options.authMode, 'none');
+  assert.equal(options.useCredentials, false);
 });
 
 test('parseArgs rejects once and drain together', () => {

@@ -1,6 +1,7 @@
 const path = require('path');
 const { chromium } = require('playwright');
 const {
+  buildChromiumLaunchOptions,
   createLogger,
   ensureDir,
   slugify,
@@ -248,10 +249,10 @@ async function main() {
   }
 
   const userDataDir = path.join(process.cwd(), 'profiles', 'facebook-marketplace');
-  const context = await chromium.launchPersistentContext(userDataDir, {
+  const context = await chromium.launchPersistentContext(userDataDir, buildChromiumLaunchOptions({
     headless: true,
     viewport: { width: 1440, height: 1200 },
-  });
+  }));
 
   try {
     let page = context.pages()[0] || await context.newPage();

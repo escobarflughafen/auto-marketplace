@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const {
+  buildChromiumLaunchOptions,
   createLogger,
   ensureDir,
   safeGoto,
@@ -36,6 +37,7 @@ const {
   DEFAULT_LOGIN_TIMEOUT_MS,
   ensureFacebookMarketplaceLogin,
   describeFacebookMarketplaceSession,
+  normalizeAuthMode,
 } = require('./marketplace-profile-auth');
 
 const log = createLogger('process-marketplace-homepage-backlog');
@@ -113,6 +115,7 @@ function parseArgs(argv) {
     listingIdFile: '',
     workerId: `pid-${process.pid}`,
     useCredentials: false,
+    authMode: '',
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
     loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
     once: false,
@@ -235,6 +238,14 @@ function parseArgs(argv) {
       case '--use-credentials':
         options.useCredentials = true;
         break;
+      case '--auth-mode':
+        options.authMode = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--unauthenticated':
+      case '--no-auth':
+        options.authMode = 'none';
+        break;
       case '--credentials-path':
         options.credentialsPath = readFlagValue(argv, index, arg);
         index += 1;
@@ -274,6 +285,7 @@ function parseArgs(argv) {
   if (options.itemJitterMax < options.itemJitterMin) {
     throw new Error('Expected --item-jitter-max to be >= --item-jitter-min');
   }
+  options.authMode = normalizeAuthMode(options.authMode, options.useCredentials);
 
   if (options.once && options.drain) {
     throw new Error('Use either --once or --drain, not both');
@@ -850,7 +862,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} use_credentials=${options.useCredentials}`,
+    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -887,10 +899,10 @@ async function main() {
         headless: options.headless,
       },
     });
-    context = await chromium.launchPersistentContext(resolvedUserDataDir, {
+    context = await chromium.launchPersistentContext(resolvedUserDataDir, buildChromiumLaunchOptions({
       headless: options.headless,
       viewport: { width: 1440, height: 1200 },
-    });
+    }));
     lifecycle.context = context;
     appendWorkflowLifecycleEvent(db, options, 'browser_context_ready', {
       status: 'running',
@@ -902,6 +914,7 @@ async function main() {
 
     let page = await ensureFacebookMarketplaceLogin(context, {
       useCredentials: options.useCredentials,
+      authMode: options.authMode,
       credentialsPath: options.credentialsPath,
       loginTimeoutMs: options.loginTimeoutMs,
       failOnAdditionalVerification: options.headless,
@@ -922,7 +935,7 @@ async function main() {
         currentUrl: sessionSummary.currentUrl || '',
       },
     });
-    if (!sessionSummary.loggedIn || !sessionSummary.signedInUserId) {
+    if (!['none', 'optional'].includes(options.authMode) && (!sessionSummary.loggedIn || !sessionSummary.signedInUserId)) {
       throw new Error('Facebook session is not fully authenticated; refresh the signed-in persistent profile or run a headed worker and complete Facebook verification before processing backlog.');
     }
 

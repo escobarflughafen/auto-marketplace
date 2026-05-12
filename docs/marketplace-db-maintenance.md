@@ -52,13 +52,13 @@ Ready-to-edit scheduler templates are available in:
 Example cron entry for the default maintenance every 6 hours:
 
 ```cron
-0 */6 * * * cd /Users/aoi/Workspaces/auto-browser && /usr/bin/env npm run marketplace:home:db:maintain -- --json >> artifacts/marketplace-homepage/db-maintenance.log 2>&1
+0 */6 * * * cd /srv/auto-browser/app && /usr/bin/env npm run marketplace:home:db:maintain -- --json >> artifacts/marketplace-homepage/db-maintenance.log 2>&1
 ```
 
 Weekly statistics refresh:
 
 ```cron
-30 3 * * 0 cd /Users/aoi/Workspaces/auto-browser && /usr/bin/env npm run marketplace:home:db:maintain -- --analyze --json >> artifacts/marketplace-homepage/db-maintenance.log 2>&1
+30 3 * * 0 cd /srv/auto-browser/app && /usr/bin/env npm run marketplace:home:db:maintain -- --analyze --json >> artifacts/marketplace-homepage/db-maintenance.log 2>&1
 ```
 
 ## macOS LaunchAgent
@@ -73,7 +73,7 @@ Create `~/Library/LaunchAgents/com.auto-browser.marketplace-db-maintenance.plist
   <key>Label</key>
   <string>com.auto-browser.marketplace-db-maintenance</string>
   <key>WorkingDirectory</key>
-  <string>/Users/aoi/Workspaces/auto-browser</string>
+  <string>/path/to/auto-browser</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/env</string>
@@ -86,9 +86,9 @@ Create `~/Library/LaunchAgents/com.auto-browser.marketplace-db-maintenance.plist
   <key>StartInterval</key>
   <integer>21600</integer>
   <key>StandardOutPath</key>
-  <string>/Users/aoi/Workspaces/auto-browser/artifacts/marketplace-homepage/db-maintenance.log</string>
+  <string>/path/to/auto-browser/artifacts/marketplace-homepage/db-maintenance.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/aoi/Workspaces/auto-browser/artifacts/marketplace-homepage/db-maintenance.err.log</string>
+  <string>/path/to/auto-browser/artifacts/marketplace-homepage/db-maintenance.err.log</string>
 </dict>
 </plist>
 ```

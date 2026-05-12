@@ -58,6 +58,12 @@ test('parseArgs reads search radius miles', () => {
   assert.equal(options.radiusMiles, 10);
 });
 
+test('parseArgs supports unauthenticated search exploration', () => {
+  const options = parseArgs(['--query', 'nikon', '--auth-mode', 'none']);
+
+  assert.equal(options.authMode, 'none');
+});
+
 test('parseArgs infers major city area slugs for search explorer', () => {
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'Montreal, Quebec']).area, 'montreal');
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'Calgary, Alberta']).area, 'calgary');

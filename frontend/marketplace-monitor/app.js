@@ -164,9 +164,17 @@ function renderField(field, draft) {
   const type = field.kind === 'number' ? 'number' : 'text';
   const step = field.step !== undefined ? ` step="${html(field.step)}"` : '';
   const min = field.min !== undefined ? ` min="${html(field.min)}"` : '';
+  const listId = `${id}-options`;
+  const options = (field.options || []).map((option) => {
+    const optionValue = typeof option === 'string' ? option : option.value;
+    const optionLabel = typeof option === 'string' ? option : (option.label || option.value);
+    return `<option value="${html(optionValue)}" label="${html(optionLabel)}"></option>`;
+  }).join('');
+  const list = options ? ` list="${html(listId)}"` : '';
+  const datalist = options ? `<datalist id="${html(listId)}">${options}</datalist>` : '';
   return '<tr>'
     + `<th><label for="${html(id)}">${html(field.label)}</label></th>`
-    + `<td><input id="${html(id)}" data-field-id="${html(field.id)}" type="${type}" value="${html(value)}"${min}${step}></td>`
+    + `<td><input id="${html(id)}" data-field-id="${html(field.id)}" type="${type}" value="${html(value)}"${min}${step}${list}>${datalist}</td>`
     + '</tr>';
 }
 
@@ -559,7 +567,7 @@ function renderWorkerDetail(selectedProcess) {
     }).join('')
     : '<tr><td colspan="3" class="empty-state">No text history yet.</td></tr>';
   detailRows.push(workerDetailSectionRow('Text History', '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + commandRows + '</tbody></table></div>'
-    + '<div class="worker-detail-section-tablewrap"><table class="worker-log-table"><thead><tr><th>#</th><th>Time</th><th>Line</th></tr></thead><tbody>'
+    + '<div class="worker-detail-section-tablewrap worker-log-wrap"><table class="worker-log-table"><thead><tr><th>#</th><th>Time</th><th>Line</th></tr></thead><tbody>'
     + logRows
     + '</tbody></table></div>'));
 
@@ -581,13 +589,16 @@ function renderWorkerDetail(selectedProcess) {
     + '</div>';
 }
 
-async function loadWorkerDetail() {
+async function loadWorkerDetail(options = {}) {
+  const render = options.render !== false;
   const selectedProcess = activeProcess();
   if (!selectedProcess) {
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
-    renderProcesses();
+    if (render) {
+      renderProcesses();
+    }
     return;
   }
 
@@ -600,7 +611,9 @@ async function loadWorkerDetail() {
   store.workerDetailProcess = detailPayload.process || selectedProcess;
   store.workerDetailStats = statsPayload.stats || null;
   store.workerDetailEvents = eventsPayload.events || [];
-  renderProcesses();
+  if (render) {
+    renderProcesses();
+  }
 }
 
 async function loadSummary() {
@@ -608,7 +621,8 @@ async function loadSummary() {
   renderSummary();
 }
 
-async function loadWorkflows() {
+async function loadWorkflows(options = {}) {
+  const background = options.background === true;
   const payload = await fetchJson('/api/workflows');
   const nextWorkflows = payload.workflows || [];
   const nextWorkflowSignature = JSON.stringify(nextWorkflows.map((workflow) => ({
@@ -621,14 +635,22 @@ async function loadWorkflows() {
   store.workflowSignature = nextWorkflowSignature;
   store.processes = payload.processes || [];
   for (const workflow of store.workflows) ensureWorkflowDraft(workflow);
-  if (workflowDefinitionsChanged || !els.workerControl.innerHTML.trim()) {
+  if (!background && (workflowDefinitionsChanged || !els.workerControl.innerHTML.trim())) {
     renderWorkflowOptions();
     renderWorkflowForm();
   }
-  renderProcesses();
-  if (store.selectedProcessId) {
-    await loadWorkerDetail();
+  if (!background || !store.selectedProcessId) {
+    renderProcesses();
   }
+  if (store.selectedProcessId) {
+    await loadWorkerDetail({ render: !background });
+  }
+}
+
+function syncWorkflowsInBackground() {
+  loadWorkflows({ background: true }).catch((error) => {
+    console.warn('Background workflow sync failed:', error.message || error);
+  });
 }
 
 function bindEvents() {
@@ -686,4 +708,4 @@ await listingsViewer.loadResolveQueue();
 await listingsViewer.loadRows();
 await loadWorkflows();
 setInterval(loadSummary, 10000);
-setInterval(loadWorkflows, 5000);
+setInterval(syncWorkflowsInBackground, 5000);

@@ -60,6 +60,17 @@ log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
 
+docker_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "$@"
+  else
+    echo "Docker Compose is not available. Install the Docker Compose plugin or docker-compose." >&2
+    return 127
+  fi
+}
+
 if [[ ! -f "$PROJECT_DIR/package.json" ]]; then
   echo "Project dir does not contain package.json: ${PROJECT_DIR}" >&2
   exit 1
@@ -76,13 +87,13 @@ fi
 
 if [[ "$RESTART_SERVICE" -eq 1 ]]; then
   log "rebuilding and restarting Docker Compose service"
-  docker compose build auto-browser
-  docker compose up -d auto-browser
+  docker_compose build auto-browser
+  docker_compose up -d auto-browser
 fi
 
 if [[ "$RUN_MAINTENANCE" -eq 1 ]]; then
   log "running DB maintenance inside container"
-  docker compose exec -T auto-browser npm run marketplace:home:db:maintain -- --json
+  docker_compose exec -T auto-browser npm run marketplace:home:db:maintain -- --json
 fi
 
 log "done"

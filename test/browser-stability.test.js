@@ -2,7 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildChromiumLaunchOptions,
   buildMarketplaceRadiusPatterns,
+  defaultChromiumArgs,
+  getMarketplaceLocationOptions,
   inferMarketplaceAreaFromLocation,
   normalizeRadiusMiles,
   safeGotoWithOptions,
@@ -16,6 +19,21 @@ const {
   extractListingContent,
   urlMatchesMarketplaceArea,
 } = require('../scripts/marketplace-utils');
+
+test('buildChromiumLaunchOptions appends configured Chromium args without duplicates', () => {
+  const options = buildChromiumLaunchOptions(
+    { args: ['--existing', '--disable-dev-shm-usage'] },
+    { AUTO_BROWSER_CHROMIUM_ARGS: '--extra-flag --existing' },
+  );
+
+  assert.equal(options.args.filter((arg) => arg === '--existing').length, 1);
+  assert.ok(options.args.includes('--extra-flag'));
+});
+
+test('defaultChromiumArgs reads AUTO_BROWSER_CHROMIUM_ARGS', () => {
+  assert.ok(defaultChromiumArgs({ AUTO_BROWSER_CHROMIUM_ARGS: '--foo --bar' }).includes('--foo'));
+  assert.ok(defaultChromiumArgs({ AUTO_BROWSER_CHROMIUM_ARGS: '--foo --bar' }).includes('--bar'));
+});
 
 function createMockPage(name, behavior = {}) {
   const state = {
@@ -210,6 +228,17 @@ test('inferMarketplaceAreaFromLocation normalizes city names for Marketplace rou
   assert.equal(inferMarketplaceAreaFromLocation('Seattle, Washington'), 'seattle');
   assert.equal(inferMarketplaceAreaFromLocation('Portland, Oregon'), 'portland');
   assert.equal(inferMarketplaceAreaFromLocation('Los Angeles, California'), 'los-angeles');
+});
+
+test('getMarketplaceLocationOptions exposes selectable city labels', () => {
+  const options = getMarketplaceLocationOptions();
+  const bySlug = new Map(options.map((option) => [option.slug, option]));
+
+  assert.ok(options.length > 75);
+  assert.equal(bySlug.get('vancouver')?.value, 'Vancouver');
+  assert.equal(bySlug.get('vancouver-wa')?.value, 'Vancouver, WA');
+  assert.equal(bySlug.get('ottawa')?.value, 'Ottawa, ON');
+  assert.equal(bySlug.get('nyc')?.value, 'New York, NY');
 });
 
 test('urlMatchesMarketplaceArea recognizes Marketplace area routes', () => {

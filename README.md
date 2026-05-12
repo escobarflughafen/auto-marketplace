@@ -147,6 +147,31 @@ Run a local preflight for the DB-backed headless pipeline:
 npm run marketplace:doctor
 ```
 
+Refresh the persistent Facebook session used by remote/headless workers:
+
+```bash
+npm run marketplace:auth:bootstrap -- --auth-mode credentials --headless
+```
+
+If Facebook requires notification approval, 2FA, or another checkpoint, run the
+bootstrap in a headed browser on the Ubuntu host or refresh the mounted
+`profiles/facebook-marketplace` profile before starting headless workers.
+
+Run collection without requiring Facebook authentication:
+
+```bash
+npm run marketplace:home:collect -- --auth-mode none --once --max-items 15
+npm run marketplace:search:explore -- --auth-mode none --query "nikon d850" --max-items 50 --once
+```
+
+Auth modes shared by homepage collection, search exploration, and backlog
+processing:
+
+- `required`: reuse an already signed-in persistent profile; fail if logged out
+- `credentials`: reuse the profile or log in from `credentials.json`; fail if still logged out
+- `optional`: try profile/credentials, then continue unauthenticated if login fails
+- `none`: skip login checks and browse as a public/unauthenticated session
+
 Backlog processing for homepage-found listings:
 
 ```bash
@@ -221,7 +246,7 @@ That creates an `auto-browser` service user, grants Docker group access, owns `/
 ops/migrate-marketplace-runtime-to-remote.sh --execute --remote-user auto-browser
 ```
 
-See `docs/remote-migration.md` for the full Ubuntu service-user migration process, including the Docker container-name conflict cleanup when moving from `/home/aoi/services/auto-browser` to `/srv/auto-browser/app`.
+See `docs/remote-migration.md` for the full Ubuntu service-user migration process, including Docker container-name conflict cleanup when moving from an older project path to `/srv/auto-browser/app`.
 
 Browse the homepage database in a local web UI:
 
@@ -533,6 +558,8 @@ For `marketplace`:
 
 - `--manual-login`
 - `--user-data-dir ./profiles/facebook-marketplace`
+- `--auth-mode required|credentials|optional|none` for DB-backed commands
+- `--unauthenticated` / `--no-auth` as aliases for `--auth-mode none`
 - `--query "<text>"`
 - `--scrolls <count>`
 - `--loop-seconds <secs>`
@@ -673,10 +700,10 @@ For `marketplace:home:export`:
 - The collector currently assumes the persistent Marketplace profile already has a usable Facebook session.
 - The collector is better for unattended gathering; the interactive workflow is better for observing live behavior.
 - The homepage collector and homepage backlog worker both assume `./profiles/facebook-marketplace` already contains a usable signed-in Marketplace session.
-- The homepage collector can also bootstrap login from `credentials.json` if you pass `--use-credentials`.
+- The homepage collector can also bootstrap login from `credentials.json` if you pass `--use-credentials`. In Docker Compose, place that file at `secrets/credentials.json`.
 
 ## More Detail
 
-For the longer workflow notes, see [WORKFLOW.md](/Users/aoi/Workspaces/auto-browser/WORKFLOW.md).
+For the longer workflow notes, see [WORKFLOW.md](WORKFLOW.md).
 
-For a product and engineering overview of the homepage pipeline, see [docs/marketplace-homepage-pipeline-overview.md](/Users/aoi/Workspaces/auto-browser/docs/marketplace-homepage-pipeline-overview.md).
+For a product and engineering overview of the homepage pipeline, see [docs/marketplace-homepage-pipeline-overview.md](docs/marketplace-homepage-pipeline-overview.md).

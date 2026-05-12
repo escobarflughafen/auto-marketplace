@@ -304,6 +304,16 @@ The collector can run in two ways:
 - reuse an already signed-in persistent browser profile
 - bootstrap login from `credentials.json` when `--use-credentials` is supplied
 
+DB-backed collectors and workers also support explicit auth modes:
+
+- `--auth-mode required`: require an already signed-in persistent profile
+- `--auth-mode credentials`: reuse the profile or log in from credentials
+- `--auth-mode optional`: try auth, then continue without it if login fails
+- `--auth-mode none`: skip auth checks and browse unauthenticated
+
+Use `npm run marketplace:auth:bootstrap -- --auth-mode credentials` to refresh a
+remote persistent profile before running Ubuntu headless workers.
+
 The signed-in runtime identity is inferred from:
 
 - the `c_user` Facebook cookie

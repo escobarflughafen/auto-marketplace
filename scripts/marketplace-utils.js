@@ -14,6 +14,36 @@ const RETRYABLE_NAVIGATION_PATTERNS = [
   /Target page, context or browser has been closed/i,
 ];
 
+function splitChromiumArgs(value) {
+  return String(value || '')
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniqueList(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function defaultChromiumArgs(env = process.env) {
+  const args = [];
+  if (process.platform === 'linux') {
+    args.push('--disable-dev-shm-usage');
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      args.push('--no-sandbox', '--disable-setuid-sandbox');
+    }
+  }
+
+  return uniqueList([...args, ...splitChromiumArgs(env.AUTO_BROWSER_CHROMIUM_ARGS)]);
+}
+
+function buildChromiumLaunchOptions(options = {}, env = process.env) {
+  return {
+    ...options,
+    args: uniqueList([...(options.args || []), ...defaultChromiumArgs(env)]),
+  };
+}
+
 async function ensureDir(dirPath) {
   await fs.promises.mkdir(dirPath, { recursive: true });
 }
@@ -197,6 +227,45 @@ const MARKETPLACE_AREA_SLUGS = new Map([
   ['jacksonville', 'jacksonville'],
   ['new orleans', 'new-orleans'],
 ]);
+
+const MARKETPLACE_LOCATION_LABELS = new Map([
+  ['vancouver-wa', 'Vancouver, WA'],
+  ['montreal', 'Montreal, QC'],
+  ['ottawa', 'Ottawa, ON'],
+  ['calgary', 'Calgary, AB'],
+  ['edmonton', 'Edmonton, AB'],
+  ['toronto', 'Toronto, ON'],
+  ['quebec-city', 'Quebec City, QC'],
+  ['nyc', 'New York, NY'],
+  ['washington-dc', 'Washington, DC'],
+]);
+
+function formatMarketplaceLocationLabel(key, slug) {
+  if (MARKETPLACE_LOCATION_LABELS.has(slug)) {
+    return MARKETPLACE_LOCATION_LABELS.get(slug);
+  }
+
+  return key.split(/\s+/).map((part) => {
+    if (part.length <= 2) {
+      return part.toUpperCase();
+    }
+    return `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`;
+  }).join(' ');
+}
+
+function getMarketplaceLocationOptions() {
+  const seenSlugs = new Set();
+  const options = [];
+  for (const [key, slug] of MARKETPLACE_AREA_SLUGS.entries()) {
+    if (seenSlugs.has(slug)) {
+      continue;
+    }
+    seenSlugs.add(slug);
+    const label = formatMarketplaceLocationLabel(key, slug);
+    options.push({ value: label, label, slug });
+  }
+  return options;
+}
 
 function normalizeAreaLookupKey(value) {
   return cleanText(value)
@@ -1339,8 +1408,11 @@ async function writeListingSnapshot({
 module.exports = {
   buildMarketplaceLocationPatterns,
   buildMarketplaceRadiusPatterns,
+  buildChromiumLaunchOptions,
   createLogger,
+  defaultChromiumArgs,
   ensureDir,
+  getMarketplaceLocationOptions,
   inferMarketplaceAreaFromLocation,
   normalizeRadiusMiles,
   slugify,

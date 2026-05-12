@@ -17,9 +17,17 @@ test('parseArgs reads homepage location flags', () => {
   assert.equal(options.location, 'Ottawa, Ontario');
   assert.equal(options.radiusMiles, 10);
   assert.equal(options.useCredentials, true);
+  assert.equal(options.authMode, 'credentials');
   assert.equal(options.once, true);
   assert.equal(options.maxItems, 5);
   assert.equal(options.startUrl, 'https://www.facebook.com/marketplace/ottawa/');
+});
+
+test('parseArgs supports unauthenticated homepage collection', () => {
+  const options = parseArgs(['--unauthenticated', '--once']);
+
+  assert.equal(options.authMode, 'none');
+  assert.equal(options.useCredentials, false);
 });
 
 test('parseArgs builds homepage route URLs for major city locations', () => {

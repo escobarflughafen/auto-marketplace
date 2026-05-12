@@ -8,7 +8,23 @@ const {
 
 const DEFAULT_MARKETPLACE_URL = 'https://www.facebook.com/marketplace/';
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
-const DEFAULT_CREDENTIALS_PATH = path.join(process.cwd(), 'credentials.json');
+const DEFAULT_CREDENTIALS_PATH = process.env.AUTO_BROWSER_CREDENTIALS_PATH
+  || path.join(process.cwd(), 'credentials.json');
+const AUTH_MODES = new Set(['required', 'credentials', 'optional', 'none']);
+
+function normalizeAuthMode(authMode, useCredentials = false) {
+  const normalized = String(authMode || '').trim().toLowerCase();
+  if (!normalized) {
+    return useCredentials ? 'credentials' : 'required';
+  }
+  if (normalized === 'public' || normalized === 'unauthenticated') {
+    return 'none';
+  }
+  if (!AUTH_MODES.has(normalized)) {
+    throw new Error('Expected --auth-mode to be one of required, credentials, optional, none');
+  }
+  return normalized;
+}
 
 function resolveCredentialsPath(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
   return path.isAbsolute(credentialsPath)
@@ -191,11 +207,13 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
   const {
     startUrl = DEFAULT_MARKETPLACE_URL,
     useCredentials = false,
+    authMode: rawAuthMode = '',
     credentialsPath = DEFAULT_CREDENTIALS_PATH,
     loginTimeoutMs = DEFAULT_LOGIN_TIMEOUT_MS,
     failOnAdditionalVerification = false,
     logger = null,
   } = options;
+  const authMode = normalizeAuthMode(rawAuthMode, useCredentials);
 
   let page = await findLoggedInPage(context);
   if (page) {
@@ -211,6 +229,13 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
     minBodyTextLength: 20,
   });
 
+  if (authMode === 'none') {
+    if (logger) {
+      logger(`auth_mode_none_continue url=${page.url()}`);
+    }
+    return page;
+  }
+
   if (await hasSignedInUserCookie(context) && !await isLoggedOut(page)) {
     if (logger) {
       logger(`session_reuse_success source=navigate_marketplace url=${page.url()}`);
@@ -218,19 +243,29 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
     return page;
   }
 
-  if (!useCredentials) {
+  if (authMode === 'required') {
     throw new Error('Facebook session is logged out. Re-run with --use-credentials or sign in manually in the persistent profile first.');
   }
 
-  const credentials = readCredentials(credentialsPath);
-  if (logger) {
-    logger(`session_reuse_miss action=credential_login credentials_path=${credentials.credentialsPath}`);
+  try {
+    const credentials = readCredentials(credentialsPath);
+    if (logger) {
+      logger(`session_reuse_miss action=credential_login auth_mode=${authMode} credentials_path=${credentials.credentialsPath}`);
+    }
+    return await loginWithCredentials(context, credentials, {
+      loginTimeoutMs,
+      failOnAdditionalVerification: failOnAdditionalVerification && authMode !== 'optional',
+      logger,
+    });
+  } catch (error) {
+    if (authMode !== 'optional') {
+      throw error;
+    }
+    if (logger) {
+      logger(`auth_mode_optional_continue reason="${error.message}" url=${page.url()}`);
+    }
+    return page;
   }
-  return loginWithCredentials(context, credentials, {
-    loginTimeoutMs,
-    failOnAdditionalVerification,
-    logger,
-  });
 }
 
 async function describeFacebookMarketplaceSession(context, page, options = {}) {
@@ -261,6 +296,7 @@ module.exports = {
   DEFAULT_LOGIN_TIMEOUT_MS,
   DEFAULT_CREDENTIALS_PATH,
   readCredentials,
+  normalizeAuthMode,
   hasSignedInUserCookie,
   isFacebookAdditionalVerificationPage,
   ensureFacebookMarketplaceLogin,

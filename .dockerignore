@@ -5,3 +5,6 @@ npm-debug.log
 artifacts
 profiles
 credentials.json
+secrets
+output
+reviews

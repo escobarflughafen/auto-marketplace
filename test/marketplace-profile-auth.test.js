@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   isFacebookAdditionalVerificationPage,
   describeFacebookMarketplaceSession,
+  normalizeAuthMode,
 } = require('../scripts/marketplace-profile-auth');
 
 function mockPage(url, body = '') {
@@ -20,6 +21,14 @@ function mockContext(cookies = []) {
     cookies: async () => cookies,
   };
 }
+
+test('normalizeAuthMode preserves legacy use-credentials behavior', () => {
+  assert.equal(normalizeAuthMode('', false), 'required');
+  assert.equal(normalizeAuthMode('', true), 'credentials');
+  assert.equal(normalizeAuthMode('unauthenticated', false), 'none');
+  assert.equal(normalizeAuthMode('public', false), 'none');
+  assert.throws(() => normalizeAuthMode('invalid', false), /Expected --auth-mode/);
+});
 
 test('additional verification pages are not treated as logged-in sessions', async () => {
   const page = mockPage(

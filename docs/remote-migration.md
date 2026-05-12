@@ -17,8 +17,12 @@ Docker Compose mounts runtime data from:
 ```text
 /srv/auto-browser/app/artifacts
 /srv/auto-browser/app/profiles
-/srv/auto-browser/app/credentials.json
+/srv/auto-browser/app/secrets
 ```
+
+For credential-based login inside the container, copy the local
+`credentials.json` to `/srv/auto-browser/app/secrets/credentials.json`.
+The `secrets/` directory is intentionally excluded from source syncs.
 
 ## One-Time Server Setup
 
@@ -42,8 +46,9 @@ This creates:
 - project dir: `/srv/auto-browser/app`
 - Docker access through the `docker` group
 
-It also copies the existing project from `/home/aoi/services/auto-browser` if
-`/srv/auto-browser/app` is empty.
+It also copies the existing project from the setup command's current working
+directory if `/srv/auto-browser/app` is empty. Override that with
+`--source-project-dir <path>` when needed.
 
 If Docker commands fail for `auto-browser` immediately after setup, start a new
 SSH login session so group membership is refreshed.
@@ -56,8 +61,8 @@ The Compose file uses:
 container_name: auto-browser
 ```
 
-Only one Docker container can use that name. If the old deployment under
-`/home/aoi/services/auto-browser` is still running, the new `/srv` deployment
+Only one Docker container can use that name. If an older deployment under
+another project path is still running, the new `/srv` deployment
 will fail with:
 
 ```text
@@ -68,7 +73,7 @@ Stop the old deployment:
 
 ```bash
 ssh 10.10.20.3
-cd /home/aoi/services/auto-browser
+cd /path/to/old/auto-browser
 docker compose down
 ```
 
@@ -87,12 +92,41 @@ docker compose up -d auto-browser
 docker compose ps auto-browser
 ```
 
+## Remote Authentication
+
+Headless Facebook login can fail on Ubuntu when Facebook asks for notification
+approval, 2FA, or another checkpoint. The intended remote flow is to refresh the
+persistent profile once, then let headless workers reuse it.
+
+Run a credential bootstrap inside the container:
+
+```bash
+cd /srv/auto-browser/app
+docker compose run --rm auto-browser npm run marketplace:auth:bootstrap -- --auth-mode credentials --headless --json
+```
+
+If the bootstrap reports additional verification, complete that challenge in a
+headed browser against the same mounted profile, then rerun the headless worker.
+The profile path is `/srv/auto-browser/app/profiles/facebook-marketplace` on the
+host and `/app/profiles/facebook-marketplace` inside the container.
+
+When authentication is not required for a collection experiment, use
+unauthenticated mode:
+
+```bash
+docker compose run --rm auto-browser npm run marketplace:home:collect -- --auth-mode none --once --max-items 15
+docker compose run --rm auto-browser npm run marketplace:search:explore -- --auth-mode none --query "nikon d850" --once --max-items 50
+```
+
+Unauthenticated mode is best-effort. Facebook may show fewer listings, redirect
+to login, or hide detail pages.
+
 ## Local-To-Remote Migration
 
 Run from the local repo:
 
 ```bash
-cd /Users/aoi/Workspaces/auto-browser
+cd /path/to/auto-browser
 ops/migrate-marketplace-runtime-to-remote.sh --execute --remote-user auto-browser
 ```
 
@@ -110,6 +144,7 @@ It excludes:
 - `.git`
 - `node_modules`
 - `credentials.json`
+- `secrets`
 - `profiles`
 - `output`
 - source-side generated artifacts from the source sync
@@ -161,5 +196,5 @@ For scheduled maintenance, use the Ubuntu systemd templates in `ops/`:
 - `ops/marketplace-db-analyze.service.example`
 - `ops/marketplace-db-analyze.timer.example`
 
-Adjust paths from `/home/aoi/services/auto-browser` to `/srv/auto-browser/app`
+Adjust paths from the previous deployment directory to `/srv/auto-browser/app`
 before installing them.

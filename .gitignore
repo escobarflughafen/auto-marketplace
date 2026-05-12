@@ -2,6 +2,7 @@
 
 # Secrets and local auth
 credentials.json
+secrets/
 playwright/.auth/
 profiles/
 

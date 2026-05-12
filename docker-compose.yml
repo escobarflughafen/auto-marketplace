@@ -5,10 +5,12 @@ services:
     init: true
     restart: unless-stopped
     shm_size: "1gb"
+    environment:
+      AUTO_BROWSER_CREDENTIALS_PATH: /app/secrets/credentials.json
     ports:
       - "21435:21435"
     volumes:
       - ./artifacts:/app/artifacts
       - ./profiles:/app/profiles
-      - ./credentials.json:/app/credentials.json:ro
+      - ./secrets:/app/secrets:ro
     command: ["npm", "run", "marketplace:home:serve", "--", "--host", "0.0.0.0", "--port", "21435"]

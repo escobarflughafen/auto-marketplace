@@ -5,7 +5,7 @@ SERVICE_USER="${SERVICE_USER:-auto-browser}"
 SERVICE_GROUP="${SERVICE_GROUP:-auto-browser}"
 SERVICE_HOME="${SERVICE_HOME:-/srv/auto-browser}"
 PROJECT_DIR="${PROJECT_DIR:-/srv/auto-browser/app}"
-SOURCE_PROJECT_DIR="${SOURCE_PROJECT_DIR:-/home/aoi/services/auto-browser}"
+SOURCE_PROJECT_DIR="${SOURCE_PROJECT_DIR:-$PWD}"
 SSH_AUTHORIZED_KEYS_SOURCE="${SSH_AUTHORIZED_KEYS_SOURCE:-}"
 DOCKER_GROUP="${DOCKER_GROUP:-docker}"
 
@@ -23,7 +23,7 @@ Options:
   --home <path>                 Service home. Default: /srv/auto-browser.
   --project-dir <path>          Project path owned by the user. Default: /srv/auto-browser/app.
   --source-project-dir <path>   Existing project to copy from if project dir is empty.
-                                Default: /home/aoi/services/auto-browser.
+                                Default: current working directory.
   --authorized-keys <path>      Copy SSH authorized_keys from this file.
   --no-authorized-keys          Do not copy SSH authorized_keys.
   --help                        Show this help.
@@ -133,8 +133,6 @@ if [[ "$COPY_AUTHORIZED_KEYS" -eq 1 ]]; then
   if [[ -z "$SSH_AUTHORIZED_KEYS_SOURCE" ]]; then
     if [[ -n "${SUDO_USER:-}" && -f "/home/${SUDO_USER}/.ssh/authorized_keys" ]]; then
       SSH_AUTHORIZED_KEYS_SOURCE="/home/${SUDO_USER}/.ssh/authorized_keys"
-    elif [[ -f "/home/aoi/.ssh/authorized_keys" ]]; then
-      SSH_AUTHORIZED_KEYS_SOURCE="/home/aoi/.ssh/authorized_keys"
     fi
   fi
 
