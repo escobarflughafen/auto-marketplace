@@ -240,13 +240,33 @@ For a least-privileged Ubuntu deployment user, copy and run this once on the ser
 sudo ops/ubuntu-create-auto-browser-user.sh
 ```
 
-That creates an `auto-browser` service user, grants Docker group access, owns `/srv/auto-browser/app`, and does not grant passwordless sudo. After that, migrate from local as the service user:
+That creates an `auto-browser` service user, grants Docker group access, owns `/srv/auto-browser/app`, and does not grant passwordless sudo.
+
+For a fresh Ubuntu host, use the deployment bootstrap instead after the project
+files are present on the server:
+
+```bash
+sudo ops/ubuntu-deploy-auto-browser.sh
+```
+
+It installs/verifies Docker Engine and the Compose plugin, creates the service
+user and runtime directories, builds/starts the Compose service, waits for the
+HTTP API, runs `marketplace:doctor` in the container, and runs SQLite
+maintenance. Pass `--credentials-source /path/to/credentials.json` to install
+the credential file into `secrets/credentials.json`.
+
+Once the server bootstrap/user setup is complete, migrate from local as the
+service user:
 
 ```bash
 ops/migrate-marketplace-runtime-to-remote.sh --execute --remote-user auto-browser
 ```
 
-See `docs/remote-migration.md` for the full Ubuntu service-user migration process, including Docker container-name conflict cleanup when moving from an older project path to `/srv/auto-browser/app`.
+The migration script also performs a remote preflight, health check, container
+doctor, and DB maintenance after restart. See `docs/remote-migration.md` for the
+full Ubuntu service-user migration process, including Docker container-name
+conflict cleanup when moving from an older project path to
+`/srv/auto-browser/app`.
 
 Browse the homepage database in a local web UI:
 

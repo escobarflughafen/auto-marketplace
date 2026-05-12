@@ -12,6 +12,9 @@ SYNC_RUNTIME=1
 RESTART_SERVICE=1
 RUN_REMOTE_MAINTENANCE=1
 REMOTE_BACKUP=1
+RUN_REMOTE_PREFLIGHT=1
+RUN_REMOTE_DOCTOR=1
+RUN_REMOTE_HEALTHCHECK=1
 
 usage() {
   cat <<'USAGE'
@@ -28,6 +31,9 @@ Options:
   --skip-source               Do not sync source code.
   --skip-runtime              Do not sync artifacts/marketplace-homepage.
   --skip-restart              Do not rebuild/restart docker compose service.
+  --skip-remote-preflight     Do not verify remote Docker/Compose/runtime dirs before restart.
+  --skip-remote-doctor        Do not run marketplace:doctor in the remote container after restart.
+  --skip-healthcheck          Do not wait for the remote HTTP health endpoint after restart.
   --skip-remote-maintenance   Do not run DB optimize/checkpoint on remote after restart.
   --no-remote-backup          Do not create a timestamped remote artifacts backup.
   --help                      Show this help.
@@ -70,6 +76,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-restart)
       RESTART_SERVICE=0
+      shift
+      ;;
+    --skip-remote-preflight)
+      RUN_REMOTE_PREFLIGHT=0
+      shift
+      ;;
+    --skip-remote-doctor)
+      RUN_REMOTE_DOCTOR=0
+      shift
+      ;;
+    --skip-healthcheck)
+      RUN_REMOTE_HEALTHCHECK=0
       shift
       ;;
     --skip-remote-maintenance)
@@ -127,10 +145,10 @@ if [[ "$SYNC_RUNTIME" -eq 1 && "$EXECUTE" -eq 1 ]]; then
 fi
 
 if [[ "$EXECUTE" -eq 1 ]]; then
-  log "ensuring remote project and artifacts directories exist"
-  ssh "$REMOTE" "mkdir -p '$REMOTE_DIR/artifacts'"
+  log "ensuring remote project/runtime directories exist"
+  ssh "$REMOTE" "mkdir -p '$REMOTE_DIR/artifacts/marketplace-homepage' '$REMOTE_DIR/profiles/facebook-marketplace' '$REMOTE_DIR/secrets'"
 else
-  run_or_print ssh "$REMOTE" "mkdir -p '$REMOTE_DIR/artifacts'"
+  run_or_print ssh "$REMOTE" "mkdir -p '$REMOTE_DIR/artifacts/marketplace-homepage' '$REMOTE_DIR/profiles/facebook-marketplace' '$REMOTE_DIR/secrets'"
 fi
 
 if [[ "$SYNC_RUNTIME" -eq 1 && "$REMOTE_BACKUP" -eq 1 ]]; then
@@ -164,9 +182,24 @@ if [[ "$SYNC_RUNTIME" -eq 1 ]]; then
     artifacts/marketplace-homepage/ "$REMOTE:$REMOTE_DIR/artifacts/marketplace-homepage/"
 fi
 
+if [[ "$RUN_REMOTE_PREFLIGHT" -eq 1 ]]; then
+  log "running remote deployment preflight"
+  run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && test -f package.json && test -f Dockerfile && test -f docker-compose.yml && mkdir -p artifacts/marketplace-homepage profiles/facebook-marketplace secrets && if docker compose version >/dev/null 2>&1; then docker compose config --quiet; elif command -v docker-compose >/dev/null 2>&1; then docker-compose config --quiet; else echo 'Docker Compose is not available. Run sudo ops/ubuntu-deploy-auto-browser.sh on the server to install prerequisites.' >&2; exit 127; fi"
+fi
+
 if [[ "$RESTART_SERVICE" -eq 1 ]]; then
   log "rebuilding and restarting remote docker service"
   run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose build auto-browser && docker compose up -d auto-browser; elif command -v docker-compose >/dev/null 2>&1; then docker-compose build auto-browser && docker-compose up -d auto-browser; else echo 'Docker Compose is not available' >&2; exit 127; fi"
+fi
+
+if [[ "$RUN_REMOTE_HEALTHCHECK" -eq 1 && "$RESTART_SERVICE" -eq 1 ]]; then
+  log "waiting for remote HTTP health endpoint"
+  run_or_print ssh "$REMOTE" "if command -v curl >/dev/null 2>&1; then HEALTH_FETCH='curl -fsS'; elif command -v wget >/dev/null 2>&1; then HEALTH_FETCH='wget -qO-'; else echo 'curl or wget is required for the remote health check. Run sudo ops/ubuntu-deploy-auto-browser.sh on the server or pass --skip-healthcheck.' >&2; exit 127; fi; for i in \$(seq 1 30); do if \$HEALTH_FETCH 'http://127.0.0.1:21435/api/summary' >/dev/null; then exit 0; fi; sleep 2; done; cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose logs --tail=120 auto-browser; elif command -v docker-compose >/dev/null 2>&1; then docker-compose logs --tail=120 auto-browser; fi; exit 1"
+fi
+
+if [[ "$RUN_REMOTE_DOCTOR" -eq 1 && "$RESTART_SERVICE" -eq 1 ]]; then
+  log "running remote marketplace doctor inside container"
+  run_or_print ssh "$REMOTE" "cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose exec -T auto-browser npm run marketplace:doctor -- --json; elif command -v docker-compose >/dev/null 2>&1; then docker-compose exec -T auto-browser npm run marketplace:doctor -- --json; else echo 'Docker Compose is not available' >&2; exit 127; fi"
 fi
 
 if [[ "$RUN_REMOTE_MAINTENANCE" -eq 1 ]]; then

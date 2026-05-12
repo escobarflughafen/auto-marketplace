@@ -26,6 +26,33 @@ The `secrets/` directory is intentionally excluded from source syncs.
 
 ## One-Time Server Setup
 
+For a fresh Ubuntu host, copy the repo to `/srv/auto-browser/app` or run the
+source sync from the local migration script, then run:
+
+```bash
+cd /srv/auto-browser/app
+sudo ops/ubuntu-deploy-auto-browser.sh
+```
+
+This installs/verifies Docker Engine and the Compose plugin, creates the
+`auto-browser` service user, prepares `artifacts/`, `profiles/`, `secrets/`,
+and `backups/`, builds and starts the container, waits for
+`http://127.0.0.1:21435/api/summary`, runs `marketplace:doctor` in the
+container, and runs SQLite maintenance. If credentials are available on the
+server, install them during setup:
+
+```bash
+sudo ops/ubuntu-deploy-auto-browser.sh --credentials-source /path/to/credentials.json
+```
+
+If Docker is already installed and you only want verification/startup checks:
+
+```bash
+sudo ops/ubuntu-deploy-auto-browser.sh --no-install-docker
+```
+
+The older narrower setup script only creates the service user and directories:
+
 From local:
 
 ```bash
@@ -136,7 +163,10 @@ The migration script:
 - backs up remote `artifacts/marketplace-homepage`
 - syncs source to `/srv/auto-browser/app`
 - syncs local `artifacts/marketplace-homepage` to the remote runtime directory
+- verifies remote project files, runtime directories, and Docker Compose
 - rebuilds/restarts Docker Compose
+- waits for the HTTP API health endpoint
+- runs `marketplace:doctor` inside the container
 - runs remote DB maintenance/checkpoint
 
 It excludes:
