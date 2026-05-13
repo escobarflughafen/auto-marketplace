@@ -16,6 +16,7 @@ const store = {
   credentials: null,
   workflowSignature: '',
   processSignature: '',
+  workerDetailSignature: '',
 };
 
 const els = {
@@ -25,7 +26,7 @@ const els = {
   workflowSelect: document.getElementById('workflowSelect'),
   workflowForm: document.getElementById('workflowForm'),
   workflowArgsPreview: document.getElementById('workflowArgsPreview'),
-  themeSelect: document.getElementById('themeSelect'),
+  settingsContent: document.getElementById('settingsContent'),
 };
 
 function normalizeTheme(value) {
@@ -36,8 +37,9 @@ function setTheme(value) {
   const theme = normalizeTheme(value);
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('marketplace-monitor-theme', theme);
-  if (els.themeSelect) {
-    els.themeSelect.value = theme;
+  const themeSelect = document.getElementById('themeSelect');
+  if (themeSelect) {
+    themeSelect.value = theme;
   }
 }
 
@@ -240,6 +242,29 @@ function renderCredentialManager() {
     + '</section>';
 }
 
+function renderSettings() {
+  if (!els.settingsContent) {
+    return;
+  }
+
+  const currentTheme = normalizeTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
+  els.settingsContent.innerHTML = '<section class="settings-section">'
+    + '<div class="worker-control-section-title">Display</div>'
+    + '<div class="settings-grid">'
+    + '<label class="settings-field" for="themeSelect">Style<select id="themeSelect">'
+    + `<option value="parasols"${currentTheme === 'parasols' ? ' selected' : ''}>Parasols</option>`
+    + `<option value="classic"${currentTheme === 'classic' ? ' selected' : ''}>Classic</option>`
+    + '</select></label>'
+    + '</div>'
+    + '</section>'
+    + renderCredentialManager();
+
+  document.getElementById('themeSelect')?.addEventListener('change', (event) => {
+    setTheme(event.target.value);
+  });
+  bindCredentialManager();
+}
+
 function renderWorkflowForm() {
   const workflow = selectedWorkflow();
   if (!workflow) {
@@ -278,7 +303,6 @@ function renderWorkerControl() {
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker Control</div><div class="process-meta">Draft settings are kept per workflow type.</div></div>'
     + '</div>'
-    + renderCredentialManager()
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
     + '<div class="worker-control-section-title">Workflow Settings</div>'
@@ -317,7 +341,6 @@ function renderWorkerControl() {
   document.getElementById('workerControlStartButton').addEventListener('click', () => document.getElementById('startWorkflowButton').click());
   document.getElementById('workerControlRefreshButton').addEventListener('click', () => document.getElementById('refreshWorkflowsButton').click());
   document.getElementById('workerControlReconcileButton').addEventListener('click', () => document.getElementById('reconcileWorkflowsButton').click());
-  bindCredentialManager();
 }
 
 function fillCredentialForm(profile) {
@@ -339,7 +362,7 @@ function fillCredentialForm(profile) {
 async function loadCredentials(options = {}) {
   store.credentials = await fetchJson('/api/credentials');
   if (options.render !== false) {
-    renderWorkflowForm();
+    renderSettings();
   }
 }
 
@@ -381,6 +404,7 @@ function bindCredentialManager() {
       });
       if (status) status.textContent = 'Credential saved.';
       await loadCredentials({ render: false });
+      renderSettings();
       await loadWorkflows();
     } catch (error) {
       alert(error.message || 'Failed to save credential');
@@ -400,6 +424,7 @@ function bindCredentialManager() {
       });
       if (status) status.textContent = 'Active credential updated.';
       await loadCredentials({ render: false });
+      renderSettings();
       await loadWorkflows();
     } catch (error) {
       alert(error.message || 'Failed to set active credential');
@@ -526,6 +551,7 @@ function renderProcesses(options = {}) {
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
+    store.workerDetailSignature = '';
   }
   const rows = store.processes.map((proc) => {
     const running = proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping';
@@ -577,6 +603,7 @@ function renderProcesses(options = {}) {
       store.workerDetailProcess = null;
       store.workerDetailStats = null;
       store.workerDetailEvents = [];
+      store.workerDetailSignature = '';
       renderProcesses();
     });
   }
@@ -587,6 +614,7 @@ function renderProcesses(options = {}) {
       store.workerDetailProcess = null;
       store.workerDetailStats = null;
       store.workerDetailEvents = [];
+      store.workerDetailSignature = '';
       renderProcesses();
     });
   }
@@ -661,6 +689,64 @@ function workerEventDetail(event) {
   ].filter(Boolean).join(' · ');
 }
 
+function workerDetailRenderSignature(process, stats, events) {
+  const screenshots = process?.screenshots || [];
+  return JSON.stringify({
+    id: process?.id || '',
+    status: process?.status || '',
+    pid: process?.pid || '',
+    osAlive: Boolean(process?.osAlive),
+    logCount: process?.logCount || 0,
+    runtimeStats: process?.runtimeStats || null,
+    eventStats: process?.eventStats || null,
+    stats: stats ? {
+      total: stats.total || 0,
+      done: stats.done || 0,
+      skipped: stats.skipped || 0,
+      error: stats.error || 0,
+      started: stats.started || 0,
+      latestEventId: stats.latestEvent?.id || stats.latestEvent?.event_at || '',
+      latestPreviewEventId: stats.latestPreviewEvent?.id || stats.latestPreviewEvent?.event_at || '',
+    } : null,
+    events: (events || []).map((event) => `${event.id || event.event_at}:${event.event_type}:${event.status}`),
+    latestScreenshot: screenshots[0]?.name || screenshots[0]?.url || '',
+    screenshotCount: screenshots.length,
+  });
+}
+
+function renderWorkerScreenshotHistory(selectedProcess) {
+  const screenshots = selectedProcess?.screenshots || [];
+  if (!screenshots.length) {
+    return '<div class="empty-state">No worker screenshots captured yet.</div>';
+  }
+
+  const latest = screenshots[0];
+  const thumbs = screenshots.slice(0, 24).map((shot, index) => (
+    `<a class="worker-shot-thumb${index === 0 ? ' active' : ''}" href="${html(shot.url)}" target="_blank" rel="noreferrer" title="${html(formatDate(shot.capturedAt))}">`
+      + `<img src="${html(shot.url)}" alt="Worker screenshot ${html(index + 1)}">`
+      + `<span>${html(formatDate(shot.capturedAt))}</span>`
+    + '</a>'
+  )).join('');
+
+  return '<div class="worker-live-screen-grid">'
+    + '<div class="worker-live-screen-frame">'
+    + `<a href="${html(latest.url)}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(latest.url)}" alt="Latest live worker screenshot"></a>`
+    + '</div>'
+    + '<div class="worker-live-screen-side">'
+    + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>'
+    + tableRows([
+      ['Latest', formatDate(latest.capturedAt)],
+      ['History', screenshots.length],
+      ['File', latest.name || ''],
+    ])
+    + '</tbody></table></div>'
+    + '<div class="worker-shot-strip">'
+    + thumbs
+    + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
 function renderWorkerDetail(selectedProcess) {
   const stats = workerStats(selectedProcess);
   const logs = (selectedProcess?.logs || []).slice(-120);
@@ -704,6 +790,7 @@ function renderWorkerDetail(selectedProcess) {
       + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + statusRows + '</tbody></table></div>'
       + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + countRows + '</tbody></table></div>'
       + '</div>'),
+    workerDetailSectionRow('Live Screen', renderWorkerScreenshotHistory(selectedProcess)),
   ];
 
   if (previewEvent) {
@@ -787,13 +874,15 @@ function renderWorkerDetail(selectedProcess) {
 
 async function loadWorkerDetail(options = {}) {
   const render = options.render !== false;
+  const onlyIfChanged = options.onlyIfChanged === true;
   const selectedProcess = activeProcess();
   if (!selectedProcess) {
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
+    store.workerDetailSignature = '';
     if (render) {
-      renderProcesses();
+      renderProcesses({ preserveScroll: options.preserveScroll });
     }
     return;
   }
@@ -807,8 +896,15 @@ async function loadWorkerDetail(options = {}) {
   store.workerDetailProcess = detailPayload.process || selectedProcess;
   store.workerDetailStats = statsPayload.stats || null;
   store.workerDetailEvents = eventsPayload.events || [];
-  if (render) {
-    renderProcesses();
+  const nextSignature = workerDetailRenderSignature(
+    store.workerDetailProcess,
+    store.workerDetailStats,
+    store.workerDetailEvents,
+  );
+  const changed = nextSignature !== store.workerDetailSignature;
+  store.workerDetailSignature = nextSignature;
+  if (render && (!onlyIfChanged || changed)) {
+    renderProcesses({ preserveScroll: options.preserveScroll });
   }
 }
 
@@ -842,7 +938,11 @@ async function loadWorkflows(options = {}) {
     renderProcesses({ preserveScroll: background });
   }
   if (store.selectedProcessId) {
-    await loadWorkerDetail({ render: !background });
+    await loadWorkerDetail({
+      render: true,
+      preserveScroll: background,
+      onlyIfChanged: background,
+    });
   }
 }
 
@@ -854,15 +954,13 @@ function syncWorkflowsInBackground() {
 
 function bindEvents() {
   setTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
-  els.themeSelect?.addEventListener('change', () => {
-    setTheme(els.themeSelect.value);
-  });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !store.selectedProcessId) return;
     store.selectedProcessId = '';
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
+    store.workerDetailSignature = '';
     renderProcesses();
   });
   for (const tab of document.querySelectorAll('.tab')) {
@@ -906,6 +1004,7 @@ await listingsViewer.loadQueryFields();
 await listingsViewer.loadResolveQueue();
 await listingsViewer.loadRows();
 await loadCredentials({ render: false });
+renderSettings();
 await loadWorkflows();
 setInterval(loadSummary, 10000);
 setInterval(syncWorkflowsInBackground, 5000);

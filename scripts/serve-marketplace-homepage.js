@@ -43,6 +43,7 @@ const {
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
+const WORKER_SCREENSHOT_ROOT = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots');
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
 const MARKETPLACE_LOCATION_OPTIONS = getMarketplaceLocationOptions();
 const AUTH_MODE_FIELD = {
@@ -1108,6 +1109,41 @@ function enrichEventPaths(event) {
   };
 }
 
+function safeWorkerPathSegment(workerId) {
+  return String(workerId || 'worker')
+    .replace(/[^a-z0-9_.-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 160) || 'worker';
+}
+
+function listWorkerScreenshots(workerId, options = {}) {
+  const limit = options.limit || 100;
+  const directory = path.join(WORKER_SCREENSHOT_ROOT, safeWorkerPathSegment(workerId));
+  let entries = [];
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+
+  return entries
+    .filter((entry) => entry.isFile() && /\.png$/i.test(entry.name))
+    .map((entry) => {
+      const filePath = path.join(directory, entry.name);
+      const stat = fs.statSync(filePath);
+      return {
+        name: entry.name,
+        path: filePath,
+        url: formatPathLink(filePath),
+        capturedAt: stat.mtime.toISOString(),
+        size: stat.size,
+      };
+    })
+    .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))
+    .slice(0, limit);
+}
+
 function createServer(options) {
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
 
@@ -1362,11 +1398,13 @@ function createServer(options) {
         writeJson(response, 404, { error: `Unknown workflow run: ${workerId}` });
         return;
       }
+      const processRecord = publicWorkflowRunRecordWithStats(db, run, {
+        includeLogs: true,
+        includeLatestEvents: true,
+      });
+      processRecord.screenshots = listWorkerScreenshots(workerId);
       writeJson(response, 200, {
-        process: publicWorkflowRunRecordWithStats(db, run, {
-          includeLogs: true,
-          includeLatestEvents: true,
-        }),
+        process: processRecord,
       });
       return;
     }

@@ -13,6 +13,9 @@ const {
   computeJitteredPollMs,
   shouldDelayBetweenItems,
   isFatalBrowserContextError,
+  safeWorkerPathSegment,
+  workerScreenshotDirectory,
+  pruneWorkerScreenshots,
 } = require('../scripts/process-marketplace-homepage-backlog');
 
 test('parseArgs enables drain mode for backlog resolution', () => {
@@ -37,6 +40,9 @@ test('parseArgs enables drain mode for backlog resolution', () => {
     '--credentials-path', 'tmp/creds.json',
     '--credentials-profile', 'agent-account',
     '--login-timeout-seconds', '45',
+    '--worker-screenshot-dir', 'tmp/screens',
+    '--worker-screenshot-interval-seconds', '10',
+    '--worker-screenshot-history-limit', '100',
   ]);
 
   assert.equal(options.drain, true);
@@ -61,6 +67,34 @@ test('parseArgs enables drain mode for backlog resolution', () => {
   assert.equal(options.credentialsPath, 'tmp/creds.json');
   assert.equal(options.credentialsProfile, 'agent-account');
   assert.equal(options.loginTimeoutMs, 45000);
+  assert.equal(options.workerScreenshotDir, 'tmp/screens');
+  assert.equal(options.workerScreenshotIntervalSeconds, 10);
+  assert.equal(options.workerScreenshotHistoryLimit, 100);
+});
+
+test('worker screenshot directory uses safe worker path segment', () => {
+  const options = parseArgs([
+    '--worker-id', 'backlog worker / 1',
+    '--worker-screenshot-dir', 'tmp/screens',
+  ]);
+
+  assert.equal(safeWorkerPathSegment(options.workerId), 'backlog-worker-1');
+  assert.equal(workerScreenshotDirectory(options), path.join(process.cwd(), 'tmp/screens/backlog-worker-1'));
+});
+
+test('pruneWorkerScreenshots keeps newest screenshots', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marketplace-worker-shots-'));
+  const files = ['old.png', 'middle.png', 'new.png'];
+  for (const [index, name] of files.entries()) {
+    const filePath = path.join(tempDir, name);
+    fs.writeFileSync(filePath, name, 'utf8');
+    const time = new Date(Date.UTC(2026, 4, 12, 0, 0, index));
+    fs.utimesSync(filePath, time, time);
+  }
+
+  await pruneWorkerScreenshots(tempDir, 2);
+
+  assert.deepEqual(fs.readdirSync(tempDir).sort(), ['middle.png', 'new.png']);
 });
 
 test('parseArgs supports unauthenticated backlog processing', () => {

@@ -23,13 +23,6 @@
           <div class="sub">Browse collected rows, watch queue state, and manage Marketplace workers.</div>
         </div>
       </div>
-      <label class="theme-field" for="themeSelect">
-        <span>Style</span>
-        <select id="themeSelect">
-          <option value="parasols">Parasols</option>
-          <option value="classic">Classic</option>
-        </select>
-      </label>
     </section>
 
     <section class="workspace-surface">
@@ -49,6 +42,7 @@
       <nav class="tabs workspace-row">
         <button type="button" class="tab active" data-panel="listingsPanel">Listings</button>
         <button type="button" class="tab" data-panel="opsPanel">Workers</button>
+        <button type="button" class="tab" data-panel="settingsPanel">Settings</button>
       </nav>
 
       <section class="panel active" id="listingsPanel">
@@ -253,6 +247,10 @@
         <button type="button" class="secondary" id="reconcileWorkflowsButton" hidden>OS Check</button>
         <div id="processList" class="process-list"></div>
       </div>
+      </section>
+
+      <section class="panel" id="settingsPanel">
+        <div id="settingsContent" class="settings-content"></div>
       </section>
     </section>
   </div>

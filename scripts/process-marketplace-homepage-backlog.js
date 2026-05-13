@@ -94,6 +94,9 @@ function parseArgs(argv) {
     dbPath: DEFAULT_DB_PATH,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     captureDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'details'),
+    workerScreenshotDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots'),
+    workerScreenshotIntervalSeconds: 10,
+    workerScreenshotHistoryLimit: 100,
     logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'homepage-backlog.log'),
     pollIntervalSeconds: 15,
     pollJitterMin: 1,
@@ -140,6 +143,18 @@ function parseArgs(argv) {
         break;
       case '--capture-dir':
         options.captureDir = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--worker-screenshot-dir':
+        options.workerScreenshotDir = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--worker-screenshot-interval-seconds':
+        options.workerScreenshotIntervalSeconds = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--worker-screenshot-history-limit':
+        options.workerScreenshotHistoryLimit = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
         index += 1;
         break;
       case '--log-file':
@@ -331,6 +346,98 @@ async function appendLog(logFile, message) {
   process.stdout.write(line);
   await ensureDir(path.dirname(logFile));
   await fs.promises.appendFile(logFile, line, 'utf8');
+}
+
+function safeWorkerPathSegment(workerId) {
+  return String(workerId || 'worker')
+    .replace(/[^a-z0-9_.-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 160) || 'worker';
+}
+
+function workerScreenshotDirectory(options) {
+  const rootDir = path.isAbsolute(options.workerScreenshotDir)
+    ? options.workerScreenshotDir
+    : path.join(process.cwd(), options.workerScreenshotDir);
+  return path.join(rootDir, safeWorkerPathSegment(options.workerId));
+}
+
+async function pruneWorkerScreenshots(directory, historyLimit) {
+  if (historyLimit <= 0) {
+    return;
+  }
+
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+
+  const screenshots = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.png$/i.test(entry.name)) {
+      continue;
+    }
+    const filePath = path.join(directory, entry.name);
+    const stat = await fs.promises.stat(filePath).catch(() => null);
+    if (stat) {
+      screenshots.push({ filePath, mtimeMs: stat.mtimeMs });
+    }
+  }
+
+  screenshots.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  await Promise.all(screenshots.slice(historyLimit).map((item) => (
+    fs.promises.unlink(item.filePath).catch(() => {})
+  )));
+}
+
+async function captureWorkerScreenshot(page, options) {
+  if (!page || page.isClosed()) {
+    return '';
+  }
+
+  const directory = workerScreenshotDirectory(options);
+  await ensureDir(directory);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filePath = path.join(directory, `${timestamp}.png`);
+  await page.screenshot({ path: filePath, fullPage: false });
+  await pruneWorkerScreenshots(directory, options.workerScreenshotHistoryLimit);
+  return filePath;
+}
+
+function startWorkerScreenshotMonitor(options, lifecycle) {
+  const intervalSeconds = Number(options.workerScreenshotIntervalSeconds || 0);
+  if (intervalSeconds <= 0 || options.workerScreenshotHistoryLimit <= 0) {
+    return () => {};
+  }
+
+  let busy = false;
+  let stopped = false;
+  const intervalMs = intervalSeconds * 1000;
+  const tick = async () => {
+    if (stopped || busy || lifecycle.shutdownRequested) {
+      return;
+    }
+    busy = true;
+    try {
+      await captureWorkerScreenshot(lifecycle.currentPage, options);
+    } catch (error) {
+      await appendLog(
+        options.logFile,
+        `worker_screenshot_error error="${error instanceof Error ? error.message : String(error)}"`,
+      );
+    } finally {
+      busy = false;
+    }
+  };
+  const timer = setInterval(tick, intervalMs);
+  tick().catch(() => {});
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 async function captureListingRecord(context, page, listing, captureDir) {
@@ -550,6 +657,7 @@ async function processBatch(page, db, options, state = {}) {
   let processedCount = 0;
   let attemptedCount = 0;
   const lifecycle = state.lifecycle || {};
+  lifecycle.currentPage = activePage;
   const remainingLimit = Number.isFinite(state.remainingLimit) ? state.remainingLimit : Infinity;
   const batchLimit = Math.min(options.batchSize, remainingLimit);
 
@@ -574,6 +682,7 @@ async function processBatch(page, db, options, state = {}) {
     try {
       const capture = await captureListingRecord(activePage.context(), activePage, listing, options.captureDir);
       activePage = capture.page;
+      lifecycle.currentPage = activePage;
       const content = buildDetailEventContent(listing, capture.detailRecord, options.workerId);
       const contentHash = contentHashForDetailEvent(content);
       const previousSuccess = getLatestListingEvent(db, listing.listing_id, {
@@ -878,10 +987,11 @@ function installShutdownHandlers(db, options, lifecycle) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(options.captureDir);
+  await ensureDir(options.workerScreenshotDir);
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials}`,
+    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -890,10 +1000,12 @@ async function main() {
     signal: '',
     activeListing: null,
     context: null,
+    currentPage: null,
     wakeShutdown: null,
   };
   const uninstallShutdownHandlers = installShutdownHandlers(db, options, lifecycle);
   let context = null;
+  let stopScreenshotMonitor = () => {};
   try {
     if (options.listingIds.length > 0) {
       options.listingIdTable = installListingIdTempTable(db, options.listingIds);
@@ -940,6 +1052,8 @@ async function main() {
       failOnAdditionalVerification: options.headless,
       logger: (message) => appendLog(options.logFile, message),
     });
+    lifecycle.currentPage = page;
+    stopScreenshotMonitor = startWorkerScreenshotMonitor(options, lifecycle);
     const sessionSummary = await describeFacebookMarketplaceSession(context, page, {
       credentialsPath: options.credentialsPath,
       credentialsProfile: options.credentialsProfile,
@@ -1059,6 +1173,7 @@ async function main() {
     throw error;
   } finally {
     uninstallShutdownHandlers();
+    stopScreenshotMonitor();
     if (context) {
       appendWorkflowLifecycleEvent(db, options, 'browser_context_closing', {
         status: 'stopping',
@@ -1091,4 +1206,7 @@ module.exports = {
   shouldDelayBetweenItems,
   isFatalBrowserContextError,
   appendWorkflowLifecycleEvent,
+  safeWorkerPathSegment,
+  workerScreenshotDirectory,
+  pruneWorkerScreenshots,
 };
