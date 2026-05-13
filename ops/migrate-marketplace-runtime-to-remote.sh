@@ -194,7 +194,7 @@ fi
 
 if [[ "$RUN_REMOTE_HEALTHCHECK" -eq 1 && "$RESTART_SERVICE" -eq 1 ]]; then
   log "waiting for remote HTTP health endpoint"
-  run_or_print ssh "$REMOTE" "if command -v curl >/dev/null 2>&1; then HEALTH_FETCH='curl -fsS'; elif command -v wget >/dev/null 2>&1; then HEALTH_FETCH='wget -qO-'; else echo 'curl or wget is required for the remote health check. Run sudo ops/ubuntu-deploy-auto-browser.sh on the server or pass --skip-healthcheck.' >&2; exit 127; fi; for i in \$(seq 1 30); do if \$HEALTH_FETCH 'http://127.0.0.1:21435/api/summary' >/dev/null; then exit 0; fi; sleep 2; done; cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose logs --tail=120 auto-browser; elif command -v docker-compose >/dev/null 2>&1; then docker-compose logs --tail=120 auto-browser; fi; exit 1"
+  run_or_print ssh "$REMOTE" "if command -v curl >/dev/null 2>&1; then HEALTH_FETCH='curl -fsS'; elif command -v wget >/dev/null 2>&1; then HEALTH_FETCH='wget -qO-'; else echo 'curl or wget is required for the remote health check. Run sudo ops/ubuntu-deploy-auto-browser.sh on the server or pass --skip-healthcheck.' >&2; exit 127; fi; for i in \$(seq 1 30); do if \$HEALTH_FETCH 'http://127.0.0.1:21435/healthz' >/dev/null; then exit 0; fi; sleep 2; done; cd '$REMOTE_DIR' && if docker compose version >/dev/null 2>&1; then docker compose logs --tail=120 auto-browser; elif command -v docker-compose >/dev/null 2>&1; then docker-compose logs --tail=120 auto-browser; fi; exit 1"
 fi
 
 if [[ "$RUN_REMOTE_DOCTOR" -eq 1 && "$RESTART_SERVICE" -eq 1 ]]; then

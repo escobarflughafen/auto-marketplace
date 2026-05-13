@@ -1224,6 +1224,14 @@ function createServer(options) {
       ? accessForRequest(options, request, requestUrl)
       : { role: 'public', canWrite: false };
 
+    if (requestUrl.pathname === '/healthz') {
+      writeJson(response, 200, {
+        ok: true,
+        service: 'marketplace-homepage-monitor',
+      });
+      return;
+    }
+
     if (requestUrl.pathname === '/') {
       serveStaticFrontend(response, 'index.html');
       return;
