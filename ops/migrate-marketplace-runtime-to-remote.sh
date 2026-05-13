@@ -171,6 +171,7 @@ if [[ "$SYNC_SOURCE" -eq 1 ]]; then
     --exclude output \
     --exclude credentials.json \
     --exclude secrets \
+    --exclude .env \
     --exclude .DS_Store \
     ./ "$REMOTE:$REMOTE_DIR/"
 fi
