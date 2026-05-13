@@ -277,6 +277,8 @@ npm run marketplace:home:serve
 The management UI is served from `frontend/marketplace-monitor/`; `scripts/serve-marketplace-homepage.js` provides the API, static file serving, Tabulator assets, and managed worker process controls.
 The UI keeps workflow drafts client-side, separates static workflow definitions from polling state, and exposes worker audit views from `listing_events`. Selecting a worker opens an exclusive detail view with a status table, grouped done/skipped/error/started event tables, text history, and the latest worker POV screenshot when available.
 
+At startup the monitor issues an admin URL and a read-only URL unless tokens are provided with `MARKETPLACE_MONITOR_ADMIN_TOKEN` and `MARKETPLACE_MONITOR_READONLY_TOKEN` or with `--admin-token` and `--read-only-token`. The frontend carries the `?token=...` query parameter into API calls. API clients may also use `X-API-Token` or `Authorization: Bearer <token>`.
+
 Export all homepage DB rows to JSON:
 
 ```bash

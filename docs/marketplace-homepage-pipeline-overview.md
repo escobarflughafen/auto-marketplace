@@ -197,6 +197,32 @@ npm run marketplace:home:serve
 The browser UI lives in `frontend/marketplace-monitor/` and uses the Node server as an API/process-management backend. Workflow form state is kept client-side per worker type so operator settings survive switching between workflows. The Worker Control panel is split into workflow settings and command preview/actions. The worker overview stays visible below it, and selecting a worker opens a centered detail view with status, preview, event tables, and text history.
 Managed backlog workers are started with their workflow run id as `--worker-id`, so `listing_events` can be used as a per-worker audit log. The worker detail view groups those events into done, skipped, errors, and started, and shows the latest screenshot as a live POV preview when available. Legacy `pid-*` event rows are linked to workflow runs by overlapping listing IDs in run logs.
 
+The monitor API uses two access tokens:
+
+- an admin token that can read data, mutate the resolve queue, manage credentials, and start/stop workers;
+- a read-only token that can browse listings, queue state, workflow history, logs, screenshots, snapshots, and audit events, but cannot perform write actions.
+
+If tokens are not provided, `marketplace:home:serve` generates both at startup and prints two URLs:
+
+```text
+Admin URL: http://127.0.0.1:3080/?token=...
+Read-only URL: http://127.0.0.1:3080/?token=...
+```
+
+Those generated tokens are ephemeral and change on restart. To make them stable, set environment variables or pass flags:
+
+```bash
+MARKETPLACE_MONITOR_ADMIN_TOKEN=admin-secret \
+MARKETPLACE_MONITOR_READONLY_TOKEN=readonly-secret \
+npm run marketplace:home:serve
+```
+
+```bash
+npm run marketplace:home:serve -- --admin-token admin-secret --read-only-token readonly-secret
+```
+
+The browser frontend reads `token` or `apiToken` from the page URL and appends it to `/api/*` calls. API clients can also send the token with `X-API-Token` or `Authorization: Bearer <token>`. This keeps the current MVP simple while leaving the route authorization model compatible with a later OAuth2/JWT implementation.
+
 ## Coding Logic and Implementation
 
 ## Collector logic
