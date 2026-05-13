@@ -10,7 +10,10 @@ const DEFAULT_MARKETPLACE_URL = 'https://www.facebook.com/marketplace/';
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CREDENTIALS_PATH = process.env.AUTO_BROWSER_CREDENTIALS_PATH
   || path.join(process.cwd(), 'credentials.json');
+const DEFAULT_CREDENTIALS_PROFILE = process.env.AUTO_BROWSER_CREDENTIALS_PROFILE || '';
 const AUTH_MODES = new Set(['required', 'credentials', 'optional', 'none']);
+const CREDENTIAL_ROOT_KEY = 'facebook-marketplace';
+const DEFAULT_CREDENTIAL_PROFILE_ID = 'default';
 
 function normalizeAuthMode(authMode, useCredentials = false) {
   const normalized = String(authMode || '').trim().toLowerCase();
@@ -32,7 +35,73 @@ function resolveCredentialsPath(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
     : path.join(process.cwd(), credentialsPath);
 }
 
-function readCredentials(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
+function normalizeCredentialProfileId(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || DEFAULT_CREDENTIAL_PROFILE_ID;
+}
+
+function normalizeCredentialProfile(profile, fallbackId) {
+  if (!profile || typeof profile !== 'object') {
+    return null;
+  }
+
+  const email = String(profile.email || '').trim();
+  const password = String(profile.password || '');
+  if (!email && !password) {
+    return null;
+  }
+
+  return {
+    id: normalizeCredentialProfileId(profile.id || fallbackId),
+    label: String(profile.label || email || fallbackId || '').trim(),
+    email,
+    password,
+    updatedAt: profile.updatedAt || '',
+  };
+}
+
+function parseCredentialStore(parsed, resolvedPath) {
+  const root = parsed?.[CREDENTIAL_ROOT_KEY];
+  if (!root || typeof root !== 'object') {
+    throw new Error(`Expected credentials.json to contain a "${CREDENTIAL_ROOT_KEY}" object`);
+  }
+
+  const profiles = {};
+  const legacyProfile = normalizeCredentialProfile(root, DEFAULT_CREDENTIAL_PROFILE_ID);
+  if (legacyProfile) {
+    profiles[legacyProfile.id] = legacyProfile;
+  }
+
+  if (root.profiles && typeof root.profiles === 'object') {
+    for (const [id, profile] of Object.entries(root.profiles)) {
+      const normalized = normalizeCredentialProfile({ id, ...profile }, id);
+      if (normalized) {
+        profiles[normalized.id] = normalized;
+      }
+    }
+  }
+
+  const profileIds = Object.keys(profiles);
+  if (profileIds.length === 0) {
+    throw new Error(`Expected at least "${CREDENTIAL_ROOT_KEY}.email" or a named credential profile`);
+  }
+
+  const requestedActiveProfileId = normalizeCredentialProfileId(
+    root.activeProfile || parsed['facebook-marketplace-active'] || legacyProfile?.id || profileIds[0],
+  );
+
+  return {
+    credentialsPath: resolvedPath,
+    activeProfileId: profiles[requestedActiveProfileId] ? requestedActiveProfileId : profileIds[0],
+    profiles,
+  };
+}
+
+function readCredentialStore(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
   const resolvedPath = resolveCredentialsPath(credentialsPath);
   if (!fs.existsSync(resolvedPath)) {
     throw new Error(`Missing credentials file at ${resolvedPath}`);
@@ -40,18 +109,122 @@ function readCredentials(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
 
   const raw = fs.readFileSync(resolvedPath, 'utf8');
   const parsed = JSON.parse(raw);
-  const config = parsed['facebook-marketplace'];
+  return parseCredentialStore(parsed, resolvedPath);
+}
 
-  if (!config || typeof config !== 'object') {
-    throw new Error('Expected credentials.json to contain a "facebook-marketplace" object');
+function readCredentials(credentialsPath = DEFAULT_CREDENTIALS_PATH, credentialsProfile = DEFAULT_CREDENTIALS_PROFILE) {
+  const store = readCredentialStore(credentialsPath);
+  const requestedProfile = String(credentialsProfile || '').trim();
+  const profileId = requestedProfile
+    ? normalizeCredentialProfileId(requestedProfile)
+    : store.activeProfileId;
+  const config = store.profiles[profileId];
+  if (!config) {
+    throw new Error(`Unknown Facebook Marketplace credential profile: ${requestedProfile}`);
   }
 
-  const { email, password } = config;
-  if (!email && !password) {
-    throw new Error('Expected at least "facebook-marketplace.email" or "facebook-marketplace.password"');
+  return {
+    email: config.email,
+    password: config.password,
+    label: config.label,
+    credentialsProfile: profileId,
+    credentialsPath: store.credentialsPath,
+  };
+}
+
+function serializeCredentialStore(store) {
+  const activeProfile = store.profiles[store.activeProfileId] || Object.values(store.profiles)[0] || {};
+  const profiles = {};
+  for (const [id, profile] of Object.entries(store.profiles)) {
+    profiles[id] = {
+      label: profile.label || profile.email || id,
+      email: profile.email || '',
+      password: profile.password || '',
+      ...(profile.updatedAt ? { updatedAt: profile.updatedAt } : {}),
+    };
   }
 
-  return { email, password, credentialsPath: resolvedPath };
+  return {
+    [CREDENTIAL_ROOT_KEY]: {
+      label: activeProfile.label || activeProfile.email || store.activeProfileId,
+      email: activeProfile.email || '',
+      password: activeProfile.password || '',
+      activeProfile: store.activeProfileId,
+      profiles,
+    },
+  };
+}
+
+function readCredentialStoreForUpdate(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
+  const resolvedPath = resolveCredentialsPath(credentialsPath);
+  if (!fs.existsSync(resolvedPath)) {
+    return {
+      credentialsPath: resolvedPath,
+      activeProfileId: DEFAULT_CREDENTIAL_PROFILE_ID,
+      profiles: {},
+    };
+  }
+  return readCredentialStore(resolvedPath);
+}
+
+function writeCredentialStore(store) {
+  fs.mkdirSync(path.dirname(store.credentialsPath), { recursive: true });
+  fs.writeFileSync(store.credentialsPath, `${JSON.stringify(serializeCredentialStore(store), null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(store.credentialsPath, 0o600);
+}
+
+function listCredentialProfiles(credentialsPath = DEFAULT_CREDENTIALS_PATH) {
+  const store = readCredentialStoreForUpdate(credentialsPath);
+  return {
+    credentialsPath: store.credentialsPath,
+    activeProfileId: store.activeProfileId,
+    profiles: Object.values(store.profiles)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((profile) => ({
+        id: profile.id,
+        label: profile.label || profile.email || profile.id,
+        email: profile.email,
+        hasPassword: Boolean(profile.password),
+        updatedAt: profile.updatedAt || '',
+        active: profile.id === store.activeProfileId,
+      })),
+  };
+}
+
+function upsertCredentialProfile(credentialsPath = DEFAULT_CREDENTIALS_PATH, profileInput = {}, options = {}) {
+  const store = readCredentialStoreForUpdate(credentialsPath);
+  const profileId = normalizeCredentialProfileId(profileInput.id || profileInput.email || DEFAULT_CREDENTIAL_PROFILE_ID);
+  const existing = store.profiles[profileId] || {};
+  const nextProfile = normalizeCredentialProfile({
+    id: profileId,
+    label: profileInput.label || existing.label || profileInput.email || profileId,
+    email: profileInput.email !== undefined ? profileInput.email : existing.email,
+    password: profileInput.password !== undefined && profileInput.password !== '' ? profileInput.password : existing.password,
+    updatedAt: new Date().toISOString(),
+  }, profileId);
+
+  if (!nextProfile || !nextProfile.email || !nextProfile.password) {
+    throw new Error('Credential profiles require both email and password');
+  }
+
+  store.profiles[profileId] = nextProfile;
+  if (options.activate !== false || !store.profiles[store.activeProfileId]) {
+    store.activeProfileId = profileId;
+  }
+  writeCredentialStore(store);
+  return listCredentialProfiles(store.credentialsPath);
+}
+
+function setActiveCredentialProfile(credentialsPath = DEFAULT_CREDENTIALS_PATH, profileId) {
+  const store = readCredentialStore(credentialsPath);
+  const normalizedProfileId = normalizeCredentialProfileId(profileId);
+  if (!store.profiles[normalizedProfileId]) {
+    throw new Error(`Unknown Facebook Marketplace credential profile: ${profileId}`);
+  }
+
+  store.activeProfileId = normalizedProfileId;
+  writeCredentialStore(store);
+  return listCredentialProfiles(store.credentialsPath);
 }
 
 async function readBodyText(page) {
@@ -209,6 +382,7 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
     useCredentials = false,
     authMode: rawAuthMode = '',
     credentialsPath = DEFAULT_CREDENTIALS_PATH,
+    credentialsProfile = DEFAULT_CREDENTIALS_PROFILE,
     loginTimeoutMs = DEFAULT_LOGIN_TIMEOUT_MS,
     failOnAdditionalVerification = false,
     logger = null,
@@ -248,9 +422,9 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
   }
 
   try {
-    const credentials = readCredentials(credentialsPath);
+    const credentials = readCredentials(credentialsPath, credentialsProfile);
     if (logger) {
-      logger(`session_reuse_miss action=credential_login auth_mode=${authMode} credentials_path=${credentials.credentialsPath}`);
+      logger(`session_reuse_miss action=credential_login auth_mode=${authMode} credentials_path=${credentials.credentialsPath} credentials_profile=${credentials.credentialsProfile}`);
     }
     return await loginWithCredentials(context, credentials, {
       loginTimeoutMs,
@@ -271,11 +445,15 @@ async function ensureFacebookMarketplaceLogin(context, options = {}) {
 async function describeFacebookMarketplaceSession(context, page, options = {}) {
   const {
     credentialsPath = DEFAULT_CREDENTIALS_PATH,
+    credentialsProfile = DEFAULT_CREDENTIALS_PROFILE,
   } = options;
 
   let loadedEmail = '';
+  let loadedCredentialsProfile = '';
   try {
-    loadedEmail = readCredentials(credentialsPath).email || '';
+    const credentials = readCredentials(credentialsPath, credentialsProfile);
+    loadedEmail = credentials.email || '';
+    loadedCredentialsProfile = credentials.credentialsProfile || '';
   } catch (_) {
   }
 
@@ -285,6 +463,7 @@ async function describeFacebookMarketplaceSession(context, page, options = {}) {
 
   return {
     loadedEmail,
+    loadedCredentialsProfile,
     signedInUserId: userCookie?.value || '',
     currentUrl: page?.url?.() || '',
     loggedIn: authenticated,
@@ -295,7 +474,13 @@ module.exports = {
   DEFAULT_MARKETPLACE_URL,
   DEFAULT_LOGIN_TIMEOUT_MS,
   DEFAULT_CREDENTIALS_PATH,
+  DEFAULT_CREDENTIALS_PROFILE,
   readCredentials,
+  readCredentialStore,
+  listCredentialProfiles,
+  upsertCredentialProfile,
+  setActiveCredentialProfile,
+  normalizeCredentialProfileId,
   normalizeAuthMode,
   hasSignedInUserCookie,
   isFacebookAdditionalVerificationPage,

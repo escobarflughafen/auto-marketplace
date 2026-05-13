@@ -35,6 +35,7 @@ test('parseArgs enables drain mode for backlog resolution', () => {
     '--resolve-inactive',
     '--use-credentials',
     '--credentials-path', 'tmp/creds.json',
+    '--credentials-profile', 'agent-account',
     '--login-timeout-seconds', '45',
   ]);
 
@@ -58,6 +59,7 @@ test('parseArgs enables drain mode for backlog resolution', () => {
   assert.equal(options.useCredentials, true);
   assert.equal(options.authMode, 'credentials');
   assert.equal(options.credentialsPath, 'tmp/creds.json');
+  assert.equal(options.credentialsProfile, 'agent-account');
   assert.equal(options.loginTimeoutMs, 45000);
 });
 

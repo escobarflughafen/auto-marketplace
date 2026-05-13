@@ -7,6 +7,8 @@
     "marketplace:capture": "node scripts/capture-marketplace-posts.js",
     "marketplace:doctor": "node scripts/marketplace-doctor.js",
     "marketplace:auth:bootstrap": "node scripts/bootstrap-marketplace-auth.js",
+    "marketplace:auth:headless-onboard": "node scripts/headless-marketplace-auth-onboarding.js",
+    "marketplace:credentials:import": "node scripts/import-marketplace-credential.js",
     "marketplace:home:collect": "node scripts/collect-marketplace-homepage.js",
     "marketplace:search:explore": "node scripts/collect-marketplace-search-explorer.js",
     "marketplace:home:process": "node scripts/process-marketplace-homepage-backlog.js",

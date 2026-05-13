@@ -769,6 +769,70 @@ a:hover { text-decoration: underline; }
   border-bottom: 1px solid var(--line);
   background: var(--fill);
 }
+.credential-manager {
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  border-bottom: 1px solid var(--line);
+}
+.credential-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  min-width: 0;
+  align-items: start;
+}
+.credential-tablewrap {
+  max-height: min(42vh, 420px);
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+}
+.credential-table {
+  width: 100%;
+  min-width: 520px;
+  table-layout: fixed;
+}
+.credential-table th,
+.credential-table td {
+  padding: 7px 9px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.credential-form {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+}
+.credential-form label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.credential-form input,
+.credential-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  font-size: 13px;
+}
+.credential-active-toggle {
+  display: flex !important;
+  grid-template-columns: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+.credential-active-toggle input {
+  width: 16px;
+  height: 16px;
+}
 .worker-control-columns {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
@@ -1496,7 +1560,7 @@ textarea {
   :root[data-theme="classic"] .theme-field {
     padding: 0 0 2px;
   }
-  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-control-columns { grid-template-columns: 1fr; }
+  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-control-columns, .credential-grid { grid-template-columns: 1fr; }
   .backlog-toolbar,
   .backlog-advanced {
     align-items: stretch;
@@ -1529,6 +1593,10 @@ textarea {
     grid-template-columns: 1fr;
   }
   .worker-control-column {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .credential-tablewrap {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }

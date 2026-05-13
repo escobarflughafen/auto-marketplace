@@ -12,5 +12,5 @@ services:
     volumes:
       - ./artifacts:/app/artifacts
       - ./profiles:/app/profiles
-      - ./secrets:/app/secrets:ro
+      - ./secrets:/app/secrets
     command: ["npm", "run", "marketplace:home:serve", "--", "--host", "0.0.0.0", "--port", "21435"]

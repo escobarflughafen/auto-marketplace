@@ -9,6 +9,7 @@ test('parseArgs reads auth bootstrap flags', () => {
   const options = parseArgs([
     '--user-data-dir', 'profiles/test-profile',
     '--credentials-path', 'tmp/creds.json',
+    '--credentials-profile', 'agent-account',
     '--login-timeout-seconds', '30',
     '--auth-mode', 'credentials',
     '--headed',
@@ -17,6 +18,7 @@ test('parseArgs reads auth bootstrap flags', () => {
 
   assert.equal(options.userDataDir, 'profiles/test-profile');
   assert.equal(options.credentialsPath, 'tmp/creds.json');
+  assert.equal(options.credentialsProfile, 'agent-account');
   assert.equal(options.loginTimeoutMs, 30000);
   assert.equal(options.authMode, 'credentials');
   assert.equal(options.headless, false);

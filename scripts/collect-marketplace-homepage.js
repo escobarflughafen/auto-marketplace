@@ -24,6 +24,7 @@ const {
 } = require('./marketplace-homepage-db');
 const {
   DEFAULT_CREDENTIALS_PATH,
+  DEFAULT_CREDENTIALS_PROFILE,
   DEFAULT_LOGIN_TIMEOUT_MS,
   ensureFacebookMarketplaceLogin,
   describeFacebookMarketplaceSession,
@@ -75,6 +76,7 @@ function parseArgs(argv) {
     useCredentials: false,
     authMode: '',
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
+    credentialsProfile: DEFAULT_CREDENTIALS_PROFILE,
     loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
   };
 
@@ -167,6 +169,10 @@ function parseArgs(argv) {
         break;
       case '--credentials-path':
         options.credentialsPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--credentials-profile':
+        options.credentialsProfile = readFlagValue(argv, index, arg);
         index += 1;
         break;
       case '--login-timeout-seconds':
@@ -406,6 +412,7 @@ async function runCycle(page, db, options) {
   const countsBefore = getHomepageListingCounts(db);
   const sessionSummary = await describeFacebookMarketplaceSession(page.context(), page, {
     credentialsPath: options.credentialsPath,
+    credentialsProfile: options.credentialsProfile,
   });
   const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
   await appendLog(
@@ -499,6 +506,7 @@ async function main() {
       useCredentials: options.useCredentials,
       authMode: options.authMode,
       credentialsPath: options.credentialsPath,
+      credentialsProfile: options.credentialsProfile,
       loginTimeoutMs: options.loginTimeoutMs,
       logger: log,
     });
@@ -519,6 +527,7 @@ async function main() {
     });
     const initialSessionSummary = await describeFacebookMarketplaceSession(context, page, {
       credentialsPath: options.credentialsPath,
+      credentialsProfile: options.credentialsProfile,
     });
     const initialCounts = getHomepageListingCounts(db);
     await appendLog(

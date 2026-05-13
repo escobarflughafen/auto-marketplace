@@ -13,6 +13,7 @@ const store = {
   workerDetailCategory: 'done',
   workerDetailEvents: [],
   workerDetailStats: null,
+  credentials: null,
   workflowSignature: '',
 };
 
@@ -186,6 +187,58 @@ function renderWorkflowRows(workflow, draft) {
   return fields.map((field) => renderField(field, draft)).join('');
 }
 
+function credentialProfiles() {
+  return store.credentials?.profiles || [];
+}
+
+function activeCredentialProfile() {
+  const profiles = credentialProfiles();
+  return profiles.find((profile) => profile.id === store.credentials?.activeProfileId) || profiles[0] || null;
+}
+
+function renderCredentialManager() {
+  const profiles = credentialProfiles();
+  const active = activeCredentialProfile();
+  const options = profiles.map((profile) => (
+    `<option value="${html(profile.id)}"${profile.id === active?.id ? ' selected' : ''}>${html(profile.active ? `${profile.label} (active)` : profile.label)}</option>`
+  )).join('');
+  const rows = profiles.length
+    ? profiles.map((profile) => (
+      '<tr>'
+        + `<td>${html(profile.label)}</td>`
+        + `<td>${html(profile.email)}</td>`
+        + `<td>${profile.hasPassword ? 'yes' : 'no'}</td>`
+        + `<td>${profile.active ? '<span class="status done">active</span>' : ''}</td>`
+      + '</tr>'
+    )).join('')
+    : '<tr><td colspan="4" class="empty-state">No credential profiles saved.</td></tr>';
+  return '<section class="credential-manager">'
+    + '<div class="worker-control-section-title">Credentials</div>'
+    + '<div class="credential-grid">'
+    + '<div class="tablewrap credential-tablewrap" tabindex="0"><table class="credential-table"><thead><tr><th>Profile</th><th>Email</th><th>Password</th><th></th></tr></thead><tbody>'
+    + rows
+    + '</tbody></table></div>'
+    + '<div class="credential-form">'
+    + '<label>Profile<select id="credentialProfileSelect">'
+    + options
+    + '<option value="__new__">New profile</option>'
+    + '</select></label>'
+    + `<label>ID<input id="credentialIdInput" type="text" value="${html(active?.id || '')}"></label>`
+    + `<label>Label<input id="credentialLabelInput" type="text" value="${html(active?.label || '')}"></label>`
+    + `<label>Email<input id="credentialEmailInput" type="text" value="${html(active?.email || '')}"></label>`
+    + '<label>Password<input id="credentialPasswordInput" type="password" value="" autocomplete="new-password" placeholder="unchanged"></label>'
+    + '<label class="credential-active-toggle"><input id="credentialActivateCheckbox" type="checkbox" checked> Make active</label>'
+    + '<div class="worker-control-actions">'
+    + '<button type="button" id="credentialSaveButton">Save</button>'
+    + '<button type="button" class="secondary" id="credentialSetActiveButton">Set Active</button>'
+    + '<button type="button" class="secondary" id="credentialRefreshButton">Refresh</button>'
+    + '</div>'
+    + '<div class="process-meta" id="credentialStatus"></div>'
+    + '</div>'
+    + '</div>'
+    + '</section>';
+}
+
 function renderWorkflowForm() {
   const workflow = selectedWorkflow();
   if (!workflow) {
@@ -224,6 +277,7 @@ function renderWorkerControl() {
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker Control</div><div class="process-meta">Draft settings are kept per workflow type.</div></div>'
     + '</div>'
+    + renderCredentialManager()
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
     + '<div class="worker-control-section-title">Workflow Settings</div>'
@@ -262,6 +316,101 @@ function renderWorkerControl() {
   document.getElementById('workerControlStartButton').addEventListener('click', () => document.getElementById('startWorkflowButton').click());
   document.getElementById('workerControlRefreshButton').addEventListener('click', () => document.getElementById('refreshWorkflowsButton').click());
   document.getElementById('workerControlReconcileButton').addEventListener('click', () => document.getElementById('reconcileWorkflowsButton').click());
+  bindCredentialManager();
+}
+
+function fillCredentialForm(profile) {
+  const idInput = document.getElementById('credentialIdInput');
+  const labelInput = document.getElementById('credentialLabelInput');
+  const emailInput = document.getElementById('credentialEmailInput');
+  const passwordInput = document.getElementById('credentialPasswordInput');
+  const activateInput = document.getElementById('credentialActivateCheckbox');
+  if (!idInput || !labelInput || !emailInput || !passwordInput || !activateInput) {
+    return;
+  }
+  idInput.value = profile?.id || '';
+  labelInput.value = profile?.label || '';
+  emailInput.value = profile?.email || '';
+  passwordInput.value = '';
+  activateInput.checked = true;
+}
+
+async function loadCredentials(options = {}) {
+  store.credentials = await fetchJson('/api/credentials');
+  if (options.render !== false) {
+    renderWorkflowForm();
+  }
+}
+
+function selectedCredentialFromForm() {
+  const id = document.getElementById('credentialIdInput')?.value.trim() || '';
+  const label = document.getElementById('credentialLabelInput')?.value.trim() || '';
+  const email = document.getElementById('credentialEmailInput')?.value.trim() || '';
+  const password = document.getElementById('credentialPasswordInput')?.value || '';
+  const activate = Boolean(document.getElementById('credentialActivateCheckbox')?.checked);
+  return { id, label, email, password, activate };
+}
+
+function bindCredentialManager() {
+  const select = document.getElementById('credentialProfileSelect');
+  const saveButton = document.getElementById('credentialSaveButton');
+  const setActiveButton = document.getElementById('credentialSetActiveButton');
+  const refreshButton = document.getElementById('credentialRefreshButton');
+  const status = document.getElementById('credentialStatus');
+  if (!select || !saveButton || !setActiveButton || !refreshButton) {
+    return;
+  }
+
+  select.addEventListener('change', () => {
+    if (select.value === '__new__') {
+      fillCredentialForm(null);
+      return;
+    }
+    fillCredentialForm(credentialProfiles().find((profile) => profile.id === select.value) || null);
+  });
+
+  saveButton.addEventListener('click', async () => {
+    saveButton.disabled = true;
+    try {
+      const credential = selectedCredentialFromForm();
+      await fetchJson('/api/credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(credential),
+      });
+      if (status) status.textContent = 'Credential saved.';
+      await loadCredentials({ render: false });
+      await loadWorkflows();
+    } catch (error) {
+      alert(error.message || 'Failed to save credential');
+    } finally {
+      saveButton.disabled = false;
+    }
+  });
+
+  setActiveButton.addEventListener('click', async () => {
+    setActiveButton.disabled = true;
+    try {
+      const credential = selectedCredentialFromForm();
+      await fetchJson('/api/credentials/active', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: credential.id || select.value }),
+      });
+      if (status) status.textContent = 'Active credential updated.';
+      await loadCredentials({ render: false });
+      await loadWorkflows();
+    } catch (error) {
+      alert(error.message || 'Failed to set active credential');
+    } finally {
+      setActiveButton.disabled = false;
+    }
+  });
+
+  refreshButton.addEventListener('click', async () => {
+    await loadCredentials();
+    await loadWorkflows();
+  });
 }
 
 function activeProcess() {
@@ -706,6 +855,7 @@ await loadSummary();
 await listingsViewer.loadQueryFields();
 await listingsViewer.loadResolveQueue();
 await listingsViewer.loadRows();
+await loadCredentials({ render: false });
 await loadWorkflows();
 setInterval(loadSummary, 10000);
 setInterval(syncWorkflowsInBackground, 5000);

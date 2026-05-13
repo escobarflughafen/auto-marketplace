@@ -13,6 +13,7 @@ test('parseArgs reads doctor flags', () => {
     '--db-path', 'tmp/test.db',
     '--user-data-dir', 'profiles/test-profile',
     '--credentials-path', 'tmp/creds.json',
+    '--credentials-profile', 'agent-account',
     '--skip-browser-launch',
     '--json',
   ]);
@@ -20,6 +21,7 @@ test('parseArgs reads doctor flags', () => {
   assert.equal(options.dbPath, 'tmp/test.db');
   assert.equal(options.userDataDir, 'profiles/test-profile');
   assert.equal(options.credentialsPath, 'tmp/creds.json');
+  assert.equal(options.credentialsProfile, 'agent-account');
   assert.equal(options.skipBrowserLaunch, true);
   assert.equal(options.json, true);
 });

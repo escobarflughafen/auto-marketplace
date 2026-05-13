@@ -33,6 +33,13 @@ const {
 const {
   getMarketplaceLocationOptions,
 } = require('./marketplace-utils');
+const {
+  DEFAULT_CREDENTIALS_PATH,
+  listCredentialProfiles,
+  normalizeCredentialProfileId,
+  setActiveCredentialProfile,
+  upsertCredentialProfile,
+} = require('./marketplace-profile-auth');
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
@@ -49,6 +56,13 @@ const AUTH_MODE_FIELD = {
     { value: 'optional', label: 'Optional', args: ['--auth-mode', 'optional'] },
     { value: 'none', label: 'Unauthenticated', args: ['--auth-mode', 'none'] },
   ],
+};
+const CREDENTIAL_PROFILE_FIELD = {
+  id: 'credentialsProfile',
+  label: 'Credential',
+  kind: 'choice',
+  defaultValue: '',
+  options: [],
 };
 
 function readFlagValue(argv, index, flagName) {
@@ -105,6 +119,7 @@ const WORKFLOWS = {
     script: 'marketplace:home:collect',
     fields: [
       AUTH_MODE_FIELD,
+      CREDENTIAL_PROFILE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -130,6 +145,7 @@ const WORKFLOWS = {
     script: 'marketplace:search:explore',
     fields: [
       AUTH_MODE_FIELD,
+      CREDENTIAL_PROFILE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -156,6 +172,7 @@ const WORKFLOWS = {
     script: 'marketplace:home:process',
     fields: [
       AUTH_MODE_FIELD,
+      CREDENTIAL_PROFILE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -233,6 +250,7 @@ const WORKFLOWS = {
     script: 'marketplace:home:process',
     fields: [
       AUTH_MODE_FIELD,
+      CREDENTIAL_PROFILE_FIELD,
       {
         id: 'browserMode',
         label: 'Browser mode',
@@ -328,6 +346,50 @@ const QUERY_FIELDS = [
 ];
 
 const managedProcesses = new Map();
+
+function getCredentialProfilesForUi() {
+  try {
+    return listCredentialProfiles(DEFAULT_CREDENTIALS_PATH);
+  } catch (error) {
+    return {
+      credentialsPath: DEFAULT_CREDENTIALS_PATH,
+      activeProfileId: '',
+      profiles: [],
+      error: error.message,
+    };
+  }
+}
+
+function credentialProfileOptions() {
+  const credentials = getCredentialProfilesForUi();
+  const active = credentials.profiles.find((profile) => profile.id === credentials.activeProfileId);
+  return [
+    {
+      value: '',
+      label: active ? `Active (${active.label || active.email || active.id})` : 'Active credential',
+      args: [],
+    },
+    ...credentials.profiles.map((profile) => ({
+      value: profile.id,
+      label: profile.active
+        ? `${profile.label || profile.email || profile.id} (active)`
+        : profile.label || profile.email || profile.id,
+      args: ['--credentials-profile', profile.id],
+    })),
+  ];
+}
+
+function fieldsForWorkflow(workflow) {
+  return (workflow.fields || []).map((field) => {
+    if (field.id !== CREDENTIAL_PROFILE_FIELD.id) {
+      return field;
+    }
+    return {
+      ...field,
+      options: credentialProfileOptions(),
+    };
+  });
+}
 
 function buildDefaultArgsFromFields(fields = []) {
   const args = [];
@@ -759,7 +821,7 @@ function startManagedWorkflow(db, workflowId, extraArgs = []) {
     throw error;
   }
 
-  const initialArgs = extraArgs.length > 0 ? extraArgs : buildDefaultArgsFromFields(workflow.fields);
+  const initialArgs = extraArgs.length > 0 ? extraArgs : buildDefaultArgsFromFields(fieldsForWorkflow(workflow));
   const record = buildManagedProcessRecord(workflowId, initialArgs);
   const args = ensureManagedWorkerIdArg(initialArgs, record.id, workflow);
   record.args = args;
@@ -1242,11 +1304,46 @@ function createServer(options) {
           id,
           label: workflow.label,
           script: workflow.script,
-          fields: workflow.fields,
-          defaultArgs: buildDefaultArgsFromFields(workflow.fields),
+          fields: fieldsForWorkflow(workflow),
+          defaultArgs: buildDefaultArgsFromFields(fieldsForWorkflow(workflow)),
         })),
         processes: listManagedProcesses(db),
       });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/credentials' && request.method === 'GET') {
+      const result = getCredentialProfilesForUi();
+      writeJson(response, result.error ? 500 : 200, result.error ? { error: result.error } : result);
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/credentials' && request.method === 'POST') {
+      try {
+        const body = await readRequestJson(request);
+        const result = upsertCredentialProfile(DEFAULT_CREDENTIALS_PATH, {
+          id: body.id || body.email,
+          label: body.label || body.email,
+          email: body.email,
+          password: body.password,
+        }, {
+          activate: body.activate !== false,
+        });
+        writeJson(response, 200, result);
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/credentials/active' && request.method === 'POST') {
+      try {
+        const body = await readRequestJson(request);
+        const result = setActiveCredentialProfile(DEFAULT_CREDENTIALS_PATH, normalizeCredentialProfileId(body.id));
+        writeJson(response, 200, result);
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
       return;
     }
 

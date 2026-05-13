@@ -14,6 +14,7 @@ const {
 } = require('./marketplace-utils');
 const {
   DEFAULT_CREDENTIALS_PATH,
+  DEFAULT_CREDENTIALS_PROFILE,
   readCredentials,
 } = require('./marketplace-profile-auth');
 
@@ -33,6 +34,7 @@ function parseArgs(argv) {
     dbPath: DEFAULT_DB_PATH,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
+    credentialsProfile: DEFAULT_CREDENTIALS_PROFILE,
     skipBrowserLaunch: false,
     json: false,
   };
@@ -50,6 +52,10 @@ function parseArgs(argv) {
         break;
       case '--credentials-path':
         options.credentialsPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--credentials-profile':
+        options.credentialsProfile = readFlagValue(argv, index, arg);
         index += 1;
         break;
       case '--skip-browser-launch':
@@ -304,7 +310,7 @@ async function checkPathAccess(label, targetPath, options = {}) {
 async function checkCredentials(options) {
   const resolvedPath = resolvePath(options.credentialsPath);
   try {
-    const credentials = readCredentials(resolvedPath);
+    const credentials = readCredentials(resolvedPath, options.credentialsProfile);
     return makeResult(
       'credentials',
       'ok',
@@ -313,6 +319,7 @@ async function checkCredentials(options) {
         credentialsPath: resolvedPath,
         email: maskEmail(credentials.email || ''),
         hasPassword: Boolean(credentials.password),
+        credentialsProfile: credentials.credentialsProfile,
       },
     );
   } catch (error) {

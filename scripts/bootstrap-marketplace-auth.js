@@ -7,6 +7,7 @@ const {
 } = require('./marketplace-utils');
 const {
   DEFAULT_CREDENTIALS_PATH,
+  DEFAULT_CREDENTIALS_PROFILE,
   DEFAULT_LOGIN_TIMEOUT_MS,
   DEFAULT_MARKETPLACE_URL,
   describeFacebookMarketplaceSession,
@@ -40,6 +41,7 @@ function parseArgs(argv) {
     startUrl: DEFAULT_MARKETPLACE_URL,
     authMode: 'credentials',
     useCredentials: false,
+    credentialsProfile: DEFAULT_CREDENTIALS_PROFILE,
     headless: true,
     json: false,
   };
@@ -53,6 +55,10 @@ function parseArgs(argv) {
         break;
       case '--credentials-path':
         options.credentialsPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--credentials-profile':
+        options.credentialsProfile = readFlagValue(argv, index, arg);
         index += 1;
         break;
       case '--login-timeout-seconds':
@@ -111,12 +117,14 @@ async function runBootstrap(options) {
       authMode: options.authMode,
       useCredentials: options.useCredentials,
       credentialsPath: options.credentialsPath,
+      credentialsProfile: options.credentialsProfile,
       loginTimeoutMs: options.loginTimeoutMs,
       failOnAdditionalVerification: options.headless,
       logger: log,
     });
     const session = await describeFacebookMarketplaceSession(context, page, {
       credentialsPath: options.credentialsPath,
+      credentialsProfile: options.credentialsProfile,
     });
     log(`auth_bootstrap_done logged_in=${session.loggedIn} signed_in_user_id=${session.signedInUserId || 'n/a'} current_url=${session.currentUrl || 'n/a'}`);
     return {
