@@ -15,6 +15,7 @@ const store = {
   workerDetailStats: null,
   credentials: null,
   workflowSignature: '',
+  processSignature: '',
 };
 
 const els = {
@@ -470,9 +471,54 @@ function workerStats(proc) {
   return stats;
 }
 
-function renderProcesses() {
+function processRenderSignature(processes = store.processes) {
+  return JSON.stringify(processes.map((proc) => ({
+    id: proc.id,
+    status: proc.status,
+    pid: proc.pid,
+    osAlive: Boolean(proc.osAlive),
+    latestAction: proc.latestAction || '',
+    failureSummary: proc.failureSummary || '',
+    logCount: proc.logCount || 0,
+    runtimeStats: proc.runtimeStats || null,
+    eventStats: proc.eventStats || null,
+    selected: proc.id === store.selectedProcessId,
+  })));
+}
+
+function captureProcessScrollState() {
+  const tableWrap = els.processList.querySelector('.worker-table-wrap');
+  const detailWrap = els.processList.querySelector('.worker-detail-tablewrap');
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    tableLeft: tableWrap?.scrollLeft || 0,
+    tableTop: tableWrap?.scrollTop || 0,
+    detailLeft: detailWrap?.scrollLeft || 0,
+    detailTop: detailWrap?.scrollTop || 0,
+  };
+}
+
+function restoreProcessScrollState(state) {
+  if (!state) return;
+  const tableWrap = els.processList.querySelector('.worker-table-wrap');
+  const detailWrap = els.processList.querySelector('.worker-detail-tablewrap');
+  if (tableWrap) {
+    tableWrap.scrollLeft = state.tableLeft;
+    tableWrap.scrollTop = state.tableTop;
+  }
+  if (detailWrap) {
+    detailWrap.scrollLeft = state.detailLeft;
+    detailWrap.scrollTop = state.detailTop;
+  }
+  window.scrollTo(state.windowX, state.windowY);
+}
+
+function renderProcesses(options = {}) {
+  const scrollState = options.preserveScroll ? captureProcessScrollState() : null;
   if (!store.processes.length) {
     els.processList.innerHTML = '<div class="card"><div class="label">Workers</div><div>No managed workers have been started from this server session.</div></div>';
+    restoreProcessScrollState(scrollState);
     return;
   }
   if (store.selectedProcessId && !store.processes.some((proc) => proc.id === store.selectedProcessId)) {
@@ -566,6 +612,7 @@ function renderProcesses() {
       }
     });
   }
+  restoreProcessScrollState(scrollState);
 }
 
 function formatDate(value) {
@@ -780,16 +827,19 @@ async function loadWorkflows(options = {}) {
     fields: workflow.fields,
   })));
   const workflowDefinitionsChanged = nextWorkflowSignature !== store.workflowSignature;
+  const nextProcessSignature = processRenderSignature(payload.processes || []);
+  const processDefinitionsChanged = nextProcessSignature !== store.processSignature;
   store.workflows = nextWorkflows;
   store.workflowSignature = nextWorkflowSignature;
   store.processes = payload.processes || [];
+  store.processSignature = nextProcessSignature;
   for (const workflow of store.workflows) ensureWorkflowDraft(workflow);
   if (!background && (workflowDefinitionsChanged || !els.workerControl.innerHTML.trim())) {
     renderWorkflowOptions();
     renderWorkflowForm();
   }
-  if (!background || !store.selectedProcessId) {
-    renderProcesses();
+  if (!background || (!store.selectedProcessId && processDefinitionsChanged)) {
+    renderProcesses({ preserveScroll: background });
   }
   if (store.selectedProcessId) {
     await loadWorkerDetail({ render: !background });
