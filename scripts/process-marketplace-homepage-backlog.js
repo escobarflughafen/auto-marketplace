@@ -103,6 +103,8 @@ function parseArgs(argv) {
     workerScreenshotDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots'),
     workerScreenshotIntervalSeconds: 10,
     workerScreenshotHistoryLimit: 100,
+    workerScreenshotFormat: 'jpeg',
+    workerScreenshotQuality: 55,
     logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'homepage-backlog.log'),
     pollIntervalSeconds: 15,
     pollJitterMin: 1,
@@ -187,6 +189,14 @@ function parseArgs(argv) {
         break;
       case '--worker-screenshot-history-limit':
         options.workerScreenshotHistoryLimit = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--worker-screenshot-format':
+        options.workerScreenshotFormat = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--worker-screenshot-quality':
+        options.workerScreenshotQuality = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
         index += 1;
         break;
       case '--log-file':
@@ -350,6 +360,16 @@ function parseArgs(argv) {
   if (options.screenshotQuality > 100) {
     throw new Error('Expected --screenshot-quality to be <= 100');
   }
+  options.workerScreenshotFormat = String(options.workerScreenshotFormat || '').trim().toLowerCase();
+  if (options.workerScreenshotFormat === 'jpg') {
+    options.workerScreenshotFormat = 'jpeg';
+  }
+  if (!['jpeg', 'png'].includes(options.workerScreenshotFormat)) {
+    throw new Error('Expected --worker-screenshot-format to be jpeg or png');
+  }
+  if (options.workerScreenshotQuality > 100) {
+    throw new Error('Expected --worker-screenshot-quality to be <= 100');
+  }
 
   if (options.once && options.drain) {
     throw new Error('Use either --once or --drain, not both');
@@ -419,7 +439,7 @@ async function pruneWorkerScreenshots(directory, historyLimit) {
 
   const screenshots = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !/\.png$/i.test(entry.name)) {
+    if (!entry.isFile() || !/\.(?:png|jpe?g)$/i.test(entry.name)) {
       continue;
     }
     const filePath = path.join(directory, entry.name);
@@ -443,8 +463,16 @@ async function captureWorkerScreenshot(page, options) {
   const directory = workerScreenshotDirectory(options);
   await ensureDir(directory);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filePath = path.join(directory, `${timestamp}.png`);
-  await page.screenshot({ path: filePath, fullPage: false });
+  const format = options.workerScreenshotFormat === 'png' ? 'png' : 'jpeg';
+  const filePath = path.join(directory, `${timestamp}.${screenshotExtension(format)}`);
+  const screenshotOptions = {
+    type: format,
+    fullPage: false,
+  };
+  if (format === 'jpeg') {
+    screenshotOptions.quality = Math.max(1, Math.min(100, Number.parseInt(String(options.workerScreenshotQuality), 10) || 55));
+  }
+  await page.screenshot({ path: filePath, ...screenshotOptions });
   await pruneWorkerScreenshots(directory, options.workerScreenshotHistoryLimit);
   return filePath;
 }
@@ -1137,7 +1165,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} screenshot_format=${options.screenshotFormat} screenshot_quality=${options.screenshotQuality} screenshot_full_page=${options.screenshotFullPage} artifact_budget_kb=${options.artifactBudgetKb} capture_thumbnails=${options.captureThumbnails} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit}`,
+    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} screenshot_format=${options.screenshotFormat} screenshot_quality=${options.screenshotQuality} screenshot_full_page=${options.screenshotFullPage} artifact_budget_kb=${options.artifactBudgetKb} capture_thumbnails=${options.captureThumbnails} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -1354,6 +1382,7 @@ module.exports = {
   appendWorkflowLifecycleEvent,
   safeWorkerPathSegment,
   captureListingScreenshot,
+  captureWorkerScreenshot,
   workerScreenshotDirectory,
   pruneWorkerScreenshots,
 };

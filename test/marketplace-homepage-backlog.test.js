@@ -15,6 +15,7 @@ const {
   isFatalBrowserContextError,
   safeWorkerPathSegment,
   captureListingScreenshot,
+  captureWorkerScreenshot,
   workerScreenshotDirectory,
   pruneWorkerScreenshots,
 } = require('../scripts/process-marketplace-homepage-backlog');
@@ -44,6 +45,8 @@ test('parseArgs enables drain mode for backlog resolution', () => {
     '--worker-screenshot-dir', 'tmp/screens',
     '--worker-screenshot-interval-seconds', '10',
     '--worker-screenshot-history-limit', '100',
+    '--worker-screenshot-format', 'jpg',
+    '--worker-screenshot-quality', '70',
     '--screenshot-format', 'jpg',
     '--screenshot-quality', '60',
     '--screenshot-full-page',
@@ -76,6 +79,8 @@ test('parseArgs enables drain mode for backlog resolution', () => {
   assert.equal(options.workerScreenshotDir, 'tmp/screens');
   assert.equal(options.workerScreenshotIntervalSeconds, 10);
   assert.equal(options.workerScreenshotHistoryLimit, 100);
+  assert.equal(options.workerScreenshotFormat, 'jpeg');
+  assert.equal(options.workerScreenshotQuality, 70);
   assert.equal(options.screenshotFormat, 'jpeg');
   assert.equal(options.screenshotQuality, 60);
   assert.equal(options.screenshotFullPage, true);
@@ -91,6 +96,8 @@ test('parseArgs defaults to storage-saving listing screenshots', () => {
   assert.equal(options.screenshotFullPage, false);
   assert.equal(options.artifactBudgetKb, 200);
   assert.equal(options.captureThumbnails, false);
+  assert.equal(options.workerScreenshotFormat, 'jpeg');
+  assert.equal(options.workerScreenshotQuality, 55);
 });
 
 test('captureListingScreenshot lowers JPEG quality to fit the artifact budget', async () => {
@@ -129,9 +136,34 @@ test('worker screenshot directory uses safe worker path segment', () => {
   assert.equal(workerScreenshotDirectory(options), path.join(process.cwd(), 'tmp/screens/backlog-worker-1'));
 });
 
+test('captureWorkerScreenshot supports compressed JPEG output', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marketplace-worker-shot-jpeg-'));
+  const calls = [];
+  const page = {
+    isClosed: () => false,
+    async screenshot(options) {
+      calls.push(options);
+      fs.writeFileSync(options.path, 'jpeg-shot');
+    },
+  };
+  const filePath = await captureWorkerScreenshot(page, {
+    workerId: 'worker-1',
+    workerScreenshotDir: tempDir,
+    workerScreenshotHistoryLimit: 100,
+    workerScreenshotFormat: 'jpeg',
+    workerScreenshotQuality: 62,
+  });
+
+  assert.equal(path.extname(filePath), '.jpg');
+  assert.equal(fs.existsSync(filePath), true);
+  assert.equal(calls[0].type, 'jpeg');
+  assert.equal(calls[0].quality, 62);
+  assert.equal(calls[0].fullPage, false);
+});
+
 test('pruneWorkerScreenshots keeps newest screenshots', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marketplace-worker-shots-'));
-  const files = ['old.png', 'middle.png', 'new.png'];
+  const files = ['old.png', 'middle.jpg', 'new.jpeg'];
   for (const [index, name] of files.entries()) {
     const filePath = path.join(tempDir, name);
     fs.writeFileSync(filePath, name, 'utf8');
@@ -141,7 +173,7 @@ test('pruneWorkerScreenshots keeps newest screenshots', async () => {
 
   await pruneWorkerScreenshots(tempDir, 2);
 
-  assert.deepEqual(fs.readdirSync(tempDir).sort(), ['middle.png', 'new.png']);
+  assert.deepEqual(fs.readdirSync(tempDir).sort(), ['middle.jpg', 'new.jpeg']);
 });
 
 test('parseArgs supports unauthenticated backlog processing', () => {

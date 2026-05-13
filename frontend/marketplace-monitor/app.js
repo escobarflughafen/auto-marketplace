@@ -29,6 +29,14 @@ const els = {
   settingsContent: document.getElementById('settingsContent'),
 };
 
+const CAPTURE_SETTINGS_STORAGE_KEY = 'marketplace-monitor-capture-settings';
+const DEFAULT_CAPTURE_SETTINGS = {
+  itemScreenshotMode: 'compressed',
+  itemScreenshotQuality: 55,
+  workerScreenshotMode: 'compressed',
+  workerScreenshotQuality: 55,
+};
+
 function normalizeTheme(value) {
   return value === 'classic' ? 'classic' : 'parasols';
 }
@@ -77,6 +85,44 @@ function apiUrl(url) {
   next.searchParams.set('token', token);
   return `${next.pathname}${next.search}`;
 }
+
+function readCaptureSettings() {
+  let stored = {};
+  try {
+    stored = JSON.parse(localStorage.getItem(CAPTURE_SETTINGS_STORAGE_KEY) || '{}');
+  } catch (_error) {
+    stored = {};
+  }
+  const clampQuality = (value, fallback) => Math.max(1, Math.min(100, Number.parseInt(String(value), 10) || fallback));
+  return {
+    itemScreenshotMode: stored.itemScreenshotMode === 'original' ? 'original' : 'compressed',
+    itemScreenshotQuality: clampQuality(stored.itemScreenshotQuality, DEFAULT_CAPTURE_SETTINGS.itemScreenshotQuality),
+    workerScreenshotMode: stored.workerScreenshotMode === 'original' ? 'original' : 'compressed',
+    workerScreenshotQuality: clampQuality(stored.workerScreenshotQuality, DEFAULT_CAPTURE_SETTINGS.workerScreenshotQuality),
+  };
+}
+
+function writeCaptureSettings(settings) {
+  localStorage.setItem(CAPTURE_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+}
+
+function captureSettingsArgs() {
+  const settings = readCaptureSettings();
+  const args = [];
+  if (settings.itemScreenshotMode === 'original') {
+    args.push('--screenshot-format', 'png');
+  } else {
+    args.push('--screenshot-format', 'jpeg', '--screenshot-quality', String(settings.itemScreenshotQuality));
+  }
+  if (settings.workerScreenshotMode === 'original') {
+    args.push('--worker-screenshot-format', 'png');
+  } else {
+    args.push('--worker-screenshot-format', 'jpeg', '--worker-screenshot-quality', String(settings.workerScreenshotQuality));
+  }
+  return args;
+}
+
+window.marketplaceMonitorRuntimeArgs = captureSettingsArgs;
 
 async function fetchJson(url, options) {
   const response = await fetch(apiUrl(url), options);
@@ -129,6 +175,9 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
     }
     const text = String(value ?? '').trim();
     if (text) args.push(field.flag, text);
+  }
+  if (workflow?.script === 'marketplace:home:process') {
+    args.push(...captureSettingsArgs());
   }
   return args;
 }
@@ -273,6 +322,7 @@ function renderSettings() {
   }
 
   const currentTheme = normalizeTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
+  const captureSettings = readCaptureSettings();
   els.settingsContent.innerHTML = '<section class="settings-section">'
     + '<div class="worker-control-section-title">Display</div>'
     + '<div class="settings-grid">'
@@ -282,12 +332,59 @@ function renderSettings() {
     + '</select></label>'
     + '</div>'
     + '</section>'
+    + '<section class="settings-section">'
+    + '<div class="worker-control-section-title">Artifact Capture</div>'
+    + '<div class="settings-grid">'
+    + '<label class="settings-field" for="itemScreenshotMode">Item snapshot<select id="itemScreenshotMode">'
+    + `<option value="compressed"${captureSettings.itemScreenshotMode === 'compressed' ? ' selected' : ''}>Compressed JPEG</option>`
+    + `<option value="original"${captureSettings.itemScreenshotMode === 'original' ? ' selected' : ''}>Original PNG</option>`
+    + '</select></label>'
+    + `<label class="settings-field" for="itemScreenshotQuality">Item JPEG quality<input id="itemScreenshotQuality" type="number" min="1" max="100" value="${html(captureSettings.itemScreenshotQuality)}"></label>`
+    + '<label class="settings-field" for="workerScreenshotMode">Worker live screenshot<select id="workerScreenshotMode">'
+    + `<option value="compressed"${captureSettings.workerScreenshotMode === 'compressed' ? ' selected' : ''}>Compressed JPEG</option>`
+    + `<option value="original"${captureSettings.workerScreenshotMode === 'original' ? ' selected' : ''}>Original PNG</option>`
+    + '</select></label>'
+    + `<label class="settings-field" for="workerScreenshotQuality">Worker JPEG quality<input id="workerScreenshotQuality" type="number" min="1" max="100" value="${html(captureSettings.workerScreenshotQuality)}"></label>`
+    + '</div>'
+    + '<div class="settings-note">These settings are added to Marketplace detail workers started from this monitor, including direct resolve and queued resolve actions.</div>'
+    + '</section>'
     + renderCredentialManager();
 
   document.getElementById('themeSelect')?.addEventListener('change', (event) => {
     setTheme(event.target.value);
   });
+  bindCaptureSettings();
   bindCredentialManager();
+}
+
+function bindCaptureSettings() {
+  const controls = [
+    document.getElementById('itemScreenshotMode'),
+    document.getElementById('itemScreenshotQuality'),
+    document.getElementById('workerScreenshotMode'),
+    document.getElementById('workerScreenshotQuality'),
+  ].filter(Boolean);
+  const save = () => {
+    const next = {
+      itemScreenshotMode: document.getElementById('itemScreenshotMode')?.value === 'original' ? 'original' : 'compressed',
+      itemScreenshotQuality: Math.max(1, Math.min(100, Number.parseInt(document.getElementById('itemScreenshotQuality')?.value || '', 10) || DEFAULT_CAPTURE_SETTINGS.itemScreenshotQuality)),
+      workerScreenshotMode: document.getElementById('workerScreenshotMode')?.value === 'original' ? 'original' : 'compressed',
+      workerScreenshotQuality: Math.max(1, Math.min(100, Number.parseInt(document.getElementById('workerScreenshotQuality')?.value || '', 10) || DEFAULT_CAPTURE_SETTINGS.workerScreenshotQuality)),
+    };
+    writeCaptureSettings(next);
+    const workflow = selectedWorkflow();
+    if (workflow?.script === 'marketplace:home:process') {
+      els.workflowArgsPreview.value = buildWorkflowArgs(workflow).join(' ');
+      const preview = document.getElementById('workerControlArgsPreview');
+      if (preview) {
+        preview.value = els.workflowArgsPreview.value;
+      }
+    }
+  };
+  for (const control of controls) {
+    control.addEventListener('input', save);
+    control.addEventListener('change', save);
+  }
 }
 
 function renderWorkflowForm() {

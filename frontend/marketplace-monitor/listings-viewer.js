@@ -92,6 +92,10 @@ async function fetchJson(url, options) {
   return payload;
 }
 
+function runtimeArgs() {
+  return window.marketplaceMonitorRuntimeArgs?.() || [];
+}
+
 function apiUrl(url) {
   const token = new URLSearchParams(window.location.search).get('token')
     || new URLSearchParams(window.location.search).get('apiToken');
@@ -672,7 +676,7 @@ export function createListingsViewer() {
       const result = await fetchJson('/api/listings/resolve', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, runtimeArgs: runtimeArgs() }),
       });
       const processId = result.process?.id || '';
       renderResolveControls(`Queued ${result.listingCount} listing(s) for resolve${processId ? ' in ' + processId : ''}.`);
@@ -845,6 +849,7 @@ export function createListingsViewer() {
       const result = await fetchJson('/api/resolve-queue/run', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runtimeArgs: runtimeArgs() }),
       });
       applyResolveQueuePayload(result.queue || {});
       const processId = result.process?.id || '';

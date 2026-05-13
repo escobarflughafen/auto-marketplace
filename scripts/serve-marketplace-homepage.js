@@ -681,6 +681,43 @@ function normalizeWorkflowArgs(value) {
     .filter(Boolean) || [];
 }
 
+function normalizeScreenshotRuntimeArgs(value) {
+  const args = normalizeWorkflowArgs(value);
+  const normalized = [];
+  const valuedFlags = new Set([
+    '--screenshot-format',
+    '--screenshot-quality',
+    '--artifact-budget-kb',
+    '--worker-screenshot-format',
+    '--worker-screenshot-quality',
+  ]);
+  const booleanFlags = new Set([
+    '--screenshot-full-page',
+    '--full-page-screenshot',
+    '--screenshot-viewport',
+    '--viewport-screenshot',
+  ]);
+
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    if (booleanFlags.has(flag)) {
+      normalized.push(flag);
+      continue;
+    }
+    if (!valuedFlags.has(flag)) {
+      continue;
+    }
+    const value = args[index + 1];
+    if (!value || value.startsWith('--')) {
+      continue;
+    }
+    normalized.push(flag, value);
+    index += 1;
+  }
+
+  return normalized;
+}
+
 function normalizeListingIds(value) {
   const source = Array.isArray(value) ? value : [value];
   return [...new Set(source
@@ -784,6 +821,7 @@ function resolveListingsFromViewer(db, body = {}) {
     '--listing-id-file', filePath,
     '--limit', String(listingIds.length),
     '--batch-size', mode === 'listing' ? '1' : '3',
+    ...normalizeScreenshotRuntimeArgs(body.runtimeArgs),
   ];
 
   const started = startManagedWorkflow(db, mode === 'listing' ? 'backlog-resolve' : 'backlog-worker', args);
@@ -795,7 +833,7 @@ function resolveListingsFromViewer(db, body = {}) {
   };
 }
 
-function resolveQueuedListingsFromViewer(db) {
+function resolveQueuedListingsFromViewer(db, body = {}) {
   refreshResolveQueueRunStatuses(db);
   const queuedItems = listResolveQueueItems(db, { statuses: ['queued'], limit: 500 });
   const queuedIds = queuedItems.map((item) => item.listing_id);
@@ -808,6 +846,7 @@ function resolveQueuedListingsFromViewer(db) {
   const result = resolveListingsFromViewer(db, {
     mode: 'selected',
     listingIds: queuedIds,
+    runtimeArgs: body.runtimeArgs,
   });
   const dispatchedIds = new Set(result.listingIds);
   const skippedIds = queuedIds.filter((listingId) => !dispatchedIds.has(listingId));
@@ -1199,7 +1238,7 @@ function listWorkerScreenshots(workerId, options = {}) {
   }
 
   return entries
-    .filter((entry) => entry.isFile() && /\.png$/i.test(entry.name))
+    .filter((entry) => entry.isFile() && /\.(?:png|jpe?g)$/i.test(entry.name))
     .map((entry) => {
       const filePath = path.join(directory, entry.name);
       const stat = fs.statSync(filePath);
@@ -1435,7 +1474,8 @@ function createServer(options) {
         return;
       }
       try {
-        const result = resolveQueuedListingsFromViewer(db);
+        const body = await readRequestJson(request);
+        const result = resolveQueuedListingsFromViewer(db, body);
         writeJson(response, 201, result);
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });
