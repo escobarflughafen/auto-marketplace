@@ -262,7 +262,7 @@ service user:
 ops/migrate-marketplace-runtime-to-remote.sh --execute --remote-user auto-browser
 ```
 
-The migration script also performs a remote preflight, health check, container
+The migration script also performs a remote preflight, `/healthz` health check, container
 doctor, and DB maintenance after restart. See `docs/remote-migration.md` for the
 full Ubuntu service-user migration process, including Docker container-name
 conflict cleanup when moving from an older project path to
@@ -278,6 +278,7 @@ The management UI is served from `frontend/marketplace-monitor/`; `scripts/serve
 The UI keeps workflow drafts client-side, separates static workflow definitions from polling state, and exposes worker audit views from `listing_events`. Selecting a worker opens an exclusive detail view with a status table, grouped done/skipped/error/started event tables, text history, and the latest worker POV screenshot when available.
 
 At startup the monitor issues an admin URL and a read-only URL unless tokens are provided with `MARKETPLACE_MONITOR_ADMIN_TOKEN` and `MARKETPLACE_MONITOR_READONLY_TOKEN` or with `--admin-token` and `--read-only-token`. The frontend carries the `?token=...` query parameter into API calls. API clients may also use `X-API-Token` or `Authorization: Bearer <token>`.
+If the page is opened without `token` or `apiToken`, the monitor shows an access warning banner and does not load token-protected data.
 
 Export all homepage DB rows to JSON:
 

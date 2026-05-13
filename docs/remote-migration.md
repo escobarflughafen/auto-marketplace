@@ -37,7 +37,7 @@ sudo ops/ubuntu-deploy-auto-browser.sh
 This installs/verifies Docker Engine and the Compose plugin, creates the
 `auto-browser` service user, prepares `artifacts/`, `profiles/`, `secrets/`,
 and `backups/`, builds and starts the container, waits for
-`http://127.0.0.1:21435/api/summary`, runs `marketplace:doctor` in the
+`http://127.0.0.1:21435/healthz`, runs `marketplace:doctor` in the
 container, and runs SQLite maintenance. If credentials are available on the
 server, install them during setup:
 
@@ -165,7 +165,7 @@ The migration script:
 - syncs local `artifacts/marketplace-homepage` to the remote runtime directory
 - verifies remote project files, runtime directories, and Docker Compose
 - rebuilds/restarts Docker Compose
-- waits for the HTTP API health endpoint
+- waits for the HTTP service health endpoint
 - runs `marketplace:doctor` inside the container
 - runs remote DB maintenance/checkpoint
 

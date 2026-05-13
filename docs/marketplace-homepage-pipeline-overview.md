@@ -222,6 +222,7 @@ npm run marketplace:home:serve -- --admin-token admin-secret --read-only-token r
 ```
 
 The browser frontend reads `token` or `apiToken` from the page URL and appends it to `/api/*` calls. API clients can also send the token with `X-API-Token` or `Authorization: Bearer <token>`. This keeps the current MVP simple while leaving the route authorization model compatible with a later OAuth2/JWT implementation.
+If the monitor is opened without a token, the frontend displays a prominent access warning and skips token-protected startup loads so the missing-token state is obvious instead of failing as background API errors.
 
 ## Coding Logic and Implementation
 

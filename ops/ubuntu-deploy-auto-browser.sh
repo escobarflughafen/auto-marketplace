@@ -304,7 +304,7 @@ compose_cmd() {
 }
 
 wait_for_health() {
-  local url="http://127.0.0.1:21435/api/summary"
+  local url="http://127.0.0.1:21435/healthz"
   log "waiting for ${url}"
   for _ in $(seq 1 30); do
     if curl -fsS "$url" >/dev/null; then

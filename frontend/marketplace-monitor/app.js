@@ -53,9 +53,23 @@ function html(value) {
   }[char]));
 }
 
+function apiToken() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('token') || params.get('apiToken') || '';
+}
+
+function hasApiToken() {
+  return Boolean(apiToken());
+}
+
+function renderTokenWarning() {
+  const warning = document.getElementById('tokenWarning');
+  if (!warning) return;
+  warning.hidden = hasApiToken();
+}
+
 function apiUrl(url) {
-  const token = new URLSearchParams(window.location.search).get('token')
-    || new URLSearchParams(window.location.search).get('apiToken');
+  const token = apiToken();
   if (!token || !String(url).startsWith('/api/')) {
     return url;
   }
@@ -1010,12 +1024,18 @@ function bindEvents() {
 bindEvents();
 listingsViewer.bindEvents();
 listingsViewer.renderHead();
-await loadSummary();
-await listingsViewer.loadQueryFields();
-await listingsViewer.loadResolveQueue();
-await listingsViewer.loadRows();
-await loadCredentials({ render: false });
-renderSettings();
-await loadWorkflows();
-setInterval(loadSummary, 10000);
-setInterval(syncWorkflowsInBackground, 5000);
+renderTokenWarning();
+if (hasApiToken()) {
+  await loadSummary();
+  await listingsViewer.loadQueryFields();
+  await listingsViewer.loadResolveQueue();
+  await listingsViewer.loadRows();
+  await loadCredentials({ render: false });
+  renderSettings();
+  await loadWorkflows();
+  setInterval(loadSummary, 10000);
+  setInterval(syncWorkflowsInBackground, 5000);
+} else {
+  els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Locked</div></div>';
+  renderSettings();
+}

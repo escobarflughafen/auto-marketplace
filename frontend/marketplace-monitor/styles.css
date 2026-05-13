@@ -172,6 +172,24 @@ h1 {
   max-width: 46rem;
   color: rgba(255, 255, 255, 0.76);
 }
+.access-warning {
+  margin: -2px -18px 12px;
+  padding: 12px 18px;
+  color: #0d0015;
+  background: #fccc0a;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.access-warning strong {
+  font-weight: 800;
+}
+.access-warning code {
+  padding: 1px 4px;
+  color: #ffffff;
+  background: #0d0015;
+  border-radius: 0;
+}
 .theme-field {
   display: grid;
   grid-template-columns: auto minmax(8.5rem, 1fr);
@@ -231,6 +249,18 @@ h1 {
 }
 :root[data-theme="classic"] .shell {
   padding: 18px;
+}
+:root[data-theme="classic"] .access-warning {
+  margin: 0 0 12px;
+  color: #3b2300;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: var(--radius-panel);
+}
+:root[data-theme="classic"] .access-warning code {
+  color: #24292f;
+  background: #f6f8fa;
+  border-radius: var(--radius-control);
 }
 :root[data-theme="classic"] .tab.active,
 :root[data-theme="classic"] .subtab.active,
