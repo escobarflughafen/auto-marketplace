@@ -14,6 +14,7 @@ const {
   readListingDetailPanelText,
   readListingTitle,
   extractListingContent,
+  writeListingDetailHtmlArtifact,
   writeListingSnapshot,
   slugify,
 } = require('./marketplace-utils');
@@ -555,8 +556,9 @@ async function captureListingRecord(context, page, listing, options) {
 
   const fallbackTitle = listing.card_title || listing.card_text || listing.listing_id;
   let listingContent;
+  let detailPanel = null;
   try {
-    const detailPanel = await readListingDetailPanelText(activePage);
+    detailPanel = await readListingDetailPanelText(activePage);
     listingContent = extractListingContent(detailPanel.text, detailPanel.title || fallbackTitle);
     listingContent.extractionSource = 'listing_detail_panel';
     listingContent.extractionSelector = detailPanel.selector;
@@ -574,11 +576,23 @@ async function captureListingRecord(context, page, listing, options) {
   const thumbnails = options.captureThumbnails
     ? await captureListingThumbnails(activePage, captureDir, baseName, { logger: log })
     : [];
+  const detailHtmlPath = await writeListingDetailHtmlArtifact({
+    captureDir,
+    baseName,
+    html: detailPanel?.html || '',
+  });
+  const detailFullHtmlPath = await writeListingDetailHtmlArtifact({
+    captureDir,
+    baseName: `${baseName}-full`,
+    html: detailPanel?.fullHtml || '',
+  });
   const snapshotPath = await writeListingSnapshot({
     captureDir,
     baseName,
     url: listing.href,
     screenshotPath,
+    detailHtmlPath,
+    detailFullHtmlPath,
     listingContent,
     thumbnails,
   });
@@ -592,6 +606,30 @@ async function captureListingRecord(context, page, listing, options) {
       screenshotPath,
       snapshotPath,
       screenshot,
+      detailHtmlPath,
+      detailFullHtmlPath,
+      detailHtml: detailHtmlPath
+        ? {
+          path: detailHtmlPath,
+          selector: detailPanel?.htmlSelector || detailPanel?.selector || '',
+          xpath: detailPanel?.htmlXPath || '',
+          textLength: detailPanel?.htmlText?.length || 0,
+          htmlLength: detailPanel?.htmlLength || 0,
+          score: detailPanel?.htmlScore || detailPanel?.score || 0,
+          rect: detailPanel?.htmlRect || detailPanel?.rect || null,
+        }
+        : null,
+      detailFullHtml: detailFullHtmlPath
+        ? {
+          path: detailFullHtmlPath,
+          selector: detailPanel?.fullHtmlSelector || detailPanel?.selector || '',
+          xpath: detailPanel?.fullHtmlXPath || '',
+          textLength: detailPanel?.fullHtmlText?.length || 0,
+          htmlLength: detailPanel?.fullHtmlLength || 0,
+          score: detailPanel?.fullHtmlScore || detailPanel?.score || 0,
+          rect: detailPanel?.fullHtmlRect || detailPanel?.rect || null,
+        }
+        : null,
     },
   };
 }
@@ -638,6 +676,8 @@ function buildDetailEventContent(listing, detailRecord, workerId) {
     availability: Boolean(detail.availabilityStatus && detail.availabilityStatus !== 'unknown'),
     screenshot: Boolean(detailRecord.screenshotPath),
     snapshot: Boolean(detailRecord.snapshotPath),
+    detailHtml: Boolean(detailRecord.detailHtmlPath),
+    detailFullHtml: Boolean(detailRecord.detailFullHtmlPath),
     thumbnails: thumbnailCount > 0,
   };
   const extractedCount = Object.values(extractedFields).filter(Boolean).length;
@@ -686,8 +726,12 @@ function buildDetailEventContent(listing, detailRecord, workerId) {
     artifacts: {
       screenshotPath: detailRecord.screenshotPath || '',
       snapshotPath: detailRecord.snapshotPath || '',
+      detailHtmlPath: detailRecord.detailHtmlPath || '',
+      detailFullHtmlPath: detailRecord.detailFullHtmlPath || '',
       thumbnails: detailRecord.thumbnails || [],
       screenshot: detailRecord.screenshot || null,
+      detailHtml: detailRecord.detailHtml || null,
+      detailFullHtml: detailRecord.detailFullHtml || null,
     },
     runtime: {
       workerId,

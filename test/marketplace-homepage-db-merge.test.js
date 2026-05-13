@@ -110,9 +110,11 @@ test('media helpers clear or rewrite paths', () => {
     transformJsonText(JSON.stringify({
       title: 'Camera',
       screenshotPath: '/Users/aoi/file.png',
+      detailHtmlPath: '/Users/aoi/file.html',
+      detailFullHtmlPath: '/Users/aoi/file-full.html',
       nested: { snapshotPath: '/Users/aoi/file.md' },
     }), { clearMediaPaths: true, rewritePrefixes: [] }),
-    JSON.stringify({ title: 'Camera', screenshotPath: '', nested: { snapshotPath: '' } }),
+    JSON.stringify({ title: 'Camera', screenshotPath: '', detailHtmlPath: '', detailFullHtmlPath: '', nested: { snapshotPath: '' } }),
   );
 });
 

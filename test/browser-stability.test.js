@@ -344,6 +344,21 @@ test('detectListingAvailability recognizes pending Marketplace listings', () => 
   assert.equal(availability.reason, 'pending_marker');
 });
 
+test('detectListingAvailability recognizes localized title status markers', () => {
+  assert.deepEqual(
+    detectListingAvailability('商品交易小组 交易中 · BMW 325e 1986 AUTO CA$ 6,600 Vancouver, BC'),
+    { status: 'pending_sale', reason: 'pending_marker' },
+  );
+  assert.deepEqual(
+    detectListingAvailability('Marketplace Vendu · Leica M6 CA$ 3,800 Montréal, QC'),
+    { status: 'sold', reason: 'sold_marker' },
+  );
+  assert.deepEqual(
+    detectListingAvailability('Marketplace En attente · Leica M6 CA$ 3,800 Montréal, QC'),
+    { status: 'pending_sale', reason: 'pending_marker' },
+  );
+});
+
 test('detectListingAvailability recognizes scoped listing status markers without whole-page prefix', () => {
   const availability = detectListingAvailability('Sold · Leica M6 CA$ 3,800 Vancouver, BC Details Seller information');
   assert.equal(availability.status, 'sold');
@@ -420,12 +435,34 @@ test('readListingDetailPanelText returns scoped Marketplace detail panel text', 
       selector: 'div[aria-label="Marketplace item listing"]',
       score: 32,
       rect: { x: 0, y: 0, width: 420, height: 800 },
+      html: '<!doctype html><main data-marketplace-listing-detail-capture="true"><div>Details Condition New</div></main>',
+      htmlLength: 100,
+      htmlText: 'Details Condition New',
+      htmlSelector: 'div',
+      htmlXPath: '/html[1]/body[1]/div[1]',
+      htmlScore: 30,
+      htmlRect: { x: 0, y: 120, width: 420, height: 220 },
+      fullHtml: '<!doctype html><main data-marketplace-listing-detail-capture="full-detail-panel"><div>Modular Capsule Home CA$ 42,000 Details Condition New Seller information</div></main>',
+      fullHtmlLength: 160,
+      fullHtmlText: 'Modular Capsule Home CA$ 42,000 Details Condition New Seller information',
+      fullHtmlSelector: 'div[aria-label="Marketplace item listing"]',
+      fullHtmlXPath: '/html[1]/body[1]/div[2]',
+      fullHtmlScore: 32,
+      fullHtmlRect: { x: 0, y: 0, width: 420, height: 800 },
     }),
   });
 
   assert.equal(panel.text, 'Modular Capsule Home CA$ 42,000 Details Condition New Seller information');
   assert.equal(panel.title, 'Modular Capsule Home');
   assert.equal(panel.selector, 'div[aria-label="Marketplace item listing"]');
+  assert.match(panel.html, /data-marketplace-listing-detail-capture/);
+  assert.equal(panel.htmlText, 'Details Condition New');
+  assert.equal(panel.htmlSelector, 'div');
+  assert.equal(panel.htmlXPath, '/html[1]/body[1]/div[1]');
+  assert.match(panel.fullHtml, /full-detail-panel/);
+  assert.equal(panel.fullHtmlText, 'Modular Capsule Home CA$ 42,000 Details Condition New Seller information');
+  assert.equal(panel.fullHtmlSelector, 'div[aria-label="Marketplace item listing"]');
+  assert.equal(panel.fullHtmlXPath, '/html[1]/body[1]/div[2]');
 });
 
 test('readListingDetailPanelText fails when no scoped panel is found', async () => {

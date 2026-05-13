@@ -247,6 +247,24 @@ test('buildDetailEventContent captures structured resolver metadata', () => {
     title: 'Detail title',
     screenshotPath: '/tmp/listing-1.png',
     snapshotPath: '/tmp/listing-1.md',
+    detailHtmlPath: '/tmp/listing-1.html',
+    detailFullHtmlPath: '/tmp/listing-1-full.html',
+    detailHtml: {
+      path: '/tmp/listing-1.html',
+      selector: 'div',
+      xpath: '/html[1]/body[1]/div[1]',
+      htmlLength: 1200,
+      textLength: 120,
+      score: 30,
+    },
+    detailFullHtml: {
+      path: '/tmp/listing-1-full.html',
+      selector: 'div[role="main"]',
+      xpath: '/html[1]/body[1]/div[2]',
+      htmlLength: 4200,
+      textLength: 320,
+      score: 32,
+    },
     thumbnails: [{ screenshotPath: '/tmp/thumb-1.png', src: 'https://example.test/thumb.jpg' }],
     listingContent: {
       title: 'Detail title',
@@ -276,6 +294,12 @@ test('buildDetailEventContent captures structured resolver metadata', () => {
   assert.equal(content.availability.isInactive, false);
   assert.equal(content.extraction.thumbnailCount, 1);
   assert.equal(content.extraction.extractedFields.screenshot, true);
+  assert.equal(content.extraction.extractedFields.detailHtml, true);
+  assert.equal(content.extraction.extractedFields.detailFullHtml, true);
+  assert.equal(content.artifacts.detailHtmlPath, '/tmp/listing-1.html');
+  assert.equal(content.artifacts.detailFullHtmlPath, '/tmp/listing-1-full.html');
+  assert.equal(content.artifacts.detailHtml.htmlLength, 1200);
+  assert.equal(content.artifacts.detailFullHtml.htmlLength, 4200);
   assert.equal(content.runtime.contentHashStrategy, 'comparable.detail.v1');
 });
 

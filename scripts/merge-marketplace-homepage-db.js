@@ -10,7 +10,16 @@ const {
 
 const TERMINAL_DETAIL_STATUSES = ['done', 'sold', 'pending_sale'];
 const DEFAULT_IMPORT_STATUSES = TERMINAL_DETAIL_STATUSES;
-const MEDIA_PATH_KEYS = new Set(['screenshotPath', 'snapshotPath', 'screenshot_path', 'snapshot_path']);
+const MEDIA_PATH_KEYS = new Set([
+  'screenshotPath',
+  'snapshotPath',
+  'detailHtmlPath',
+  'detailFullHtmlPath',
+  'screenshot_path',
+  'snapshot_path',
+  'detail_html_path',
+  'detail_full_html_path',
+]);
 
 function readFlagValue(argv, index, flagName) {
   const value = argv[index + 1];

@@ -993,6 +993,111 @@ async function readListingDetailPanelText(page) {
       }
       return parts.join('');
     };
+    const absoluteXPath = (element) => {
+      const parts = [];
+      for (let node = element; node && node.nodeType === Node.ELEMENT_NODE; node = node.parentElement) {
+        const tagName = node.tagName.toLowerCase();
+        let index = 1;
+        for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+          if (sibling.tagName.toLowerCase() === tagName) {
+            index += 1;
+          }
+        }
+        parts.unshift(`${tagName}[${index}]`);
+      }
+      return parts.length ? `/${parts.join('/')}` : '';
+    };
+    const elementFromXPath = (xpath) => {
+      try {
+        const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        return node instanceof Element ? node : null;
+      } catch (_error) {
+        return null;
+      }
+    };
+    const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[char]));
+    const sanitizeCapturedElement = (root) => {
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll('script, style, noscript, svg, canvas, iframe, video, audio, source, track, form, input, textarea, select, button').forEach((node) => node.remove());
+      const comments = [];
+      const commentWalker = document.createTreeWalker(clone, NodeFilter.SHOW_COMMENT);
+      while (commentWalker.nextNode()) {
+        comments.push(commentWalker.currentNode);
+      }
+      comments.forEach((node) => node.remove());
+
+      const scrubNode = (node) => {
+        if (node.getAttribute('aria-hidden') === 'true' && !normalize(node.textContent)) {
+          node.remove();
+          return;
+        }
+
+        if (node.tagName.toLowerCase() === 'img') {
+          const imageUrl = node.getAttribute('src') || node.getAttribute('data-src') || '';
+          const alt = node.getAttribute('alt') || node.getAttribute('aria-label') || '';
+          for (const attribute of Array.from(node.attributes)) {
+            node.removeAttribute(attribute.name);
+          }
+          if (imageUrl) {
+            node.setAttribute('src', imageUrl);
+          }
+          if (alt) {
+            node.setAttribute('alt', normalize(alt));
+          }
+          return;
+        }
+
+        const keepAttributes = {};
+        if (node.tagName.toLowerCase() === 'a') {
+          const href = node.getAttribute('href') || '';
+          if (/^(?:https?:)?\/\//iu.test(href) || href.startsWith('/marketplace/')) {
+            keepAttributes.href = href;
+          }
+        }
+        for (const name of ['aria-label', 'role', 'title', 'datetime']) {
+          const value = node.getAttribute(name);
+          if (value && normalize(value)) {
+            keepAttributes[name] = normalize(value);
+          }
+        }
+        for (const attribute of Array.from(node.attributes)) {
+          node.removeAttribute(attribute.name);
+        }
+        for (const [name, value] of Object.entries(keepAttributes)) {
+          node.setAttribute(name, value);
+        }
+      };
+      scrubNode(clone);
+      clone.querySelectorAll('*').forEach(scrubNode);
+      clone.querySelectorAll('div, span').forEach((node) => {
+        if (!node.attributes.length && !normalize(node.textContent) && node.children.length === 0) {
+          node.remove();
+        }
+      });
+      return clone;
+    };
+    const serializeElementHtml = (element, titleText, captureType = 'detail') => {
+      const clone = sanitizeCapturedElement(element);
+      return '<!doctype html>\n'
+        + '<html lang="en">\n'
+        + '<head>\n'
+        + '<meta charset="utf-8">\n'
+        + '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        + `<title>${escapeHtml(normalize(titleText || document.title || 'Marketplace listing'))}</title>\n`
+        + '</head>\n'
+        + '<body>\n'
+        + `<main data-marketplace-listing-detail-capture="${escapeHtml(captureType)}">\n`
+        + `${clone.outerHTML}\n`
+        + '</main>\n'
+        + '</body>\n'
+        + '</html>\n';
+    };
     const visible = (element) => {
       const rect = element?.getBoundingClientRect?.();
       return Boolean(rect && rect.width >= 40 && rect.height >= 12);
@@ -1049,6 +1154,7 @@ async function readListingDetailPanelText(page) {
         length: text.length,
         rect: rectSummary(rect),
         label: elementLabel(element),
+        xpath: absoluteXPath(element),
       };
     };
 
@@ -1091,12 +1197,86 @@ async function readListingDetailPanelText(page) {
       return null;
     }
 
-    return {
+    const selectedResult = {
       text: selected.text,
       title: selected.title || '',
       selector: selected.label,
       score: selected.score,
       rect: selected.rect,
+      xpath: selected.xpath || '',
+    };
+
+    const knownFullDetailXPaths = [
+      '/html/body/div[1]/div/div[1]/div/div[3]/div/div/div[1]/div[1]/div[2]/div/div/div/div/div/div[1]/div[2]',
+    ];
+    const knownFullCandidates = knownFullDetailXPaths
+      .map(elementFromXPath)
+      .filter((element) => element && visible(element))
+      .map((element) => scoreElement(element, selected.title || ''))
+      .filter((candidate) => candidate && candidate.score >= 12 && (!selected.title || candidate.text.includes(selected.title)));
+    knownFullCandidates.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return b.length - a.length;
+    });
+
+    const detailHtmlPattern = /(?:Details|Condition|Description|Approximate location|详细信息|商品状况|詳情|商品狀況|大概位置)/iu;
+    const sellerPattern = /(?:Seller information|Seller details|Message seller|Sponsored|卖家信息|卖家详细信息|賣家資訊|發消息給賣家|发消息给卖家|赞助内容|贊助內容)/iu;
+    const detailHtmlCandidates = Array.from((document.querySelector('div[role="main"], main') || document).querySelectorAll('div, section, article'))
+      .filter(visible)
+      .map((element) => {
+        const text = normalize(element.innerText || element.textContent);
+        const rect = element.getBoundingClientRect();
+        if (!text || text.length < 40 || text.length > 8000 || rect.width < 180 || rect.height < 40) {
+          return null;
+        }
+        let score = 0;
+        if (detailHtmlPattern.test(text)) score += 16;
+        if (/(?:Details|详细信息|詳情)/iu.test(text)) score += 8;
+        if (/(?:Condition|商品状况|商品狀況)/iu.test(text)) score += 6;
+        if (/(?:Approximate location|大概位置)/iu.test(text)) score += 3;
+        if (selected.title && text.includes(selected.title)) score -= 3;
+        if (pricePattern.test(text)) score -= 2;
+        if (sellerPattern.test(text)) score -= 10;
+        return {
+          element,
+          text,
+          score,
+          length: text.length,
+          rect: rectSummary(rect),
+          label: elementLabel(element),
+          xpath: absoluteXPath(element),
+        };
+      })
+      .filter((candidate) => candidate && candidate.score >= 12)
+      .sort((a, b) => {
+        if (b.score !== a.score) {
+          return b.score - a.score;
+        }
+        return a.length - b.length;
+      });
+    const htmlElement = detailHtmlCandidates[0] || selected;
+    const fullHtmlElement = knownFullCandidates[0] || selected;
+    const html = serializeElementHtml(htmlElement.element, selected.title || '', 'compact-detail');
+    const fullHtml = serializeElementHtml(fullHtmlElement.element, selected.title || '', 'full-detail-panel');
+
+    return {
+      ...selectedResult,
+      html,
+      htmlLength: html.length,
+      htmlText: htmlElement.text || '',
+      htmlSelector: htmlElement.label || '',
+      htmlXPath: htmlElement.xpath || '',
+      htmlScore: htmlElement.score || 0,
+      htmlRect: htmlElement.rect || null,
+      fullHtml,
+      fullHtmlLength: fullHtml.length,
+      fullHtmlText: fullHtmlElement.text || '',
+      fullHtmlSelector: fullHtmlElement.label || '',
+      fullHtmlXPath: fullHtmlElement.xpath || '',
+      fullHtmlScore: fullHtmlElement.score || 0,
+      fullHtmlRect: fullHtmlElement.rect || null,
     };
   });
 
@@ -1110,6 +1290,20 @@ async function readListingDetailPanelText(page) {
     selector: result.selector || '',
     score: result.score || 0,
     rect: result.rect || null,
+    html: result.html || '',
+    htmlLength: result.htmlLength || 0,
+    htmlText: cleanText(result.htmlText || ''),
+    htmlSelector: result.htmlSelector || '',
+    htmlXPath: result.htmlXPath || '',
+    htmlScore: result.htmlScore || 0,
+    htmlRect: result.htmlRect || null,
+    fullHtml: result.fullHtml || '',
+    fullHtmlLength: result.fullHtmlLength || 0,
+    fullHtmlText: cleanText(result.fullHtmlText || ''),
+    fullHtmlSelector: result.fullHtmlSelector || '',
+    fullHtmlXPath: result.fullHtmlXPath || '',
+    fullHtmlScore: result.fullHtmlScore || 0,
+    fullHtmlRect: result.fullHtmlRect || null,
   };
 }
 
@@ -1160,8 +1354,8 @@ function extractMarketplaceStatusMarker(pageText) {
   }
 
   const titleStatusPatterns = [
-    /(?:^|\s)(?:(?:Marketplace|商品交易小组)\s+)?(Sold|已售|售出|已卖)\s*·\s+/iu,
-    /(?:^|\s)(?:(?:Marketplace|商品交易小组)\s+)?(Pending|待处理|交易待定|待定)\s*·\s+/iu,
+    /(?:^|\s)(?:(?:Marketplace|商品交易小组)\s+)?(Sold|Vendu|已售|售出|已卖|已賣|已出售)\s*·\s+/iu,
+    /(?:^|\s)(?:(?:Marketplace|商品交易小组)\s+)?(Pending|En attente|交易中|待处理|交易待定|待定)\s*·\s+/iu,
   ];
 
   for (const pattern of titleStatusPatterns) {
@@ -1170,10 +1364,10 @@ function extractMarketplaceStatusMarker(pageText) {
       continue;
     }
     const marker = cleanText(match[1]);
-    if (/^(?:Sold|已售|售出|已卖)$/iu.test(marker)) {
+    if (/^(?:Sold|Vendu|已售|售出|已卖|已賣|已出售)$/iu.test(marker)) {
       return { status: 'sold', reason: 'sold_marker' };
     }
-    if (/^(?:Pending|待处理|交易待定|待定)$/iu.test(marker)) {
+    if (/^(?:Pending|En attente|交易中|待处理|交易待定|待定)$/iu.test(marker)) {
       return { status: 'pending_sale', reason: 'pending_marker' };
     }
   }
@@ -1496,6 +1690,8 @@ function buildSnapshotMarkdown({
   capturedAt,
   url,
   screenshotPath,
+  detailHtmlPath = '',
+  detailFullHtmlPath = '',
   markdownPath,
   query = '',
   area = '',
@@ -1513,7 +1709,7 @@ ${query ? `- Search query: ${query}\n` : ''}${area ? `- Search area: ${area}\n` 
 - Title: ${listingContent.title || 'Unavailable'}
 - Price: ${listingContent.price || 'Unavailable'}
 ${listingContent.previousPrice ? `- Previous price: ${listingContent.previousPrice}\n` : ''}${listingContent.listedAgo ? `- Listed: ${listingContent.listedAgo}\n` : ''}${listingContent.location ? `- Location: ${listingContent.location}\n` : ''}${listingContent.condition ? `- Condition: ${listingContent.condition}\n` : ''}${listingContent.sellerName ? `- Seller: ${listingContent.sellerName}\n` : ''}${listingContent.sellerRating ? `- Seller rating count: ${listingContent.sellerRating}\n` : ''}${listingContent.sellerJoined ? `- Seller joined: ${listingContent.sellerJoined}\n` : ''}- Screenshot: [${screenshotName}](./${screenshotName})
-- Snapshot record: ${markdownName}
+${detailHtmlPath ? `- Detail HTML: [${path.basename(detailHtmlPath)}](./${path.basename(detailHtmlPath)})\n` : ''}${detailFullHtmlPath ? `- Full detail HTML: [${path.basename(detailFullHtmlPath)}](./${path.basename(detailFullHtmlPath)})\n` : ''}- Snapshot record: ${markdownName}
 
 ## Description
 
@@ -1554,11 +1750,27 @@ ${excerpt}
 `;
 }
 
+async function writeListingDetailHtmlArtifact({
+  captureDir,
+  baseName,
+  html,
+}) {
+  const cleanHtml = String(html || '').trim();
+  if (!cleanHtml) {
+    return '';
+  }
+  const htmlPath = path.join(captureDir, `${baseName}.html`);
+  await fs.promises.writeFile(htmlPath, `${cleanHtml}\n`, 'utf8');
+  return htmlPath;
+}
+
 async function writeListingSnapshot({
   captureDir,
   baseName,
   url,
   screenshotPath,
+  detailHtmlPath = '',
+  detailFullHtmlPath = '',
   query,
   area,
   listingContent,
@@ -1569,6 +1781,8 @@ async function writeListingSnapshot({
     capturedAt: new Date().toISOString(),
     url,
     screenshotPath,
+    detailHtmlPath,
+    detailFullHtmlPath,
     markdownPath,
     query,
     area,
@@ -1614,5 +1828,6 @@ module.exports = {
   detectListingUnavailablePage,
   detectListingAvailability,
   extractListingContent,
+  writeListingDetailHtmlArtifact,
   writeListingSnapshot,
 };
