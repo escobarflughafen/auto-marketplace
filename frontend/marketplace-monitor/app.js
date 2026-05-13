@@ -53,8 +53,19 @@ function html(value) {
   }[char]));
 }
 
+function apiUrl(url) {
+  const token = new URLSearchParams(window.location.search).get('token')
+    || new URLSearchParams(window.location.search).get('apiToken');
+  if (!token || !String(url).startsWith('/api/')) {
+    return url;
+  }
+  const next = new URL(url, window.location.origin);
+  next.searchParams.set('token', token);
+  return `${next.pathname}${next.search}`;
+}
+
 async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+  const response = await fetch(apiUrl(url), options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload.error || response.statusText);

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { URL } = require('url');
 const { spawn } = require('child_process');
 
@@ -89,6 +90,8 @@ function parseArgs(argv) {
     host: '127.0.0.1',
     port: 3080,
     dbPath: DEFAULT_DB_PATH,
+    adminToken: process.env.MARKETPLACE_MONITOR_ADMIN_TOKEN || '',
+    readOnlyToken: process.env.MARKETPLACE_MONITOR_READONLY_TOKEN || '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -106,12 +109,31 @@ function parseArgs(argv) {
         options.dbPath = readFlagValue(argv, index, arg);
         index += 1;
         break;
+      case '--admin-token':
+        options.adminToken = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--read-only-token':
+      case '--readonly-token':
+        options.readOnlyToken = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
       default:
         throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
+  options.adminToken ||= generateAccessToken();
+  options.readOnlyToken ||= generateAccessToken();
+  if (options.adminToken === options.readOnlyToken) {
+    throw new Error('Admin and read-only tokens must be different');
+  }
+
   return options;
+}
+
+function generateAccessToken() {
+  return crypto.randomBytes(24).toString('base64url');
 }
 
 const WORKFLOWS = {
@@ -965,6 +987,55 @@ function writeJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload, null, 2));
 }
 
+function tokenFromRequest(request, requestUrl) {
+  const queryToken = requestUrl.searchParams.get('token') || requestUrl.searchParams.get('apiToken');
+  if (queryToken) {
+    return queryToken;
+  }
+
+  const headerToken = request.headers['x-api-token'];
+  if (headerToken) {
+    return Array.isArray(headerToken) ? headerToken[0] : headerToken;
+  }
+
+  const authorization = request.headers.authorization || '';
+  const match = String(authorization).match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : '';
+}
+
+function accessForRequest(options, request, requestUrl) {
+  const token = tokenFromRequest(request, requestUrl);
+  if (token && token === options.adminToken) {
+    return { role: 'admin', canWrite: true };
+  }
+  if (token && token === options.readOnlyToken) {
+    return { role: 'readonly', canWrite: false };
+  }
+  return { role: '', canWrite: false };
+}
+
+function authPayloadForAccess(access) {
+  const canWrite = Boolean(access.canWrite);
+  return {
+    role: access.role,
+    capabilities: {
+      canRead: Boolean(access.role),
+      canWrite,
+      canManageQueue: canWrite,
+      canManageWorkers: canWrite,
+      canManageCredentials: canWrite,
+    },
+  };
+}
+
+function writeAuthError(response, access) {
+  if (!access.role) {
+    writeJson(response, 401, { error: 'Missing or invalid API token' });
+    return;
+  }
+  writeJson(response, 403, { error: 'Read-only token cannot perform this action' });
+}
+
 function contentTypeForPath(filePath) {
   switch (path.extname(filePath).toLowerCase()) {
     case '.html':
@@ -1149,6 +1220,9 @@ function createServer(options) {
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+    const access = requestUrl.pathname.startsWith('/api/')
+      ? accessForRequest(options, request, requestUrl)
+      : { role: 'public', canWrite: false };
 
     if (requestUrl.pathname === '/') {
       serveStaticFrontend(response, 'index.html');
@@ -1165,8 +1239,15 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname.startsWith('/api/') && !access.role) {
+      writeAuthError(response, access);
+      return;
+    }
+
     if (requestUrl.pathname === '/api/summary') {
-      refreshResolveQueueRunStatuses(db);
+      if (access.canWrite) {
+        refreshResolveQueueRunStatuses(db);
+      }
       const total = db.prepare('SELECT COUNT(*) AS total FROM homepage_listings').get().total;
       const latest = db.prepare('SELECT MAX(last_seen_at) AS latest_seen_at FROM homepage_listings').get();
       writeJson(response, 200, {
@@ -1175,6 +1256,7 @@ function createServer(options) {
         latestSeenAt: latest.latest_seen_at,
         queueCounts: getHomepageListingCounts(db),
         resolveQueueCounts: getResolveQueueCounts(db),
+        auth: authPayloadForAccess(access),
       });
       return;
     }
@@ -1251,7 +1333,9 @@ function createServer(options) {
           retryDelaySeconds,
           ...(maxAttempts !== undefined ? { maxAttempts } : {}),
         };
-        refreshResolveQueueRunStatuses(db);
+        if (access.canWrite) {
+          refreshResolveQueueRunStatuses(db);
+        }
         const startedAt = process.hrtime.bigint();
         const rows = listBacklogCandidates(db, options);
         const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
@@ -1271,6 +1355,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/listings/resolve' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const result = resolveListingsFromViewer(db, body);
@@ -1282,7 +1370,9 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'GET') {
-      refreshResolveQueueRunStatuses(db);
+      if (access.canWrite) {
+        refreshResolveQueueRunStatuses(db);
+      }
       writeJson(response, 200, {
         items: listResolveQueueItems(db),
         counts: getResolveQueueCounts(db),
@@ -1292,6 +1382,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const result = addResolveQueueItems(db, normalizeListingIds(body.listingIds || body.listingId), {
@@ -1308,6 +1402,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'DELETE') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const result = clearResolveQueueItems(db, normalizeListingIds(body.listingIds || body.listingId), {
@@ -1324,6 +1422,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/resolve-queue/run' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const result = resolveQueuedListingsFromViewer(db);
         writeJson(response, 201, result);
@@ -1334,7 +1436,9 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
-      refreshResolveQueueRunStatuses(db);
+      if (access.canWrite) {
+        refreshResolveQueueRunStatuses(db);
+      }
       writeJson(response, 200, {
         workflows: Object.entries(WORKFLOWS).map(([id, workflow]) => ({
           id,
@@ -1343,7 +1447,9 @@ function createServer(options) {
           fields: fieldsForWorkflow(workflow),
           defaultArgs: buildDefaultArgsFromFields(fieldsForWorkflow(workflow)),
         })),
-        processes: listManagedProcesses(db),
+        processes: access.canWrite
+          ? listManagedProcesses(db)
+          : listWorkflowRuns(db, { limit: 50 }).map((run) => publicWorkflowRunRecordWithStats(db, run)),
       });
       return;
     }
@@ -1355,6 +1461,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/credentials' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const result = upsertCredentialProfile(DEFAULT_CREDENTIALS_PATH, {
@@ -1373,6 +1483,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/credentials/active' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const result = setActiveCredentialProfile(DEFAULT_CREDENTIALS_PATH, normalizeCredentialProfileId(body.id));
@@ -1384,6 +1498,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/workflows/reconcile' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       writeJson(response, 200, {
         processes: reconcileWorkflowRuns(db),
       });
@@ -1441,6 +1559,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/workflows/start' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const started = startManagedWorkflow(db, body.workflowId, normalizeWorkflowArgs(body.args));
@@ -1452,6 +1574,10 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/workflows/stop' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
       try {
         const body = await readRequestJson(request);
         const stopped = stopManagedWorkflow(db, body.processId);
@@ -1497,7 +1623,10 @@ function main() {
   const server = createServer(options);
 
   server.listen(options.port, options.host, () => {
-    process.stdout.write(`Marketplace homepage browser running at http://${options.host}:${options.port}\n`);
+    const baseUrl = `http://${options.host}:${options.port}`;
+    process.stdout.write(`Marketplace homepage browser running at ${baseUrl}\n`);
+    process.stdout.write(`Admin URL: ${baseUrl}/?token=${encodeURIComponent(options.adminToken)}\n`);
+    process.stdout.write(`Read-only URL: ${baseUrl}/?token=${encodeURIComponent(options.readOnlyToken)}\n`);
     process.stdout.write(`DB: ${path.isAbsolute(options.dbPath) ? options.dbPath : path.join(process.cwd(), options.dbPath)}\n`);
   });
 

@@ -84,12 +84,23 @@ function formatDate(value) {
 }
 
 async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+  const response = await fetch(apiUrl(url), options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload.error || response.statusText);
   }
   return payload;
+}
+
+function apiUrl(url) {
+  const token = new URLSearchParams(window.location.search).get('token')
+    || new URLSearchParams(window.location.search).get('apiToken');
+  if (!token || !String(url).startsWith('/api/')) {
+    return url;
+  }
+  const next = new URL(url, window.location.origin);
+  next.searchParams.set('token', token);
+  return `${next.pathname}${next.search}`;
 }
 
 function textFormatter(cell) {
@@ -290,7 +301,7 @@ export function createListingsViewer() {
     for (const listingId of queuedExclusionIds()) {
       urlParams.append('excludeListingId', listingId);
     }
-    return `/api/listings?${urlParams.toString()}`;
+    return apiUrl(`/api/listings?${urlParams.toString()}`);
   }
 
   async function requestListings(_url, _config, params) {
@@ -612,7 +623,7 @@ export function createListingsViewer() {
     if (els.backlogMaxAttempts.value) {
       params.set('maxAttempts', els.backlogMaxAttempts.value);
     }
-    return `/api/backlog?${params.toString()}`;
+    return apiUrl(`/api/backlog?${params.toString()}`);
   }
 
   async function loadBacklogQueue() {
@@ -938,7 +949,7 @@ export function createListingsViewer() {
       state.table.setPageSize(state.limit);
       state.currentLimit = state.limit;
     }
-    await state.table.setData('/api/listings');
+    await state.table.setData(apiUrl('/api/listings'));
     renderResolveControls();
   }
 
