@@ -14,6 +14,7 @@
     "marketplace:home:process": "node scripts/process-marketplace-homepage-backlog.js",
     "marketplace:home:backlog:indexes": "node scripts/marketplace-homepage-backlog-indexes.js",
     "marketplace:home:db:maintain": "node scripts/marketplace-homepage-maintain-db.js",
+    "marketplace:home:db:merge": "node scripts/merge-marketplace-homepage-db.js",
     "marketplace:home:tier3:dry-run": "node scripts/marketplace-tier3-verdict-dry-run.js",
     "marketplace:home:export": "node scripts/export-marketplace-homepage.js",
     "marketplace:home:serve": "node scripts/serve-marketplace-homepage.js",

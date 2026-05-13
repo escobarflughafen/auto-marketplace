@@ -14,6 +14,7 @@ const {
   shouldDelayBetweenItems,
   isFatalBrowserContextError,
   safeWorkerPathSegment,
+  captureListingScreenshot,
   workerScreenshotDirectory,
   pruneWorkerScreenshots,
 } = require('../scripts/process-marketplace-homepage-backlog');
@@ -43,6 +44,11 @@ test('parseArgs enables drain mode for backlog resolution', () => {
     '--worker-screenshot-dir', 'tmp/screens',
     '--worker-screenshot-interval-seconds', '10',
     '--worker-screenshot-history-limit', '100',
+    '--screenshot-format', 'jpg',
+    '--screenshot-quality', '60',
+    '--screenshot-full-page',
+    '--artifact-budget-kb', '180',
+    '--capture-thumbnails',
   ]);
 
   assert.equal(options.drain, true);
@@ -70,6 +76,47 @@ test('parseArgs enables drain mode for backlog resolution', () => {
   assert.equal(options.workerScreenshotDir, 'tmp/screens');
   assert.equal(options.workerScreenshotIntervalSeconds, 10);
   assert.equal(options.workerScreenshotHistoryLimit, 100);
+  assert.equal(options.screenshotFormat, 'jpeg');
+  assert.equal(options.screenshotQuality, 60);
+  assert.equal(options.screenshotFullPage, true);
+  assert.equal(options.artifactBudgetKb, 180);
+  assert.equal(options.captureThumbnails, true);
+});
+
+test('parseArgs defaults to storage-saving listing screenshots', () => {
+  const options = parseArgs(['--once']);
+
+  assert.equal(options.screenshotFormat, 'jpeg');
+  assert.equal(options.screenshotQuality, 55);
+  assert.equal(options.screenshotFullPage, false);
+  assert.equal(options.artifactBudgetKb, 200);
+  assert.equal(options.captureThumbnails, false);
+});
+
+test('captureListingScreenshot lowers JPEG quality to fit the artifact budget', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marketplace-listing-shot-'));
+  const screenshotPath = path.join(tempDir, 'listing.jpg');
+  const calls = [];
+  const page = {
+    async screenshot(options) {
+      calls.push(options);
+      const size = options.quality === 55 ? 250 * 1024 : 150 * 1024;
+      return Buffer.alloc(size, options.quality);
+    },
+  };
+
+  const result = await captureListingScreenshot(page, screenshotPath, {
+    screenshotFormat: 'jpeg',
+    screenshotQuality: 55,
+    screenshotFullPage: false,
+    artifactBudgetKb: 200,
+  });
+
+  assert.equal(result.format, 'jpeg');
+  assert.equal(result.quality, 45);
+  assert.equal(result.withinBudget, true);
+  assert.equal(fs.statSync(screenshotPath).size, 150 * 1024);
+  assert.deepEqual(calls.map((call) => call.quality), [55, 45]);
 });
 
 test('worker screenshot directory uses safe worker path segment', () => {

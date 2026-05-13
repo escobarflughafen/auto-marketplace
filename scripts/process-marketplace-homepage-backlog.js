@@ -94,6 +94,11 @@ function parseArgs(argv) {
     dbPath: DEFAULT_DB_PATH,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     captureDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'details'),
+    screenshotFormat: 'jpeg',
+    screenshotQuality: 55,
+    screenshotFullPage: false,
+    artifactBudgetKb: 200,
+    captureThumbnails: false,
     workerScreenshotDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots'),
     workerScreenshotIntervalSeconds: 10,
     workerScreenshotHistoryLimit: 100,
@@ -144,6 +149,32 @@ function parseArgs(argv) {
       case '--capture-dir':
         options.captureDir = readFlagValue(argv, index, arg);
         index += 1;
+        break;
+      case '--screenshot-format':
+        options.screenshotFormat = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--screenshot-quality':
+        options.screenshotQuality = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--screenshot-full-page':
+      case '--full-page-screenshot':
+        options.screenshotFullPage = true;
+        break;
+      case '--screenshot-viewport':
+      case '--viewport-screenshot':
+        options.screenshotFullPage = false;
+        break;
+      case '--artifact-budget-kb':
+        options.artifactBudgetKb = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--capture-thumbnails':
+        options.captureThumbnails = true;
+        break;
+      case '--no-capture-thumbnails':
+        options.captureThumbnails = false;
         break;
       case '--worker-screenshot-dir':
         options.workerScreenshotDir = readFlagValue(argv, index, arg);
@@ -308,6 +339,16 @@ function parseArgs(argv) {
     throw new Error('Expected --item-jitter-max to be >= --item-jitter-min');
   }
   options.authMode = normalizeAuthMode(options.authMode, options.useCredentials);
+  options.screenshotFormat = String(options.screenshotFormat || '').trim().toLowerCase();
+  if (options.screenshotFormat === 'jpg') {
+    options.screenshotFormat = 'jpeg';
+  }
+  if (!['jpeg', 'png'].includes(options.screenshotFormat)) {
+    throw new Error('Expected --screenshot-format to be jpeg or png');
+  }
+  if (options.screenshotQuality > 100) {
+    throw new Error('Expected --screenshot-quality to be <= 100');
+  }
 
   if (options.once && options.drain) {
     throw new Error('Use either --once or --drain, not both');
@@ -407,6 +448,62 @@ async function captureWorkerScreenshot(page, options) {
   return filePath;
 }
 
+function screenshotExtension(format) {
+  return format === 'png' ? 'png' : 'jpg';
+}
+
+function screenshotQualityCandidates(quality) {
+  const start = Math.max(1, Math.min(100, Number.parseInt(String(quality), 10) || 55));
+  return [...new Set([start, 45, 35, 25, 15].filter((item) => item <= start && item >= 1))];
+}
+
+async function captureListingScreenshot(page, screenshotPath, options = {}) {
+  const format = options.screenshotFormat === 'png' ? 'png' : 'jpeg';
+  const fullPage = options.screenshotFullPage === true;
+  const budgetBytes = Math.max(0, Number(options.artifactBudgetKb || 0) * 1024);
+  const baseOptions = {
+    type: format,
+    fullPage,
+  };
+
+  if (format === 'png') {
+    const buffer = await page.screenshot(baseOptions);
+    await fs.promises.writeFile(screenshotPath, buffer);
+    return {
+      screenshotPath,
+      format,
+      fullPage,
+      quality: null,
+      bytes: buffer.length,
+      budgetBytes,
+      withinBudget: !budgetBytes || buffer.length <= budgetBytes,
+    };
+  }
+
+  let selected = null;
+  for (const quality of screenshotQualityCandidates(options.screenshotQuality)) {
+    const buffer = await page.screenshot({
+      ...baseOptions,
+      quality,
+    });
+    selected = { buffer, quality };
+    if (!budgetBytes || buffer.length <= budgetBytes) {
+      break;
+    }
+  }
+
+  await fs.promises.writeFile(screenshotPath, selected.buffer);
+  return {
+    screenshotPath,
+    format,
+    fullPage,
+    quality: selected.quality,
+    bytes: selected.buffer.length,
+    budgetBytes,
+    withinBudget: !budgetBytes || selected.buffer.length <= budgetBytes,
+  };
+}
+
 function startWorkerScreenshotMonitor(options, lifecycle) {
   const intervalSeconds = Number(options.workerScreenshotIntervalSeconds || 0);
   if (intervalSeconds <= 0 || options.workerScreenshotHistoryLimit <= 0) {
@@ -440,7 +537,8 @@ function startWorkerScreenshotMonitor(options, lifecycle) {
   };
 }
 
-async function captureListingRecord(context, page, listing, captureDir) {
+async function captureListingRecord(context, page, listing, options) {
+  const captureDir = options.captureDir;
   const activePage = await safeGoto(context, page, listing.href);
   await waitForListingPage(activePage);
   await expandMarketplaceListingDetails(activePage, { logger: log });
@@ -470,10 +568,12 @@ async function captureListingRecord(context, page, listing, captureDir) {
   }
   const title = await readListingTitle(activePage, listingContent.rawText || pageText, listingContent.title || fallbackTitle);
   const baseName = `${listing.listing_id}-${slugify(title)}`;
-  const screenshotPath = path.join(captureDir, `${baseName}.png`);
+  const screenshotPath = path.join(captureDir, `${baseName}.${screenshotExtension(options.screenshotFormat)}`);
 
-  await activePage.screenshot({ path: screenshotPath, fullPage: true });
-  const thumbnails = await captureListingThumbnails(activePage, captureDir, baseName, { logger: log });
+  const screenshot = await captureListingScreenshot(activePage, screenshotPath, options);
+  const thumbnails = options.captureThumbnails
+    ? await captureListingThumbnails(activePage, captureDir, baseName, { logger: log })
+    : [];
   const snapshotPath = await writeListingSnapshot({
     captureDir,
     baseName,
@@ -491,6 +591,7 @@ async function captureListingRecord(context, page, listing, captureDir) {
       thumbnails,
       screenshotPath,
       snapshotPath,
+      screenshot,
     },
   };
 }
@@ -586,6 +687,7 @@ function buildDetailEventContent(listing, detailRecord, workerId) {
       screenshotPath: detailRecord.screenshotPath || '',
       snapshotPath: detailRecord.snapshotPath || '',
       thumbnails: detailRecord.thumbnails || [],
+      screenshot: detailRecord.screenshot || null,
     },
     runtime: {
       workerId,
@@ -680,7 +782,7 @@ async function processBatch(page, db, options, state = {}) {
     attemptedCount += 1;
 
     try {
-      const capture = await captureListingRecord(activePage.context(), activePage, listing, options.captureDir);
+      const capture = await captureListingRecord(activePage.context(), activePage, listing, options);
       activePage = capture.page;
       lifecycle.currentPage = activePage;
       const content = buildDetailEventContent(listing, capture.detailRecord, options.workerId);
@@ -991,7 +1093,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit}`,
+    `backlog_start db_path=${options.dbPath} mode=${options.drain ? 'drain' : options.once ? 'once' : 'continuous'} poll_interval_seconds=${options.pollIntervalSeconds} poll_jitter_min=${options.pollJitterMin} poll_jitter_max=${options.pollJitterMax} item_delay_seconds=${options.itemDelaySeconds} item_jitter_min=${options.itemJitterMin} item_jitter_max=${options.itemJitterMax} batch_size=${options.batchSize} limit=${options.limit} status_filter=${options.statusFilter || 'all'} source_filter=${options.sourceFilter || 'n/a'} keyword_filter=${options.keywordFilter || 'n/a'} backlog_order=${options.backlogOrder} seen_time_field=${options.seenTimeField} seen_after=${options.seenAfter || 'n/a'} seen_before=${options.seenBefore || 'n/a'} listing_ids=${options.listingIds.length} resolve_inactive=${options.resolveInactive} worker_id=${options.workerId} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} screenshot_format=${options.screenshotFormat} screenshot_quality=${options.screenshotQuality} screenshot_full_page=${options.screenshotFullPage} artifact_budget_kb=${options.artifactBudgetKb} capture_thumbnails=${options.captureThumbnails} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -1207,6 +1309,7 @@ module.exports = {
   isFatalBrowserContextError,
   appendWorkflowLifecycleEvent,
   safeWorkerPathSegment,
+  captureListingScreenshot,
   workerScreenshotDirectory,
   pruneWorkerScreenshots,
 };
