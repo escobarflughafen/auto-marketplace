@@ -15,6 +15,23 @@ function parseJson(value, fallback) {
   }
 }
 
+function sortJsonValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((sorted, key) => {
+      sorted[key] = sortJsonValue(value[key]);
+      return sorted;
+    }, {});
+  }
+  return value;
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(sortJsonValue(value ?? null));
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -104,6 +121,31 @@ function ensureCentralWorkerEventSchema(db) {
   `);
 }
 
+function ensureCentralWorkerHeartbeatSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_heartbeats (
+      worker_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      heartbeat_at TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL DEFAULT '',
+      labels_json TEXT NOT NULL DEFAULT '[]',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_profile
+    ON worker_heartbeats (profile_id, lease_expires_at);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_lease
+    ON worker_heartbeats (lease_expires_at);
+  `);
+}
+
 function ensureCentralWorkerCommandSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS browser_commands (
@@ -182,6 +224,90 @@ function getCentralBrowserCommand(db, commandId) {
     FROM browser_commands
     WHERE command_id = ?
   `).get(String(commandId)));
+}
+
+function normalizeWorkerHeartbeatRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    worker_id: row.worker_id,
+    profile_id: row.profile_id,
+    status: row.status,
+    heartbeat_at: row.heartbeat_at,
+    lease_expires_at: row.lease_expires_at,
+    labels: parseJson(row.labels_json, []),
+    metadata: parseJson(row.metadata_json, {}),
+    updated_at: row.updated_at,
+  };
+}
+
+function getWorkerHeartbeat(db, workerId) {
+  ensureCentralWorkerHeartbeatSchema(db);
+  return normalizeWorkerHeartbeatRow(db.prepare(`
+    SELECT *
+    FROM worker_heartbeats
+    WHERE worker_id = ?
+  `).get(String(workerId)));
+}
+
+function recordWorkerHeartbeat(db, heartbeat) {
+  ensureCentralWorkerHeartbeatSchema(db);
+  const workerId = String(heartbeat.workerId || heartbeat.worker_id || '').trim();
+  if (!workerId) {
+    throw new Error('recordWorkerHeartbeat requires workerId');
+  }
+  const heartbeatAt = heartbeat.heartbeatAt || heartbeat.heartbeat_at || nowIso();
+  const leaseExpiresAt = heartbeat.leaseExpiresAt
+    || heartbeat.lease_expires_at
+    || (Number.isFinite(heartbeat.leaseMs)
+      ? new Date(new Date(heartbeatAt).getTime() + heartbeat.leaseMs).toISOString()
+      : '');
+  const labels = normalizeLabels(heartbeat.labels || heartbeat.label || []);
+  const metadata = heartbeat.metadata || heartbeat.metadataJson || {};
+
+  db.prepare(`
+    INSERT INTO worker_heartbeats (
+      worker_id,
+      profile_id,
+      status,
+      heartbeat_at,
+      lease_expires_at,
+      labels_json,
+      metadata_json,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(worker_id) DO UPDATE SET
+      profile_id = excluded.profile_id,
+      status = excluded.status,
+      heartbeat_at = excluded.heartbeat_at,
+      lease_expires_at = excluded.lease_expires_at,
+      labels_json = excluded.labels_json,
+      metadata_json = excluded.metadata_json,
+      updated_at = excluded.updated_at
+  `).run(
+    workerId,
+    String(heartbeat.profileId || heartbeat.profile_id || '').trim(),
+    String(heartbeat.status || 'active').trim(),
+    heartbeatAt,
+    leaseExpiresAt,
+    serializeJson(labels),
+    serializeJson(metadata),
+    heartbeatAt,
+  );
+
+  return getWorkerHeartbeat(db, workerId);
+}
+
+function listWorkerHeartbeats(db, options = {}) {
+  ensureCentralWorkerHeartbeatSchema(db);
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 100;
+  return db.prepare(`
+    SELECT *
+    FROM worker_heartbeats
+    ORDER BY heartbeat_at DESC, worker_id ASC
+    LIMIT ?
+  `).all(limit).map(normalizeWorkerHeartbeatRow);
 }
 
 function appendCentralBrowserCommand(db, command) {
@@ -359,9 +485,11 @@ function applyWorkerEventsToCommandProjection(db, options = {}) {
       result_json = ?,
       error = ?
     WHERE command_id = ?
+      AND claim_id = ?
+      AND status NOT IN ('succeeded', 'failed', 'cancelled')
   `);
   const markApplied = db.prepare(`
-    INSERT INTO browser_command_projection_events (
+    INSERT OR IGNORE INTO browser_command_projection_events (
       event_id,
       command_id,
       applied_at
@@ -402,16 +530,150 @@ function applyWorkerEventsToCommandProjection(db, options = {}) {
       const error = row.event_type === 'browser_command_failed'
         ? String(payload.error || row.error || '').trim()
         : '';
-      updateCommand.run(
+      const projectionClaim = markApplied.run(row.event_id, commandId, appliedAt);
+      if (projectionClaim.changes === 0) {
+        summary.skipped += 1;
+        continue;
+      }
+      const updateResult = updateCommand.run(
         nextStatus,
         row.event_at,
         serializeJson(result),
         error,
         commandId,
+        eventClaimId,
       );
-      markApplied.run(row.event_id, commandId, appliedAt);
-      summary.applied += 1;
-      summary.commandIds.push(commandId);
+      if (updateResult.changes > 0) {
+        summary.applied += 1;
+        summary.commandIds.push(commandId);
+      } else {
+        summary.skipped += 1;
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  return summary;
+}
+
+function requeueCommandsForExpiredWorkerLeases(db, options = {}) {
+  ensureCentralWorkerCommandSchema(db);
+  ensureCentralWorkerHeartbeatSchema(db);
+  const expiredBefore = options.expiredBefore || options.expired_before || nowIso();
+  const requeuedAt = options.requeuedAt || options.requeued_at || nowIso();
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 100;
+  const rows = db.prepare(`
+    SELECT c.command_id, c.claimed_by
+    FROM browser_commands c
+    JOIN worker_heartbeats h
+      ON h.worker_id = c.claimed_by
+    WHERE c.status = 'claimed'
+      AND h.lease_expires_at != ''
+      AND h.lease_expires_at < ?
+    ORDER BY h.lease_expires_at ASC, c.command_id ASC
+    LIMIT ?
+  `).all(expiredBefore, limit);
+  const summary = {
+    scanned: rows.length,
+    requeued: 0,
+    commandIds: [],
+  };
+
+  if (rows.length === 0) {
+    return summary;
+  }
+
+  const update = db.prepare(`
+    UPDATE browser_commands
+    SET status = 'queued',
+      updated_at = ?,
+      claimed_at = '',
+      claimed_by = '',
+      claim_id = '',
+      error = ?
+    WHERE command_id = ?
+      AND status = 'claimed'
+      AND claimed_by = ?
+  `);
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const row of rows) {
+      const result = update.run(
+        requeuedAt,
+        `requeued expired worker lease from ${row.claimed_by || 'unknown'}`,
+        row.command_id,
+        row.claimed_by,
+      );
+      if (result.changes > 0) {
+        summary.requeued += 1;
+        summary.commandIds.push(row.command_id);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  return summary;
+}
+
+function recoverClaimedBrowserCommandsForWorkerRestart(db, options = {}) {
+  ensureCentralWorkerCommandSchema(db);
+  const workerId = String(options.workerId || options.worker_id || '').trim();
+  if (!workerId) {
+    throw new Error('recoverClaimedBrowserCommandsForWorkerRestart requires workerId');
+  }
+  const restartedAt = options.restartedAt || options.restarted_at || nowIso();
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 100;
+  const rows = db.prepare(`
+    SELECT command_id
+    FROM browser_commands
+    WHERE status = 'claimed'
+      AND claimed_by = ?
+    ORDER BY claimed_at ASC, command_id ASC
+    LIMIT ?
+  `).all(workerId, limit);
+  const summary = {
+    scanned: rows.length,
+    recovered: 0,
+    commandIds: [],
+  };
+
+  if (rows.length === 0) {
+    return summary;
+  }
+
+  const update = db.prepare(`
+    UPDATE browser_commands
+    SET status = 'queued',
+      updated_at = ?,
+      claimed_at = '',
+      claimed_by = '',
+      claim_id = '',
+      error = ?
+    WHERE command_id = ?
+      AND status = 'claimed'
+      AND claimed_by = ?
+  `);
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const row of rows) {
+      const result = update.run(
+        restartedAt,
+        `requeued worker restart from ${workerId}`,
+        row.command_id,
+        workerId,
+      );
+      if (result.changes > 0) {
+        summary.recovered += 1;
+        summary.commandIds.push(row.command_id);
+      }
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -702,6 +964,18 @@ function markOutboxEventFlushFailed(db, eventId, error) {
   `).run(error instanceof Error ? error.message : String(error || 'flush failed'), String(eventId));
 }
 
+function centralWorkerEventMatches(existing, event) {
+  if (!existing) {
+    return false;
+  }
+  return String(existing.event_type || '') === String(event.event_type || '')
+    && String(existing.event_at || '') === String(event.event_at || '')
+    && String(existing.worker_id || '') === String(event.worker_id || '')
+    && String(existing.source_id || '') === String(event.source_id || '')
+    && canonicalJson(parseJson(existing.labels_json, [])) === canonicalJson(event.labels)
+    && canonicalJson(parseJson(existing.payload_json, {})) === canonicalJson(event.payload);
+}
+
 function flushWorkerOutboxToCentral(localDb, centralDb, options = {}) {
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 100;
   const pending = listWorkerOutboxEvents(localDb, { status: 'pending', limit });
@@ -731,6 +1005,11 @@ function flushWorkerOutboxToCentral(localDb, centralDb, options = {}) {
       ingested_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const getExistingEvent = centralDb.prepare(`
+    SELECT *
+    FROM worker_event_log
+    WHERE event_id = ?
+  `);
 
   centralDb.exec('BEGIN IMMEDIATE');
   try {
@@ -748,6 +1027,10 @@ function flushWorkerOutboxToCentral(localDb, centralDb, options = {}) {
       if (result.changes > 0) {
         summary.inserted += 1;
       } else {
+        const existing = getExistingEvent.get(event.event_id);
+        if (!centralWorkerEventMatches(existing, event)) {
+          throw new Error(`duplicate worker event mismatch for ${event.event_id}`);
+        }
         summary.existing += 1;
       }
       summary.eventIds.push(event.event_id);
@@ -801,14 +1084,20 @@ module.exports = {
   closeDatabase,
   ensureWorkerLocalSchema,
   ensureCentralWorkerEventSchema,
+  ensureCentralWorkerHeartbeatSchema,
   ensureCentralWorkerCommandSchema,
   setWorkerState,
   getWorkerState,
+  recordWorkerHeartbeat,
+  getWorkerHeartbeat,
+  listWorkerHeartbeats,
   appendCentralBrowserCommand,
   getCentralBrowserCommand,
   listCentralBrowserCommands,
   claimNextBrowserCommand,
   applyWorkerEventsToCommandProjection,
+  requeueCommandsForExpiredWorkerLeases,
+  recoverClaimedBrowserCommandsForWorkerRestart,
   requeueStaleBrowserCommands,
   runWorkerCommandOnce,
   appendWorkerOutboxEvent,

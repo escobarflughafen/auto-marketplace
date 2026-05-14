@@ -19,6 +19,10 @@ const {
   appendCentralBrowserCommand,
   claimNextBrowserCommand,
   listCentralBrowserCommands,
+  recordWorkerHeartbeat,
+  listWorkerHeartbeats,
+  requeueCommandsForExpiredWorkerLeases,
+  recoverClaimedBrowserCommandsForWorkerRestart,
   applyWorkerEventsToCommandProjection,
   requeueStaleBrowserCommands,
   runWorkerCommandOnce,
@@ -243,6 +247,56 @@ test('worker outbox flush limit batches test events without losing pending work'
   }
 });
 
+test('duplicate central test event ids with mismatched content are rejected and kept pending', () => {
+  const tempDir = createTempDir();
+  const { db: workerADb } = openWorkerLocalStore(path.join(tempDir, 'worker-a.db'));
+  const { db: workerBDb } = openWorkerLocalStore(path.join(tempDir, 'worker-b.db'));
+  const centralDb = openCentralDb(path.join(tempDir, 'central.db'));
+
+  try {
+    appendWorkerOutboxEvent(workerADb, createMockWorkerEvent({
+      eventId: 'test-event-duplicate-mismatch',
+      eventType: 'worker_test_event',
+      workerId: 'test-worker-a',
+      payload: {
+        commandId: 'test-command-duplicate-mismatch',
+        value: 'original',
+      },
+    }));
+    const firstFlush = flushWorkerOutboxToCentral(workerADb, centralDb);
+    assert.equal(firstFlush.inserted, 1);
+
+    appendWorkerOutboxEvent(workerBDb, createMockWorkerEvent({
+      eventId: 'test-event-duplicate-mismatch',
+      eventType: 'worker_test_event',
+      workerId: 'test-worker-b',
+      payload: {
+        commandId: 'test-command-duplicate-mismatch',
+        value: 'conflicting',
+      },
+    }));
+
+    assert.throws(
+      () => flushWorkerOutboxToCentral(workerBDb, centralDb),
+      /duplicate worker event mismatch/,
+    );
+
+    const pending = listWorkerOutboxEvents(workerBDb, { status: 'pending' });
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].event_id, 'test-event-duplicate-mismatch');
+    assert.equal(pending[0].flush_attempts, 1);
+    assert.match(pending[0].last_error, /duplicate worker event mismatch/);
+
+    const centralEvents = listCentralWorkerEvents(centralDb);
+    assert.equal(centralEvents.length, 1);
+    assert.equal(centralEvents[0].payload.value, 'original');
+  } finally {
+    closeDatabase(workerADb);
+    closeDatabase(workerBDb);
+    closeDatabase(centralDb);
+  }
+});
+
 test('central command queue stores pending test commands by priority and time', () => {
   const tempDir = createTempDir();
   const centralDb = openCentralDb(path.join(tempDir, 'central.db'));
@@ -270,6 +324,94 @@ test('central command queue stores pending test commands by priority and time', 
     assert.ok(commands.every((command) => command.labels.includes('test_event')));
     assert.ok(commands.every((command) => command.payload.testEvent === true));
   } finally {
+    closeDatabase(centralDb);
+  }
+});
+
+test('worker heartbeat profile lease drives expired-lease command recovery', () => {
+  const tempDir = createTempDir();
+  const centralDb = openCentralDb(path.join(tempDir, 'central.db'));
+  const { db: localDb } = openWorkerLocalStore(path.join(tempDir, 'worker.db'));
+
+  try {
+    const heartbeat = recordWorkerHeartbeat(centralDb, {
+      workerId: 'test-worker-lease',
+      profileId: 'test-profile-lease',
+      heartbeatAt: '2026-05-13T20:01:00.000Z',
+      leaseExpiresAt: '2026-05-13T20:01:30.000Z',
+      labels: ['test_event'],
+      metadata: {
+        testEvent: true,
+      },
+    });
+    assert.equal(heartbeat.worker_id, 'test-worker-lease');
+    assert.equal(heartbeat.profile_id, 'test-profile-lease');
+    assert.equal(heartbeat.lease_expires_at, '2026-05-13T20:01:30.000Z');
+    assert.ok(heartbeat.labels.includes('test_event'));
+    assert.equal(heartbeat.metadata.testEvent, true);
+    assert.equal(listWorkerHeartbeats(centralDb).length, 1);
+
+    appendCentralBrowserCommand(centralDb, createMockBrowserCommand({
+      commandId: 'test-command-expired-lease',
+    }));
+    claimNextBrowserCommand(centralDb, localDb, {
+      workerId: 'test-worker-lease',
+      claimedAt: '2026-05-13T20:01:05.000Z',
+    });
+
+    const freshLease = requeueCommandsForExpiredWorkerLeases(centralDb, {
+      expiredBefore: '2026-05-13T20:01:20.000Z',
+      requeuedAt: '2026-05-13T20:01:21.000Z',
+    });
+    assert.equal(freshLease.requeued, 0);
+    assert.equal(listCentralBrowserCommands(centralDb)[0].status, 'claimed');
+
+    const expiredLease = requeueCommandsForExpiredWorkerLeases(centralDb, {
+      expiredBefore: '2026-05-13T20:01:31.000Z',
+      requeuedAt: '2026-05-13T20:01:32.000Z',
+    });
+    assert.deepEqual(expiredLease.commandIds, ['test-command-expired-lease']);
+    assert.equal(expiredLease.requeued, 1);
+
+    const command = listCentralBrowserCommands(centralDb)[0];
+    assert.equal(command.status, 'queued');
+    assert.equal(command.claimed_by, '');
+    assert.equal(command.claim_id, '');
+    assert.equal(command.error, 'requeued expired worker lease from test-worker-lease');
+  } finally {
+    closeDatabase(localDb);
+    closeDatabase(centralDb);
+  }
+});
+
+test('claimed test commands have an explicit worker restart recovery path', () => {
+  const tempDir = createTempDir();
+  const centralDb = openCentralDb(path.join(tempDir, 'central.db'));
+  const { db: localDb } = openWorkerLocalStore(path.join(tempDir, 'worker.db'));
+
+  try {
+    appendCentralBrowserCommand(centralDb, createMockBrowserCommand({
+      commandId: 'test-command-worker-restart-recovery',
+    }));
+    claimNextBrowserCommand(centralDb, localDb, {
+      workerId: 'test-worker-restarted',
+      claimedAt: '2026-05-13T20:01:40.000Z',
+    });
+
+    const recovery = recoverClaimedBrowserCommandsForWorkerRestart(centralDb, {
+      workerId: 'test-worker-restarted',
+      restartedAt: '2026-05-13T20:02:00.000Z',
+    });
+    assert.deepEqual(recovery.commandIds, ['test-command-worker-restart-recovery']);
+    assert.equal(recovery.recovered, 1);
+
+    const command = listCentralBrowserCommands(centralDb)[0];
+    assert.equal(command.status, 'queued');
+    assert.equal(command.claimed_by, '');
+    assert.equal(command.claim_id, '');
+    assert.equal(command.error, 'requeued worker restart from test-worker-restarted');
+  } finally {
+    closeDatabase(localDb);
     closeDatabase(centralDb);
   }
 });
@@ -413,6 +555,73 @@ test('central command projection applies flushed test failure events', () => {
     assert.equal(command.status, 'failed');
     assert.equal(command.error, 'test event commanded failure');
     assert.equal(command.result.testEvent, true);
+  } finally {
+    closeDatabase(localDb);
+    closeDatabase(centralDb);
+  }
+});
+
+test('projection race on a test event is idempotent and does not mutate command state twice', () => {
+  const tempDir = createTempDir();
+  const centralDb = openCentralDb(path.join(tempDir, 'central.db'));
+  const { db: localDb } = openWorkerLocalStore(path.join(tempDir, 'worker.db'));
+
+  try {
+    appendCentralBrowserCommand(centralDb, createMockBrowserCommand({
+      commandId: 'test-command-projection-race',
+    }));
+    const claim = claimNextBrowserCommand(centralDb, localDb, {
+      workerId: 'test-worker-projection-race',
+      claimedAt: '2026-05-13T20:03:30.000Z',
+    });
+    appendWorkerOutboxEvent(localDb, createMockWorkerEvent({
+      eventId: 'test-event-projection-race',
+      eventType: 'browser_command_succeeded',
+      eventAt: '2026-05-13T20:03:35.000Z',
+      workerId: 'test-worker-projection-race',
+      payload: {
+        commandId: 'test-command-projection-race',
+        claimId: claim.claim_id,
+        result: {
+          detailStatus: 'done',
+        },
+      },
+    }));
+    flushWorkerOutboxToCentral(localDb, centralDb);
+    centralDb.exec(`
+      CREATE TRIGGER simulate_projection_race
+      BEFORE INSERT ON browser_command_projection_events
+      WHEN NEW.event_id = 'test-event-projection-race'
+      BEGIN
+        INSERT INTO browser_command_projection_events (
+          event_id,
+          command_id,
+          applied_at
+        ) VALUES (
+          NEW.event_id,
+          NEW.command_id,
+          '2026-05-13T20:03:34.000Z'
+        );
+      END;
+    `);
+
+    const projection = applyWorkerEventsToCommandProjection(centralDb, {
+      appliedAt: '2026-05-13T20:03:36.000Z',
+    });
+    assert.equal(projection.applied, 0);
+    assert.equal(projection.skipped, 1);
+
+    const command = listCentralBrowserCommands(centralDb)[0];
+    assert.equal(command.status, 'claimed');
+    assert.deepEqual(command.result, {});
+
+    const projected = centralDb.prepare(`
+      SELECT *
+      FROM browser_command_projection_events
+      WHERE event_id = ?
+    `).get('test-event-projection-race');
+    assert.equal(projected.command_id, 'test-command-projection-race');
+    assert.equal(projected.applied_at, '2026-05-13T20:03:34.000Z');
   } finally {
     closeDatabase(localDb);
     closeDatabase(centralDb);

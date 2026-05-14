@@ -48,6 +48,7 @@ The module provides:
 - worker-local SQLite `worker_state`;
 - worker-local SQLite `worker_outbox_events`;
 - central `worker_event_log`;
+- central `worker_heartbeats`;
 - central `browser_commands`;
 - command append/list/claim helpers;
 - per-claim `claim_id` values;
@@ -56,7 +57,12 @@ The module provides:
 - claim-aware command lifecycle event IDs;
 - batch-limited outbox flush;
 - idempotent central inserts by `event_id`;
+- duplicate `event_id` mismatch detection before a local outbox event is marked flushed;
 - command projection from flushed worker events;
+- idempotent projection event claiming before command mutation;
+- heartbeat/profile lease records;
+- expired-lease command recovery;
+- explicit worker-restart command recovery;
 - stale claimed-command requeue;
 - `runWorkerCommandOnce()` for a complete mock command lifecycle.
 
@@ -75,7 +81,7 @@ node --check test/worker-local-outbox.test.js
 
 Current expected result:
 
-- 18 tests pass.
+- 22 tests pass.
 
 ## Reviewer Verdict Follow-Up
 
@@ -118,16 +124,19 @@ node --check test/worker-local-outbox.test.js
 
 Current result:
 
-- 18 of 18 focused tests pass.
+- 22 of 22 focused tests pass.
+
+Refinement follow-up now covers four of the latest review blockers:
+
+- worker heartbeat/profile lease records and expired-lease requeue;
+- projection race hardening through idempotent projection-event claiming and guarded command updates;
+- duplicate central `event_id` mismatch detection;
+- explicit requeue path for commands claimed by a restarted worker.
 
 ## Before Prod
 
 Required before production integration:
 
-- add worker heartbeat/profile lease semantics;
-- fix projection races under concurrent flush/projection attempts;
-- detect duplicate `event_id` inserts whose payload differs from the stored event;
-- add an explicit recovery path for commands claimed before a worker restart;
 - integrate the module into the main DB/module boundary;
 - add a live-worker smoke test with a real command lifecycle.
 
@@ -145,13 +154,9 @@ Required before production integration:
 ## Known Limitations
 
 - Not integrated into live workers.
-- No profile lease enforcement in this module.
-- No worker heartbeat tracking in this module.
+- Heartbeat/profile lease semantics are module-local and not yet enforced by live workers.
 - No HTTP transport yet; workers still use direct DB handles in tests.
-- No explicit duplicate-event payload mismatch detection.
-- No claimed-command restart recovery flow beyond stale requeue semantics.
 - Projection currently updates only command state, not listing/resolve queue projections.
-- Projection race behavior has not been hardened for concurrent producers.
 - Central command/event schema is prototype-local and may need migration into the main DB schema.
 
 ## Acceptance Criteria For This Ticket
