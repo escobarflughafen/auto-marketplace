@@ -98,6 +98,39 @@ Follow-up review required stricter integration gates:
 
 Those requirements are now covered by focused regression tests.
 
+Latest review verdict:
+
+- not prod-ready yet;
+- solid MVP foundation for integration planning;
+- `claim_id` is present;
+- stale terminal events cannot overwrite newer claims;
+- terminal projection is immutable;
+- focused test suite passes.
+
+Verified by reviewer:
+
+```bash
+node --test test/worker-local-outbox.test.js
+node --check scripts/worker-local-outbox.js
+node --check test/helpers/worker-event-mocks.js
+node --check test/worker-local-outbox.test.js
+```
+
+Current result:
+
+- 18 of 18 focused tests pass.
+
+## Before Prod
+
+Required before production integration:
+
+- add worker heartbeat/profile lease semantics;
+- fix projection races under concurrent flush/projection attempts;
+- detect duplicate `event_id` inserts whose payload differs from the stored event;
+- add an explicit recovery path for commands claimed before a worker restart;
+- integrate the module into the main DB/module boundary;
+- add a live-worker smoke test with a real command lifecycle.
+
 ## Specific Questions
 
 1. Should `worker_event_log` and `browser_commands` stay in this standalone module for now, or move into `marketplace-homepage-db.js` before integration?
@@ -113,13 +146,17 @@ Those requirements are now covered by focused regression tests.
 
 - Not integrated into live workers.
 - No profile lease enforcement in this module.
+- No worker heartbeat tracking in this module.
 - No HTTP transport yet; workers still use direct DB handles in tests.
+- No explicit duplicate-event payload mismatch detection.
+- No claimed-command restart recovery flow beyond stale requeue semantics.
 - Projection currently updates only command state, not listing/resolve queue projections.
+- Projection race behavior has not been hardened for concurrent producers.
 - Central command/event schema is prototype-local and may need migration into the main DB schema.
 
 ## Acceptance Criteria For This Ticket
 
-- Reviewer agrees the local outbox and command lifecycle semantics are correct enough for integration planning.
+- Reviewer agrees the local outbox and command lifecycle semantics are correct enough for integration planning, not production rollout.
 - Reviewer identifies whether schema should remain isolated or move into the main DB helper.
 - Reviewer confirms failure preservation, exact `claim_id`, terminal immutability, and stale-worker recovery behavior are acceptable.
 - Reviewer confirms all test data is clearly marked as `test_event`.
