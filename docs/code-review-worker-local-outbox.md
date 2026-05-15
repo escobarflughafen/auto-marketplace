@@ -104,7 +104,7 @@ Follow-up review required stricter integration gates:
 
 Those requirements are now covered by focused regression tests.
 
-Latest review verdict:
+Prior review verdict:
 
 - not prod-ready yet;
 - solid MVP foundation for integration planning;
@@ -112,6 +112,16 @@ Latest review verdict:
 - stale terminal events cannot overwrite newer claims;
 - terminal projection is immutable;
 - focused test suite passes.
+
+Latest review verdict:
+
+- integration-ready MVP at the module level;
+- not production-ready runtime until integrated into the live worker lifecycle with profile lease enforcement;
+- duplicate `event_id` mismatch detection is present;
+- projection event claiming is idempotent;
+- command projection updates require matching claim and non-terminal status;
+- heartbeat/lease records exist;
+- explicit worker restart recovery exists.
 
 Verified by reviewer:
 
@@ -135,10 +145,11 @@ Refinement follow-up now covers four of the latest review blockers:
 
 ## Before Prod
 
-Required before production integration:
+Required before production runtime:
 
 - integrate the module into the main DB/module boundary;
 - add a live-worker smoke test with a real command lifecycle.
+- enforce heartbeat/profile leases from the live worker lifecycle.
 
 ## Specific Questions
 
@@ -161,7 +172,7 @@ Required before production integration:
 
 ## Acceptance Criteria For This Ticket
 
-- Reviewer agrees the local outbox and command lifecycle semantics are correct enough for integration planning, not production rollout.
+- Reviewer agrees the local outbox and command lifecycle semantics are correct enough for MVP integration, not production runtime rollout.
 - Reviewer identifies whether schema should remain isolated or move into the main DB helper.
 - Reviewer confirms failure preservation, exact `claim_id`, terminal immutability, and stale-worker recovery behavior are acceptable.
 - Reviewer confirms all test data is clearly marked as `test_event`.
