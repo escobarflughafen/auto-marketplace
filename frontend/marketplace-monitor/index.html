@@ -20,7 +20,6 @@
         <span class="route-badge route-badge-market">M</span>
         <div>
           <h1>Marketplace<br>Monitor</h1>
-          <div class="sub">Collected listings, queue state, and Marketplace worker activity.</div>
         </div>
       </div>
     </section>
@@ -107,6 +106,9 @@
         <button type="button" class="secondary" id="refreshListingsButton">Refresh</button>
       </div>
       <div class="resolve-toolbar">
+        <input id="manualListingUrl" class="manual-listing-url" type="url" placeholder="Paste Facebook Marketplace URL">
+        <label class="inline-control manual-listing-fetch"><input id="manualListingFetchNow" type="checkbox"> Fetch</label>
+        <button type="button" class="secondary" id="manualListingAddButton">Add URL</button>
         <button type="button" class="secondary" id="queueSelectedButton" disabled>Add Selected</button>
         <button type="button" class="secondary" id="resolveQueuedButton" disabled>Process Queue</button>
         <button type="button" class="secondary" id="clearResolveQueueButton" disabled>Clear</button>
@@ -164,6 +166,7 @@
               <option value="">All</option>
               <option value="homepage">Homepage</option>
               <option value="search">Search</option>
+              <option value="manual">Manual</option>
             </select>
           </label>
           <label class="inline-control">
@@ -196,6 +199,7 @@
             </select>
           </label>
           <button type="button" class="secondary" id="refreshBacklogButton">Refresh</button>
+          <button type="button" class="secondary" id="manualListingAddBacklogButton">Add URL</button>
           <button type="button" class="secondary" id="queueBacklogSelectedButton" disabled>Add Selected</button>
           <button type="button" class="secondary" id="queueBacklogVisibleButton" disabled>Add Visible</button>
         </div>
@@ -262,6 +266,16 @@
                 <div class="process-meta" id="historyMeta">History not loaded.</div>
               </div>
               <div class="history-header-actions">
+                <label class="inline-control">
+                  Sold range
+                  <select id="historySoldRangeSelect">
+                    <option value="all">All time</option>
+                    <option value="30">30 days</option>
+                    <option value="90">90 days</option>
+                    <option value="365">12 months</option>
+                    <option value="ytd">YTD</option>
+                  </select>
+                </label>
                 <button type="button" class="secondary history-toggle-stats-button" id="historyToggleStatsButton">Hide stats</button>
                 <div class="process-meta" id="historyStatus"></div>
               </div>
@@ -271,15 +285,15 @@
               <table class="history-table">
                 <thead>
                   <tr>
-                    <th>Item</th>
-                    <th>Kind</th>
-                    <th>Cost</th>
-                    <th>Price</th>
-                    <th>Status</th>
-                    <th>Profit</th>
-                    <th>ROI</th>
-                    <th>Result</th>
-                    <th>Dates</th>
+                    <th><button type="button" class="sort-button" data-history-sort="title">Item</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="subcategory">Kind</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="cost">Cost</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="price">Price</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="status">Status</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="profit">Profit</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="roi">ROI</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="result">Result</button></th>
+                    <th><button type="button" class="sort-button" data-history-sort="date">Dates</button></th>
                     <th></th>
                   </tr>
                 </thead>
@@ -316,12 +330,12 @@
             <table class="event-registry-table">
               <thead>
                 <tr>
-                  <th>Time</th>
-                  <th>Source</th>
-                  <th>Event</th>
-                  <th>Subject</th>
-                  <th>Status</th>
-                  <th>Details</th>
+                  <th><button type="button" class="sort-button" data-event-sort="time">Time</button></th>
+                  <th><button type="button" class="sort-button" data-event-sort="source">Source</button></th>
+                  <th><button type="button" class="sort-button" data-event-sort="event">Event</button></th>
+                  <th><button type="button" class="sort-button" data-event-sort="subject">Subject</button></th>
+                  <th><button type="button" class="sort-button" data-event-sort="status">Status</button></th>
+                  <th><button type="button" class="sort-button" data-event-sort="details">Details</button></th>
                 </tr>
               </thead>
               <tbody id="eventRegistryTableBody">
@@ -394,6 +408,21 @@
         <button type="submit" id="historySaveButton">Add & Publish</button>
         <button type="button" class="secondary" id="historyResetButton">Reset</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog class="history-edit-dialog history-compact-dialog" id="manualListingDialog">
+    <form id="manualListingForm" class="history-form history-edit-form" method="dialog">
+      <div class="history-edit-title">
+        <div class="worker-control-section-title">Add Listing URL</div>
+        <button type="button" class="secondary" id="manualListingCloseButton">Close</button>
+      </div>
+      <label class="history-notes-field">Facebook URL<input id="manualListingDialogUrl" name="url" type="url" placeholder="https://www.facebook.com/marketplace/item/..." required></label>
+      <label class="checkbox inline-checkbox history-notes-field"><input id="manualListingDialogFetchNow" name="fetch_now" type="checkbox"> Fetch now</label>
+      <div class="history-actions">
+        <button type="submit" id="manualListingDialogAddButton">Add to Backlog</button>
+      </div>
+      <div class="process-meta" id="manualListingDialogStatus"></div>
     </form>
   </dialog>
 
@@ -473,6 +502,24 @@
         </div>
       </details>
       <label class="history-notes-field">Notes<textarea id="historyEditNotes" name="notes" rows="4"></textarea></label>
+      <section class="history-link-section">
+        <div class="history-link-header">
+          <div>
+            <div class="label">Listings</div>
+            <div class="process-meta">Facebook links for this inventory item.</div>
+          </div>
+        </div>
+        <div class="history-linked-listings" id="historyLinkedListings"></div>
+        <div class="history-link-form">
+          <label class="history-link-url">Facebook URL<input id="historyLinkUrl" type="url" placeholder="https://www.facebook.com/marketplace/item/..."></label>
+          <label>Relationship<select id="historyLinkRelationship">
+            <option value="same_listing">Same listing</option>
+            <option value="same_model">Same model</option>
+          </select></label>
+          <label class="checkbox inline-checkbox"><input id="historyLinkFetchNow" type="checkbox"> Fetch now</label>
+          <button type="button" class="secondary" id="historyLinkAddButton">Add Link</button>
+        </div>
+      </section>
       <div class="history-actions">
         <button type="submit" id="historyEditSaveButton">Save & Publish</button>
         <button type="button" class="secondary" id="historyEditCancelButton">Cancel</button>

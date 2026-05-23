@@ -21,8 +21,11 @@ const store = {
   purchaseHistoryCanWrite: false,
   purchaseHistoryCsvPath: '',
   historyStatsHidden: localStorage.getItem('marketplace-monitor-history-stats-hidden') === 'true',
+  historySoldRange: localStorage.getItem('marketplace-monitor-history-sold-range') || 'all',
   editingPurchaseHistoryRecordId: '',
   eventRegistry: [],
+  historySort: { key: 'date', direction: 'desc' },
+  eventRegistrySort: { key: 'time', direction: 'desc' },
   workflowSignature: '',
   processSignature: '',
   workerDetailSignature: '',
@@ -42,6 +45,7 @@ const els = {
   historyStatus: document.getElementById('historyStatus'),
   historyInventoryStatsRow: document.getElementById('historyInventoryStatsRow'),
   historyToggleStatsButton: document.getElementById('historyToggleStatsButton'),
+  historySoldRangeSelect: document.getElementById('historySoldRangeSelect'),
   historyDocumentSelect: document.getElementById('historyDocumentSelect'),
   historyMergeSourceSelect: document.getElementById('historyMergeSourceSelect'),
   historyItemDialog: document.getElementById('historyItemDialog'),
@@ -50,6 +54,11 @@ const els = {
   historyEditDialog: document.getElementById('historyEditDialog'),
   historyEditForm: document.getElementById('historyEditForm'),
   historyEditStatus: document.getElementById('historyEditStatus'),
+  historyLinkedListings: document.getElementById('historyLinkedListings'),
+  historyLinkUrl: document.getElementById('historyLinkUrl'),
+  historyLinkRelationship: document.getElementById('historyLinkRelationship'),
+  historyLinkFetchNow: document.getElementById('historyLinkFetchNow'),
+  historyLinkAddButton: document.getElementById('historyLinkAddButton'),
   eventRegistryTableBody: document.getElementById('eventRegistryTableBody'),
   eventRegistryMeta: document.getElementById('eventRegistryMeta'),
   eventRegistrySourceSelect: document.getElementById('eventRegistrySourceSelect'),
@@ -242,9 +251,48 @@ function averageRoi(rows) {
   return `${(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)}%`;
 }
 
+function soldRangeStart(range) {
+  const now = new Date();
+  if (range === 'ytd') {
+    return new Date(now.getFullYear(), 0, 1);
+  }
+  const days = Number.parseInt(range, 10);
+  if (!Number.isFinite(days)) {
+    return null;
+  }
+  const start = new Date(now);
+  start.setDate(start.getDate() - days);
+  return start;
+}
+
+function soldRangeLabel(range) {
+  return range === '30' ? 'last 30 days'
+    : range === '90' ? 'last 90 days'
+      : range === '365' ? 'last 12 months'
+        : range === 'ytd' ? 'YTD'
+          : 'all time';
+}
+
+function filterRowsBySoldRange(rows, range) {
+  const start = soldRangeStart(range);
+  if (!start) {
+    return rows;
+  }
+  return rows.filter((row) => {
+    if (!row.sold_at) {
+      return false;
+    }
+    const soldAt = new Date(`${row.sold_at}T00:00:00`);
+    return Number.isFinite(soldAt.getTime()) && soldAt >= start;
+  });
+}
+
 function renderHistoryStats() {
   if (!els.historyInventoryStatsRow || !els.historyToggleStatsButton) {
     return;
+  }
+  if (els.historySoldRangeSelect) {
+    els.historySoldRangeSelect.value = store.historySoldRange;
   }
   els.historyInventoryStatsRow.hidden = store.historyStatsHidden;
   els.historyToggleStatsButton.textContent = store.historyStatsHidden ? 'Show stats' : 'Hide stats';
@@ -259,7 +307,8 @@ function renderHistoryStats() {
     byStatus[inventoryStatusFromHistoryRow(row)]?.push(row);
   }
   const activeRows = [...byStatus.hold, ...byStatus.listed];
-  const soldRows = byStatus.sold;
+  const soldRows = filterRowsBySoldRange(byStatus.sold, store.historySoldRange);
+  const soldRange = soldRangeLabel(store.historySoldRange);
   const activeCost = sumMoney(activeRows, 'purchase_price_cad');
   const listedValue = sumMoney(byStatus.listed, 'list_price_cad');
   const soldRevenue = sumMoney(soldRows, 'sold_price_cad');
@@ -268,8 +317,8 @@ function renderHistoryStats() {
     ['Items', String(rows.length), `${byStatus.hold.length} hold / ${byStatus.listed.length} listed / ${byStatus.sold.length} sold`],
     ['Active cost', formatMoney(activeCost), 'hold + listed cost basis'],
     ['Listed value', formatMoney(listedValue), 'current asking price'],
-    ['Sold revenue', formatMoney(soldRevenue), 'completed sales'],
-    ['Realized profit', formatMoney(realizedProfit), `avg ROI ${averageRoi(soldRows) || '-'}`],
+    ['Sold revenue', formatMoney(soldRevenue), `${soldRows.length} sold, ${soldRange}`],
+    ['Realized profit', formatMoney(realizedProfit), `avg ROI ${averageRoi(soldRows) || '-'}, ${soldRange}`],
   ];
   els.historyInventoryStatsRow.innerHTML = cards.map(([label, value, meta]) => (
     '<div class="inventory-stat">'
@@ -278,6 +327,97 @@ function renderHistoryStats() {
       + `<div class="process-meta">${html(meta || '')}</div>`
     + '</div>'
   )).join('');
+}
+
+function sortDirectionMultiplier(direction) {
+  return direction === 'asc' ? 1 : -1;
+}
+
+function compareSortValues(left, right) {
+  if (typeof left === 'number' && typeof right === 'number') {
+    return left - right;
+  }
+  return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function sortValueIsEmpty(value) {
+  return value === null
+    || value === undefined
+    || value === ''
+    || (typeof value === 'number' && !Number.isFinite(value));
+}
+
+function sortRows(rows, sortState, valueForRow) {
+  const multiplier = sortDirectionMultiplier(sortState.direction);
+  return [...rows].sort((left, right) => {
+    const leftValue = valueForRow(left, sortState.key);
+    const rightValue = valueForRow(right, sortState.key);
+    const leftEmpty = sortValueIsEmpty(leftValue);
+    const rightEmpty = sortValueIsEmpty(rightValue);
+    if (leftEmpty && rightEmpty) return 0;
+    if (leftEmpty) return 1;
+    if (rightEmpty) return -1;
+    return compareSortValues(leftValue, rightValue) * multiplier;
+  });
+}
+
+function updateSortButtons(selector, activeKey, direction) {
+  for (const button of document.querySelectorAll(selector)) {
+    button.dataset.baseLabel ||= button.textContent.trim().replace(/\s+[↑↓]$/, '');
+    const isActive = button.dataset.historySort === activeKey || button.dataset.eventSort === activeKey;
+    button.classList.toggle('active', isActive);
+    button.textContent = isActive
+      ? `${button.dataset.baseLabel} ${direction === 'asc' ? '↑' : '↓'}`
+      : button.dataset.baseLabel;
+  }
+}
+
+function historySortValue(row, key) {
+  switch (key) {
+    case 'title':
+      return titleFromHistoryRow(row);
+    case 'subcategory':
+      return row.subcategory || '';
+    case 'cost':
+      return parseMoney(row.purchase_price_cad);
+    case 'price':
+      return parseMoney(row.sold_price_cad || row.list_price_cad);
+    case 'status':
+      return inventoryStatusFromHistoryRow(row);
+    case 'profit':
+      return parseMoney(row.realized_profit_cad);
+    case 'roi': {
+      const roi = Number.parseFloat(String(row.roi_percent || ''));
+      return Number.isFinite(roi) ? roi : null;
+    }
+    case 'result':
+      return resultLabelFromHistoryRow(row);
+    case 'date':
+    default: {
+      const value = row.sold_at || row.listed_at || row.purchase_at || row.updated_at || row.created_at || '';
+      const parsed = Date.parse(value.includes('T') ? value : `${value}T00:00:00`);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+  }
+}
+
+function eventSortValue(event, key) {
+  switch (key) {
+    case 'time':
+      return Number.isFinite(Date.parse(event.event_at || '')) ? Date.parse(event.event_at || '') : null;
+    case 'source':
+      return event.source || '';
+    case 'event':
+      return event.event_type || '';
+    case 'subject':
+      return event.title || event.subject_id || '';
+    case 'status':
+      return event.status || '';
+    case 'details':
+      return eventRegistryDetails(event);
+    default:
+      return '';
+  }
 }
 
 function selectedHistoryDocumentId() {
@@ -312,10 +452,11 @@ function renderPurchaseHistory() {
     return;
   }
   renderPurchaseHistoryDocuments();
-  const rows = [...store.purchaseHistory].reverse();
+  const rows = sortRows(store.purchaseHistory, store.historySort, historySortValue);
   const selectedDocument = store.purchaseHistoryDocuments.find((document) => document.document_id === selectedHistoryDocumentId());
   els.historyMeta.textContent = `${store.purchaseHistory.length} rows${selectedDocument ? ` in ${selectedDocument.name}` : ''}`;
   renderHistoryStats();
+  updateSortButtons('[data-history-sort]', store.historySort.key, store.historySort.direction);
   if (!rows.length) {
     els.historyTableBody.innerHTML = '<tr><td colspan="10" class="empty-state">History appears here.</td></tr>';
     return;
@@ -459,6 +600,47 @@ function setFormField(form, name, value) {
   }
 }
 
+function relationshipLabel(value) {
+  return value === 'same_listing' ? 'Same listing' : 'Same model';
+}
+
+function listingTitle(link) {
+  return link?.listing?.detail_title
+    || link?.listing?.card_title
+    || link?.listing_id
+    || '';
+}
+
+function renderHistoryListingLinks(row) {
+  if (!els.historyLinkedListings) {
+    return;
+  }
+  const links = Array.isArray(row?._listing_links) ? row._listing_links : [];
+  if (!links.length) {
+    els.historyLinkedListings.innerHTML = '<div class="process-meta">No linked listings.</div>';
+    return;
+  }
+  els.historyLinkedListings.innerHTML = links.map((link) => {
+    const href = link.href || link.listing?.href || '';
+    const status = link.listing?.detail_status || 'pending';
+    const price = link.listing?.detail_price || '';
+    const meta = [
+      relationshipLabel(link.relationship_type),
+      status,
+      price,
+    ].filter(Boolean).join(' / ');
+    return '<div class="history-linked-listing">'
+      + '<div>'
+        + `<div class="history-item-title">${html(listingTitle(link))}</div>`
+        + `<div class="process-meta">${html(meta)}</div>`
+      + '</div>'
+      + '<div class="row-actions">'
+        + `<a class="button-link compact" href="${html(href)}" target="_blank" rel="noreferrer">FB</a>`
+      + '</div>'
+    + '</div>';
+  }).join('');
+}
+
 function openHistoryEditModal(recordId) {
   const row = historyRowById(recordId);
   if (!row || !els.historyEditDialog || !els.historyEditForm) {
@@ -471,8 +653,56 @@ function openHistoryEditModal(recordId) {
   }
   setFormField(els.historyEditForm, 'price_cad', row.sold_price_cad || row.list_price_cad || '');
   setFormField(els.historyEditForm, 'inventory_status', inventoryStatusFromHistoryRow(row));
+  if (els.historyLinkUrl) els.historyLinkUrl.value = '';
+  if (els.historyLinkRelationship) els.historyLinkRelationship.value = 'same_listing';
+  if (els.historyLinkFetchNow) els.historyLinkFetchNow.checked = false;
+  renderHistoryListingLinks(row);
   if (els.historyEditStatus) els.historyEditStatus.textContent = '';
   els.historyEditDialog.showModal();
+}
+
+async function addHistoryListingLink() {
+  const recordId = store.editingPurchaseHistoryRecordId;
+  const url = els.historyLinkUrl?.value.trim() || '';
+  if (!recordId || !url) {
+    if (els.historyEditStatus) els.historyEditStatus.textContent = 'Paste a Facebook Marketplace URL.';
+    return;
+  }
+  if (els.historyLinkAddButton) els.historyLinkAddButton.disabled = true;
+  try {
+    const payload = await fetchJson('/api/purchase-history/listing-links', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        documentId: selectedHistoryDocumentId(),
+        recordId,
+        url,
+        relationshipType: els.historyLinkRelationship?.value || 'same_model',
+        fetchNow: Boolean(els.historyLinkFetchNow?.checked),
+        runtimeArgs: captureSettingsArgs(),
+      }),
+    });
+    store.purchaseHistoryDocuments = payload.documents || store.purchaseHistoryDocuments;
+    store.purchaseHistory = payload.rows || [];
+    renderPurchaseHistory();
+    const updatedRow = historyRowById(recordId);
+    renderHistoryListingLinks(updatedRow);
+    if (els.historyLinkUrl) els.historyLinkUrl.value = '';
+    if (els.historyLinkFetchNow) els.historyLinkFetchNow.checked = false;
+    const processId = payload.listingLink?.fetch?.process?.id || '';
+    if (els.historyEditStatus) {
+      els.historyEditStatus.textContent = processId
+        ? `Listing linked and fetch started: ${processId}.`
+        : 'Listing linked and added to backlog.';
+    }
+    listingsViewer.loadBacklogQueue?.().catch(() => {});
+    listingsViewer.loadRows?.().catch(() => {});
+    loadEventRegistry().catch(() => {});
+  } catch (error) {
+    if (els.historyEditStatus) els.historyEditStatus.textContent = error.message || 'Listing could not be linked.';
+  } finally {
+    if (els.historyLinkAddButton) els.historyLinkAddButton.disabled = false;
+  }
 }
 
 async function saveHistoryEdit(event) {
@@ -570,6 +800,8 @@ async function mergeHistoryDocument() {
 function eventRegistryDetails(event) {
   const data = event.data || {};
   return [
+    data.relationship_type ? relationshipLabel(data.relationship_type) : '',
+    data.listing_id ? `listing ${data.listing_id}` : '',
     data.price_cad ? `price ${formatMoney(data.price_cad)}` : '',
     data.inventory_status ? `inventory ${data.inventory_status}` : '',
     data.reason || data.error || '',
@@ -583,9 +815,11 @@ function renderEventRegistry() {
   els.eventRegistryMeta.textContent = `${store.eventRegistry.length} recent events`;
   if (!store.eventRegistry.length) {
     els.eventRegistryTableBody.innerHTML = '<tr><td colspan="6" class="empty-state">Events appear here.</td></tr>';
+    updateSortButtons('[data-event-sort]', store.eventRegistrySort.key, store.eventRegistrySort.direction);
     return;
   }
-  els.eventRegistryTableBody.innerHTML = store.eventRegistry.map((event) => (
+  updateSortButtons('[data-event-sort]', store.eventRegistrySort.key, store.eventRegistrySort.direction);
+  els.eventRegistryTableBody.innerHTML = sortRows(store.eventRegistry, store.eventRegistrySort, eventSortValue).map((event) => (
     '<tr>'
       + `<td>${html(formatDate(event.event_at))}</td>`
       + `<td><span class="status ${html(event.source)}">${html(event.source)}</span></td>`
@@ -1606,6 +1840,21 @@ function bindEvents() {
     localStorage.setItem('marketplace-monitor-history-stats-hidden', String(store.historyStatsHidden));
     renderHistoryStats();
   });
+  els.historySoldRangeSelect?.addEventListener('change', () => {
+    store.historySoldRange = els.historySoldRangeSelect.value || 'all';
+    localStorage.setItem('marketplace-monitor-history-sold-range', store.historySoldRange);
+    renderHistoryStats();
+  });
+  document.querySelectorAll('[data-history-sort]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.dataset.historySort;
+      store.historySort = {
+        key,
+        direction: store.historySort.key === key && store.historySort.direction === 'asc' ? 'desc' : 'asc',
+      };
+      renderPurchaseHistory();
+    });
+  });
   document.getElementById('historyItemCloseButton')?.addEventListener('click', () => els.historyItemDialog?.close());
   document.getElementById('historyImportCloseButton')?.addEventListener('click', () => els.historyImportDialog?.close());
   document.getElementById('historyManageCloseButton')?.addEventListener('click', () => els.historyManageDialog?.close());
@@ -1644,6 +1893,7 @@ function bindEvents() {
   els.historyEditForm?.addEventListener('submit', saveHistoryEdit);
   document.getElementById('historyEditCloseButton')?.addEventListener('click', () => els.historyEditDialog?.close());
   document.getElementById('historyEditCancelButton')?.addEventListener('click', () => els.historyEditDialog?.close());
+  els.historyLinkAddButton?.addEventListener('click', addHistoryListingLink);
   document.getElementById('eventRegistryRefreshButton')?.addEventListener('click', async () => {
     try {
       await loadEventRegistry();
@@ -1657,6 +1907,16 @@ function bindEvents() {
     } catch (error) {
       alert(error.message || 'Event registry could not be loaded.');
     }
+  });
+  document.querySelectorAll('[data-event-sort]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.dataset.eventSort;
+      store.eventRegistrySort = {
+        key,
+        direction: store.eventRegistrySort.key === key && store.eventRegistrySort.direction === 'asc' ? 'desc' : 'asc',
+      };
+      renderEventRegistry();
+    });
   });
   els.workflowSelect.addEventListener('change', () => {
     store.selectedWorkflowId = els.workflowSelect.value;

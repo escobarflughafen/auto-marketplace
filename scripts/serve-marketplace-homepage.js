@@ -7,17 +7,23 @@ const { spawn } = require('child_process');
 
 const {
   DEFAULT_DB_PATH,
+  extractListingId,
+  canonicalizeListingUrl,
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   getHomepageListingCounts,
+  upsertHomepageListingWithStatus,
   createPurchaseHistoryDocument,
   listPurchaseHistoryDocuments,
   getPurchaseHistoryDocument,
   upsertPurchaseHistoryRows,
   listPurchaseHistoryRows,
+  upsertPurchaseHistoryListingLink,
+  listPurchaseHistoryListingLinks,
   mergePurchaseHistoryDocuments,
   listPurchaseHistoryEvents,
   listEventRegistry,
+  appendListingEvent,
   insertWorkflowRun,
   updateWorkflowRun,
   getWorkflowRun,
@@ -678,11 +684,11 @@ function getRunningManagedProcesses(db) {
 }
 
 function ensureManagedWorkerIdArg(args, runId, workflow) {
-  if (![
-    'marketplace:home:collect',
-    'marketplace:search:explore',
-    'marketplace:home:process',
-  ].includes(workflow.script)) {
+  const supportsWorkerId = fieldsForWorkflow(workflow)
+    .some((field) => field.flag === '--worker-id'
+      || field.args?.includes?.('--worker-id')
+      || field.options?.some((option) => option.args?.includes?.('--worker-id')));
+  if (!supportsWorkerId) {
     return args;
   }
 
@@ -1192,8 +1198,24 @@ function historyDbRowsToCsvRows(rows, fields) {
     if (!normalized.inventory_status) {
       normalized.inventory_status = normalizeInventoryStatus(normalized);
     }
+    if (Array.isArray(row.listing_links)) {
+      normalized._listing_links = row.listing_links;
+    }
     return normalized;
   });
+}
+
+function attachPurchaseHistoryListingLinks(db, rows, documentId) {
+  const links = listPurchaseHistoryListingLinks(db, { documentId });
+  const linksByRecord = links.reduce((accumulator, link) => {
+    accumulator[link.record_id] ||= [];
+    accumulator[link.record_id].push(link);
+    return accumulator;
+  }, {});
+  return rows.map((row) => ({
+    ...row,
+    listing_links: linksByRecord[row.record_id] || [],
+  }));
 }
 
 function ensurePurchaseHistorySeedDocument(db, fields = readTradingHistoryFields()) {
@@ -1373,7 +1395,9 @@ function purchaseHistoryPayload(db, access, requestedDocumentId = '') {
   const fields = readTradingHistoryFields();
   const documents = ensurePurchaseHistorySeedDocument(db, fields);
   const document = selectedPurchaseHistoryDocument(db, requestedDocumentId, fields);
-  const dbRows = document ? listPurchaseHistoryRows(db, document.document_id) : [];
+  const dbRows = document
+    ? attachPurchaseHistoryListingLinks(db, listPurchaseHistoryRows(db, document.document_id), document.document_id)
+    : [];
   const rows = historyDbRowsToCsvRows(dbRows, fields);
   return {
     fields,
@@ -1384,6 +1408,152 @@ function purchaseHistoryPayload(db, access, requestedDocumentId = '') {
       totalRows: rows.length,
     },
     auth: authPayloadForAccess(access),
+  };
+}
+
+function relationshipLabel(value) {
+  return value === 'same_listing' ? 'same listing' : 'same model';
+}
+
+function addManualListingLink(db, body = {}) {
+  const documentId = String(body.documentId || body.document_id || '').trim();
+  const recordId = String(body.recordId || body.record_id || '').trim();
+  const sourceUrl = String(body.url || body.href || '').trim();
+  const listingId = extractListingId(sourceUrl);
+  if (!documentId || !recordId) {
+    const error = new Error('Choose an inventory record before linking a listing.');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!listingId) {
+    const error = new Error('Expected a Facebook Marketplace item URL.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const href = canonicalizeListingUrl(sourceUrl);
+  const relationshipType = String(body.relationshipType || body.relationship_type || 'same_model')
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s]+/g, '_') === 'same_listing'
+    ? 'same_listing'
+    : 'same_model';
+  const linkedAt = new Date().toISOString();
+  const inventoryRow = listPurchaseHistoryRows(db, documentId).find((row) => row.record_id === recordId);
+  if (!inventoryRow) {
+    const error = new Error(`Unknown purchase history record: ${recordId}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  const inventoryData = inventoryRow.data || {};
+  const title = inventoryData.title || inventoryRow.title || [inventoryData.brand, inventoryData.model].filter(Boolean).join(' ');
+  const listingResult = upsertHomepageListingWithStatus(db, {
+    listingId,
+    href,
+    title,
+    text: [
+      relationshipLabel(relationshipType),
+      inventoryData.brand || '',
+      inventoryData.model || '',
+      inventoryData.mount || '',
+    ].filter(Boolean).join(' / '),
+    source: 'manual',
+    sourceKeyword: relationshipType,
+  }, {
+    source: 'manual',
+    sourceKeyword: relationshipType,
+    seenAt: linkedAt,
+  });
+  appendListingEvent(db, {
+    listingId,
+    eventType: 'listing_observed',
+    eventAt: linkedAt,
+    workerId: 'manual',
+    sourceUrl: href,
+    status: listingResult.row?.detail_status || 'pending',
+    content: {
+      listingId,
+      href,
+      source: 'manual',
+      relationshipType,
+      documentId,
+      recordId,
+    },
+  });
+  const link = upsertPurchaseHistoryListingLink(db, {
+    documentId,
+    recordId,
+    listingId,
+    href,
+    relationshipType,
+    note: body.note || '',
+  }, {
+    linkedAt,
+  });
+  let fetch = null;
+  if (body.fetchNow) {
+    fetch = resolveListingsFromViewer(db, {
+      mode: 'listing',
+      listingId,
+      runtimeArgs: body.runtimeArgs,
+    });
+  }
+  return {
+    listing: listingResult.row,
+    link,
+    fetch,
+  };
+}
+
+function addManualBacklogListing(db, body = {}) {
+  const sourceUrl = String(body.url || body.href || '').trim();
+  const listingId = extractListingId(sourceUrl);
+  if (!listingId) {
+    const error = new Error('Expected a Facebook Marketplace item URL.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const href = canonicalizeListingUrl(sourceUrl);
+  const addedAt = new Date().toISOString();
+  const title = String(body.title || '').trim();
+  const sourceKeyword = String(body.sourceKeyword || body.source_keyword || 'manual_url').trim() || 'manual_url';
+  const listingResult = upsertHomepageListingWithStatus(db, {
+    listingId,
+    href,
+    title,
+    text: title || 'Manually added Marketplace URL',
+    source: 'manual',
+    sourceKeyword,
+  }, {
+    source: 'manual',
+    sourceKeyword,
+    seenAt: addedAt,
+  });
+  appendListingEvent(db, {
+    listingId,
+    eventType: 'listing_observed',
+    eventAt: addedAt,
+    workerId: 'manual',
+    sourceUrl: href,
+    status: listingResult.row?.detail_status || 'pending',
+    content: {
+      listingId,
+      href,
+      source: 'manual',
+      sourceKeyword,
+    },
+  });
+  let fetch = null;
+  if (body.fetchNow) {
+    fetch = resolveListingsFromViewer(db, {
+      mode: 'listing',
+      listingId,
+      runtimeArgs: body.runtimeArgs,
+    });
+  }
+  return {
+    listing: listingResult.row,
+    outcome: listingResult.outcome,
+    fetch,
   };
 }
 
@@ -1759,6 +1929,32 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/purchase-history/listing-links' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const result = addManualListingLink(db, body);
+        writeJson(response, 201, {
+          ...purchaseHistoryPayload(db, access, body.documentId || body.document_id || ''),
+          listingLink: result,
+          backlog: {
+            rows: listBacklogCandidates(db, {
+              statusFilter: 'all',
+              sourceFilter: 'manual',
+              limit: 25,
+            }),
+            resolveQueueCounts: getResolveQueueCounts(db),
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/purchase-history/events' && request.method === 'GET') {
       try {
         writeJson(response, 200, {
@@ -1872,6 +2068,31 @@ function createServer(options) {
           error: error.message,
           query,
         });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/listings/manual' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const result = addManualBacklogListing(db, body);
+        writeJson(response, 201, {
+          manualListing: result,
+          backlog: {
+            rows: listBacklogCandidates(db, {
+              statusFilter: 'all',
+              sourceFilter: 'manual',
+              limit: 25,
+            }),
+            resolveQueueCounts: getResolveQueueCounts(db),
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
       }
       return;
     }

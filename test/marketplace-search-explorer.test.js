@@ -74,6 +74,12 @@ test('parseArgs supports unauthenticated search exploration', () => {
   assert.equal(options.authMode, 'none');
 });
 
+test('parseArgs reads search explorer worker id', () => {
+  const options = parseArgs(['--query', 'nikon', '--worker-id', 'search-run-1']);
+
+  assert.equal(options.workerId, 'search-run-1');
+});
+
 test('parseArgs infers major city area slugs for search explorer', () => {
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'Montreal, Quebec']).area, 'montreal');
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'Calgary, Alberta']).area, 'calgary');

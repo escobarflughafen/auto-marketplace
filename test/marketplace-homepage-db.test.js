@@ -21,8 +21,11 @@ const {
   getHomepageListingCounts,
   createPurchaseHistoryDocument,
   listPurchaseHistoryDocuments,
+  getPurchaseHistoryRow,
   upsertPurchaseHistoryRows,
   listPurchaseHistoryRows,
+  upsertPurchaseHistoryListingLink,
+  listPurchaseHistoryListingLinks,
   listPurchaseHistoryEvents,
   mergePurchaseHistoryDocuments,
   runTransaction,
@@ -366,6 +369,87 @@ test('purchase history documents store rows and merge by record id', () => {
     assert.equal(rows.length, 2);
     assert.equal(rows.find((row) => row.record_id === 'trade-001').data.title, 'Nikon FM2 updated');
     assert.equal(listPurchaseHistoryDocuments(db).length, 2);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('purchase history records can link same listing and same model Marketplace rows', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const document = createPurchaseHistoryDocument(db, {
+      name: 'Linked History',
+    });
+    upsertPurchaseHistoryRows(db, document.document_id, [{
+      record_id: 'trade-link-001',
+      category: 'camera_gear',
+      subcategory: 'camera_body',
+      brand: 'sigma',
+      model: 'dp1m',
+      title: 'SIGMA DP1M',
+      purchase_price_cad: '300',
+      inventory_status: 'hold',
+      outcome: 'pending',
+    }]);
+    upsertHomepageListing(db, {
+      listingId: '963267799804615',
+      href: 'https://www.facebook.com/marketplace/item/963267799804615/?tracking=abc',
+      title: 'SIGMA DP1 Merrill',
+      text: 'CA$ 550 | SIGMA DP1 Merrill',
+    }, {
+      source: 'manual',
+      sourceKeyword: 'same_listing',
+    });
+    upsertHomepageListing(db, {
+      listingId: '963267799804616',
+      href: 'https://www.facebook.com/marketplace/item/963267799804616/',
+      title: 'SIGMA DP1M comp',
+      text: 'CA$ 520 | SIGMA DP1M comp',
+    }, {
+      source: 'manual',
+      sourceKeyword: 'same_model',
+    });
+
+    upsertPurchaseHistoryListingLink(db, {
+      documentId: document.document_id,
+      recordId: 'trade-link-001',
+      listingId: '963267799804615',
+      href: 'https://www.facebook.com/marketplace/item/963267799804615/?tracking=abc',
+      relationshipType: 'same_listing',
+    }, {
+      linkedAt: '2026-05-23T18:00:00.000Z',
+    });
+    upsertPurchaseHistoryListingLink(db, {
+      documentId: document.document_id,
+      recordId: 'trade-link-001',
+      listingId: '963267799804616',
+      href: 'https://www.facebook.com/marketplace/item/963267799804616/',
+      relationshipType: 'same_model',
+    }, {
+      linkedAt: '2026-05-23T18:01:00.000Z',
+    });
+
+    assert.equal(getPurchaseHistoryRow(db, document.document_id, 'trade-link-001').title, 'SIGMA DP1M');
+    const links = listPurchaseHistoryListingLinks(db, {
+      documentId: document.document_id,
+      recordId: 'trade-link-001',
+    });
+    assert.deepEqual(
+      links.map((link) => [link.listing_id, link.relationship_type]),
+      [
+        ['963267799804616', 'same_model'],
+        ['963267799804615', 'same_listing'],
+      ],
+    );
+    assert.equal(links[1].href, 'https://www.facebook.com/marketplace/item/963267799804615/');
+    assert.equal(
+      listPurchaseHistoryEvents(db, { documentId: document.document_id, recordId: 'trade-link-001' })
+        .filter((event) => event.event_type === 'listing_linked')
+        .length,
+      2,
+    );
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

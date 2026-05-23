@@ -91,7 +91,7 @@ body.worker-inspector-open {
 .workspace-surface {
   margin-top: 12px;
   display: grid;
-  overflow: hidden;
+  overflow: visible;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
@@ -513,6 +513,13 @@ button:not(:disabled):hover,
 .resolve-toolbar button {
   padding: 5px 7px;
 }
+.manual-listing-url {
+  flex: 1 1 260px;
+  min-width: 180px;
+}
+.manual-listing-fetch {
+  min-height: 32px;
+}
 .resolve-queue-panel:empty {
   display: none;
 }
@@ -641,6 +648,7 @@ button:not(:disabled):hover,
 .history-notes-field,
 .history-actions,
 .history-advanced-fields,
+.history-link-section,
 .history-form .process-meta {
   grid-column: 1 / -1;
 }
@@ -667,6 +675,47 @@ button:not(:disabled):hover,
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
+}
+.history-link-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--fill);
+}
+.history-link-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.history-linked-listings {
+  display: grid;
+  gap: 6px;
+}
+.history-linked-listing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #fff;
+}
+.history-link-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(130px, 160px) auto auto;
+  gap: 8px;
+  align-items: end;
+}
+.history-link-url {
+  min-width: 0;
+}
+.inline-checkbox {
+  min-height: 36px;
+  align-items: center;
 }
 .history-tool-grid {
   grid-column: 1 / -1;
@@ -772,6 +821,7 @@ button:not(:disabled):hover,
   padding: 12px;
   max-height: calc(100vh - 24px);
   overflow: auto;
+  overscroll-behavior: auto;
 }
 .history-edit-title {
   grid-column: 1 / -1;
@@ -813,7 +863,7 @@ button:not(:disabled):hover,
 }
 .tablewrap {
   overflow: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior: auto;
   scrollbar-gutter: stable both-edges;
   -webkit-overflow-scrolling: touch;
   border: 1px solid var(--line);
@@ -843,6 +893,7 @@ button:not(:disabled):hover,
   min-width: 0;
   max-width: 100%;
   overflow: auto;
+  overscroll-behavior: auto;
 }
 .tabulator {
   border: 0;
@@ -982,7 +1033,7 @@ a:hover { text-decoration: underline; }
 .process-list > .card {
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 .worker-control {
   border: 0;
@@ -1049,7 +1100,7 @@ a:hover { text-decoration: underline; }
   max-height: min(42vh, 420px);
   overflow-x: auto;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior: auto;
   border: 0;
   border-right: 1px solid var(--line);
   border-radius: 0;
@@ -1218,7 +1269,7 @@ textarea {
 }
 .process-card {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .process-header {
   display: flex;
@@ -1236,6 +1287,7 @@ textarea {
 .process-command {
   max-height: 62px;
   overflow: auto;
+  overscroll-behavior: auto;
 }
 .worker-table-wrap {
   margin-top: 8px;
@@ -1244,6 +1296,7 @@ textarea {
   max-width: 100%;
   max-height: min(62vh, 680px);
   overflow: auto;
+  overscroll-behavior: auto;
   border-left: 0;
   border-right: 0;
   border-bottom: 0;
@@ -1348,6 +1401,7 @@ textarea {
 .worker-events-wrap {
   max-height: min(42vh, 460px);
   overflow: auto;
+  overscroll-behavior: auto;
 }
 .worker-inspector-backdrop {
   position: fixed;
@@ -1386,13 +1440,14 @@ textarea {
 .worker-inspector-body {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: auto;
   display: grid;
   gap: 10px;
   padding: 10px;
 }
 .worker-detail-table-body {
   display: block;
-  overflow: hidden;
+  overflow: visible;
   padding: 0;
 }
 .worker-detail-tablewrap {
@@ -1459,6 +1514,7 @@ textarea {
 .worker-detail-section-tablewrap {
   width: 100%;
   overflow: auto;
+  overscroll-behavior: auto;
   border: 0;
   border-radius: 0;
   background: #fff;
@@ -1476,13 +1532,14 @@ textarea {
 .worker-detail-preview-frame {
   max-height: min(28vh, 260px);
   overflow: auto;
+  overscroll-behavior: auto;
   margin-bottom: 8px;
   border: 1px solid var(--line);
   background: var(--fill);
 }
 .worker-panel {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: #fff;
@@ -1529,6 +1586,7 @@ textarea {
   min-height: 220px;
   max-height: 330px;
   overflow: auto;
+  overscroll-behavior: auto;
   display: grid;
   align-items: start;
   justify-items: center;
@@ -1540,6 +1598,7 @@ textarea {
   min-height: 260px;
   max-height: 520px;
   overflow: auto;
+  overscroll-behavior: auto;
   display: grid;
   align-items: start;
   justify-items: center;
@@ -1559,6 +1618,7 @@ textarea {
   align-content: start;
   max-height: 360px;
   overflow: auto;
+  overscroll-behavior: auto;
   padding: 8px;
   border-top: 1px solid var(--line);
   background: #fff;
@@ -1645,6 +1705,7 @@ textarea {
 .worker-log-wrap {
   max-height: min(38vh, 420px);
   overflow: auto;
+  overscroll-behavior: auto;
   border-left: 0;
   border-right: 0;
   border-bottom: 0;
@@ -1683,13 +1744,14 @@ textarea {
 }
 .listings-table-pane {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .snapshot-panel {
   margin: 0;
   min-width: 0;
   max-height: none;
   overflow: auto;
+  overscroll-behavior: auto;
   border-left: 0;
   border-right: 0;
   border-bottom: 0;
@@ -1732,6 +1794,7 @@ textarea {
   border-radius: 0;
   background: var(--fill);
   overflow: auto;
+  overscroll-behavior: auto;
 }
 .snapshot-image {
   display: block;
@@ -1788,7 +1851,8 @@ textarea {
   flex-wrap: nowrap;
   align-items: center;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overscroll-behavior: auto;
 }
 .row-actions .secondary,
 .row-actions .button-link.compact {
@@ -1919,6 +1983,10 @@ textarea {
   .history-edit-title {
     align-items: stretch;
     flex-direction: column;
+  }
+  .history-link-form,
+  .history-linked-listing {
+    grid-template-columns: 1fr;
   }
   .history-table-header,
   .history-header-actions {

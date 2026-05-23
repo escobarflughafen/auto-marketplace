@@ -23,6 +23,10 @@ const {
   getHomepageListingCounts,
 } = require('./marketplace-homepage-db');
 const {
+  appendRegulatedListingEvent,
+  appendRegulatedWorkflowEvent,
+} = require('./marketplace-worker-event-writer');
+const {
   DEFAULT_CREDENTIALS_PATH,
   DEFAULT_CREDENTIALS_PROFILE,
   DEFAULT_LOGIN_TIMEOUT_MS,
@@ -78,6 +82,7 @@ function parseArgs(argv) {
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
     credentialsProfile: DEFAULT_CREDENTIALS_PROFILE,
     loginTimeoutMs: DEFAULT_LOGIN_TIMEOUT_MS,
+    workerId: `pid-${process.pid}`,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -179,6 +184,10 @@ function parseArgs(argv) {
         options.loginTimeoutMs = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1) * 1000;
         index += 1;
         break;
+      case '--worker-id':
+        options.workerId = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
       case '--headed':
         options.headless = false;
         break;
@@ -210,6 +219,55 @@ async function appendLog(logFile, message) {
   process.stdout.write(line);
   await ensureDir(path.dirname(logFile));
   await fs.promises.appendFile(logFile, line, 'utf8');
+}
+
+function collectorEventBase(options) {
+  return {
+    workflowRunId: options.workerId,
+    workerId: options.workerId,
+    workerType: 'collector',
+    strategy: 'feed',
+  };
+}
+
+function appendCollectorWorkflowEvent(db, options, eventType, event = {}) {
+  try {
+    return appendRegulatedWorkflowEvent(db, {
+      ...collectorEventBase(options),
+      eventType,
+      status: event.status || '',
+      payload: event.payload || {},
+      error: event.error instanceof Error ? event.error.message : String(event.error || ''),
+    });
+  } catch (error) {
+    log(`collector_workflow_event_append_failed type=${eventType} error=${error.message}`);
+    return null;
+  }
+}
+
+function appendCollectorListingEvent(db, options, listing, event = {}) {
+  try {
+    return appendRegulatedListingEvent(db, {
+      ...collectorEventBase(options),
+      eventType: 'listing_observed',
+      listingId: listing.listing_id,
+      sourceUrl: listing.href,
+      status: event.status || '',
+      payload: {
+        listingId: listing.listing_id,
+        href: listing.href,
+        source: listing.source || 'homepage',
+        sourceKeyword: listing.source_keyword || '',
+        outcome: event.outcome || event.status || '',
+        rank: listing.last_seen_rank,
+        cardTitle: listing.card_title || '',
+        cardText: listing.card_text || '',
+      },
+    });
+  } catch (error) {
+    log(`collector_listing_event_append_failed listing_id=${listing.listing_id || ''} error=${error.message}`);
+    return null;
+  }
 }
 
 async function readHomepageItems(page) {
@@ -415,6 +473,15 @@ async function runCycle(page, db, options) {
     credentialsProfile: options.credentialsProfile,
   });
   const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
+  appendCollectorWorkflowEvent(db, options, 'collector_cycle_started', {
+    status: 'running',
+    payload: {
+      startUrl: options.startUrl,
+      maxItems: targetLabel,
+      collectAll: options.collectAll,
+      dbCountsBefore: countsBefore,
+    },
+  });
   await appendLog(
     options.logFile,
     `cycle_start url=${options.startUrl} max_items=${targetLabel} collect_all=${options.collectAll} max_runtime_seconds=${options.maxRuntimeSeconds} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
@@ -430,6 +497,12 @@ async function runCycle(page, db, options) {
   const { items, stats: collectionStats } = collection;
   const seenAt = new Date().toISOString();
   const storedResults = items.map((item) => upsertHomepageListingWithStatus(db, item, { seenAt }));
+  for (const result of storedResults) {
+    appendCollectorListingEvent(db, options, result.row, {
+      status: result.outcome,
+      outcome: result.outcome,
+    });
+  }
   const outcomeCounts = summarizeUpsertOutcomes(storedResults);
   const counts = getHomepageListingCounts(db);
   const cycleSummary = {
@@ -462,6 +535,19 @@ async function runCycle(page, db, options) {
     options.logFile,
     `cycle_done collected=${items.length} stop_reason=${collectionStats.stopReason} elapsed_seconds=${collectionStats.elapsedSeconds} scroll_passes=${collectionStats.scrollPasses} stable_passes=${collectionStats.stablePassesReached}/${collectionStats.stablePassesTarget} runtime_limit_reached=${collectionStats.runtimeLimitReached} new=${outcomeCounts.new} existing_same=${outcomeCounts.existing_same} existing_updated=${outcomeCounts.existing_updated} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${counts.pending} db_processing=${counts.processing} db_done=${counts.done} db_error=${counts.error} snapshot=${snapshotPath}`,
   );
+  appendCollectorWorkflowEvent(db, options, 'collector_cycle_completed', {
+    status: 'completed',
+    payload: {
+      observedCount: items.length,
+      newCount: outcomeCounts.new,
+      existingSameCount: outcomeCounts.existing_same,
+      existingUpdatedCount: outcomeCounts.existing_updated,
+      snapshotPath,
+      stopReason: collectionStats.stopReason,
+      elapsedSeconds: collectionStats.elapsedSeconds,
+      dbCountsAfter: counts,
+    },
+  });
 
   return {
     page: activePage,
@@ -487,7 +573,7 @@ async function main() {
   await ensureDir(path.dirname(options.logFile));
   await appendLog(
     options.logFile,
-    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} auth_mode=${options.authMode} use_credentials=${options.useCredentials}`,
+    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -495,10 +581,33 @@ async function main() {
     ? options.userDataDir
     : path.join(process.cwd(), options.userDataDir);
 
+  appendCollectorWorkflowEvent(db, options, 'worker_started', {
+    status: 'running',
+    payload: {
+      mode: options.once ? 'once' : 'continuous',
+      refreshSeconds: options.refreshSeconds,
+      maxItems: options.collectAll ? 'all' : options.maxItems,
+      collectAll: options.collectAll,
+    },
+  });
+  appendCollectorWorkflowEvent(db, options, 'browser_context_launch_started', {
+    status: 'starting',
+    payload: {
+      userDataDir: resolvedUserDataDir,
+      headless: options.headless,
+    },
+  });
   const context = await chromium.launchPersistentContext(resolvedUserDataDir, buildChromiumLaunchOptions({
     headless: options.headless,
     viewport: { width: 1440, height: 1200 },
   }));
+  appendCollectorWorkflowEvent(db, options, 'browser_context_ready', {
+    status: 'running',
+    payload: {
+      userDataDir: resolvedUserDataDir,
+      headless: options.headless,
+    },
+  });
 
   try {
     let page = await ensureFacebookMarketplaceLogin(context, {
@@ -530,6 +639,15 @@ async function main() {
       credentialsProfile: options.credentialsProfile,
     });
     const initialCounts = getHomepageListingCounts(db);
+    appendCollectorWorkflowEvent(db, options, 'session_ready', {
+      status: initialSessionSummary.loggedIn && initialSessionSummary.signedInUserId ? 'authenticated' : 'unauthenticated',
+      payload: {
+        loggedIn: initialSessionSummary.loggedIn,
+        signedInUserId: initialSessionSummary.signedInUserId || '',
+        currentUrl: initialSessionSummary.currentUrl || '',
+        loadedEmail: initialSessionSummary.loadedEmail || '',
+      },
+    });
     await appendLog(
       options.logFile,
       `collector_session_ready loaded_email=${initialSessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${initialSessionSummary.signedInUserId || 'n/a'} logged_in=${initialSessionSummary.loggedIn} current_url=${initialSessionSummary.currentUrl || 'n/a'} db_pending=${initialCounts.pending} db_processing=${initialCounts.processing} db_done=${initialCounts.done} db_error=${initialCounts.error}`,
@@ -542,6 +660,13 @@ async function main() {
 
       if (options.once) {
         await appendLog(options.logFile, 'collector_exit mode=once');
+        appendCollectorWorkflowEvent(db, options, 'worker_completed', {
+          status: 'completed',
+          payload: {
+            reason: 'once',
+            observedCount: result.cycleSummary.totalCollected,
+          },
+        });
         break;
       }
 
@@ -551,15 +676,44 @@ async function main() {
         options.refreshJitterMax,
       );
       const waitMs = Math.max(0, refreshMs - (Date.now() - cycleStartedAt));
+      appendCollectorWorkflowEvent(db, options, 'worker_sleeping', {
+        status: 'sleeping',
+        payload: {
+          seconds: Math.ceil(waitMs / 1000),
+          reason: 'refresh_interval',
+          jitterMultiplier: Number(multiplier.toFixed(3)),
+        },
+      });
       await appendLog(
         options.logFile,
         `collector_sleep seconds=${Math.ceil(waitMs / 1000)} base_refresh_seconds=${options.refreshSeconds} jitter_multiplier=${multiplier.toFixed(3)}`,
       );
       await sleep(waitMs);
     } while (true);
+  } catch (error) {
+    appendCollectorWorkflowEvent(db, options, 'worker_failed', {
+      status: 'error',
+      error,
+      payload: {
+        reason: error instanceof Error ? error.message : String(error),
+      },
+    });
+    throw error;
   } finally {
+    appendCollectorWorkflowEvent(db, options, 'browser_context_closing', {
+      status: 'stopping',
+      payload: {
+        reason: 'worker_exit',
+      },
+    });
+    await context.close().catch(() => {});
+    appendCollectorWorkflowEvent(db, options, 'browser_context_closed', {
+      status: 'stopped',
+      payload: {
+        reason: 'worker_exit',
+      },
+    });
     closeMarketplaceHomepageDatabase(db);
-    await context.close();
   }
 }
 

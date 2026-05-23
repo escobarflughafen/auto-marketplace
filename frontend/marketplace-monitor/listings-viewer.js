@@ -46,7 +46,7 @@ const COLUMNS = [
   { title: 'Seen', field: 'last_seen_at', width: 132, formatter: dateFormatter, responsive: 3 },
   { title: 'Completed', field: 'detail_completed_at', width: 132, formatter: dateFormatter, responsive: 8 },
   {
-    title: 'Actions',
+    title: 'Links',
     field: 'actions',
     width: 172,
     responsive: 0,
@@ -163,7 +163,7 @@ function actionsFormatter(cell) {
   if (isBacklogRow(row)) {
     actions.push(`<button type="button" class="secondary row-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">Fetch</button>`);
   }
-  actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">POV</button>`);
+  actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">View</button>`);
   if (row.href) {
     actions.push(`<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>`);
   }
@@ -225,7 +225,7 @@ export function createListingsViewer() {
     suppressSelectionPreview: false,
     hideQueuedResolve: true,
     resolving: false,
-    resolveMessage: 'No listing resolve batch queued.',
+    resolveMessage: 'Resolve queue is ready.',
     resolveProcessId: '',
     resolvePollTimer: null,
     table: null,
@@ -253,6 +253,16 @@ export function createListingsViewer() {
     hideQueuedResolveCheckbox: document.getElementById('hideQueuedResolveCheckbox'),
     resolveSelectedButton: document.getElementById('resolveSelectedButton'),
     resolveCurrentButton: document.getElementById('resolveCurrentButton'),
+    manualListingUrl: document.getElementById('manualListingUrl'),
+    manualListingFetchNow: document.getElementById('manualListingFetchNow'),
+    manualListingAddButton: document.getElementById('manualListingAddButton'),
+    manualListingAddBacklogButton: document.getElementById('manualListingAddBacklogButton'),
+    manualListingDialog: document.getElementById('manualListingDialog'),
+    manualListingForm: document.getElementById('manualListingForm'),
+    manualListingDialogUrl: document.getElementById('manualListingDialogUrl'),
+    manualListingDialogFetchNow: document.getElementById('manualListingDialogFetchNow'),
+    manualListingDialogStatus: document.getElementById('manualListingDialogStatus'),
+    manualListingDialogAddButton: document.getElementById('manualListingDialogAddButton'),
     listingResolveMeta: document.getElementById('listingResolveMeta'),
     resolveQueuePanel: document.getElementById('resolveQueuePanel'),
     backlogMeta: document.getElementById('backlogMeta'),
@@ -334,7 +344,7 @@ export function createListingsViewer() {
       height: 'min(58vh, 620px)',
       layout: 'fitColumns',
       responsiveLayout: 'hide',
-      placeholder: 'No listings match the current query.',
+      placeholder: 'Listings matching the current query appear here.',
       pagination: true,
       paginationMode: 'remote',
       paginationSize: state.limit,
@@ -445,9 +455,9 @@ export function createListingsViewer() {
     els.snapshotMeta.textContent = `${row.listing_id} · ${row.detail_status} · ${row.source || 'unknown source'}${row.source_keyword ? ' · ' + row.source_keyword : ''}`;
     els.snapshotImageWrap.innerHTML = row.screenshotUrl
       ? `<a href="${escapeHtml(row.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="snapshot-image" src="${escapeHtml(row.screenshotUrl)}" alt="Worker screenshot for ${escapeHtml(row.listing_id)}"></a>`
-      : '<div class="empty-state">Pending changes: no worker screenshot captured yet. Showing available row data.</div>';
+      : '<div class="empty-state">Worker screenshot appears after detail capture. Current row data is shown below.</div>';
     const details = [
-      resolved ? null : ['Pending changes', 'Resolve has not completed yet. Showing available listing data.'],
+      resolved ? null : ['Detail capture', 'Available row data is shown until capture completes.'],
       ['Status', row.detail_status],
       ['Title', displayTitleForRow(row)],
       ['Card title', row.card_title],
@@ -499,13 +509,13 @@ export function createListingsViewer() {
           + `<td>${escapeHtml(item.workflow_run_id || '')}</td>`
           + '<td><div class="row-actions">'
           + (item.status === 'queued' || item.status === 'failed'
-            ? `<button type="button" class="secondary resolve-queue-remove-button" data-listing-id="${escapeHtml(item.listing_id)}">Remove</button>`
+            ? `<button type="button" class="secondary resolve-queue-remove-button" data-listing-id="${escapeHtml(item.listing_id)}">Clear</button>`
             : '')
           + (item.href ? `<a class="button-link compact" href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
           + '</div></td>'
         + '</tr>'
       )).join('')
-      : '<tr><td colspan="7" class="empty-state">No active resolve queue rows.</td></tr>';
+      : '<tr><td colspan="7" class="empty-state">Resolve queue rows appear here.</td></tr>';
 
     const eventRows = events.length
       ? events.map((event) => (
@@ -517,12 +527,12 @@ export function createListingsViewer() {
           + `<td>${escapeHtml(event.workflow_run_id || '')}</td>`
         + '</tr>'
       )).join('')
-      : '<tr><td colspan="5" class="empty-state">No resolve queue audit events yet.</td></tr>';
+      : '<tr><td colspan="5" class="empty-state">Resolve queue events appear here.</td></tr>';
 
     els.resolveQueuePanel.innerHTML = '<section class="card resolve-queue-card">'
       + '<div class="resolve-queue-header">'
       + '<div><div class="label">Resolve Queue</div>'
-      + `<div class="process-meta">${escapeHtml(counts.queued || 0)} queued · ${escapeHtml(counts.dispatched || 0)} dispatched · ${escapeHtml(counts.failed || 0)} failed · ${escapeHtml(counts.completed || 0)} completed</div></div>`
+      + `<div class="process-meta">${escapeHtml(counts.queued || 0)} queued · ${escapeHtml(counts.dispatched || 0)} dispatched · ${escapeHtml(counts.failed || 0)} review · ${escapeHtml(counts.completed || 0)} completed</div></div>`
       + '</div>'
       + '<div class="tablewrap resolve-queue-tablewrap"><table class="resolve-queue-table"><thead><tr><th>Status</th><th>ID</th><th>Title</th><th>Row</th><th>Queued</th><th>Run</th><th></th></tr></thead><tbody>'
       + itemRows
@@ -552,11 +562,11 @@ export function createListingsViewer() {
     els.resolveSelectedButton.disabled = state.resolving || count === 0;
     els.resolveCurrentButton.disabled = state.resolving || state.total === 0;
     if (queuedCount > 0 && count > 0 && !state.resolving) {
-      els.listingResolveMeta.textContent = `${queuedCount} queued for resolve. ${count} selected can be added.`;
+      els.listingResolveMeta.textContent = `${queuedCount} in queue. ${count} selected.`;
     } else if (queuedCount > 0 && !state.resolving) {
-      els.listingResolveMeta.textContent = `${queuedCount} queued for resolve${state.hideQueuedResolve ? ' and hidden from view' : ''}.`;
+      els.listingResolveMeta.textContent = `${queuedCount} in queue${state.hideQueuedResolve ? ' and hidden from view' : ''}.`;
     } else if (count > 0 && !state.resolving) {
-      els.listingResolveMeta.textContent = `${count} selected for backlog resolve.`;
+      els.listingResolveMeta.textContent = `${count} selected.`;
     } else {
       els.listingResolveMeta.textContent = state.resolveMessage;
     }
@@ -581,7 +591,7 @@ export function createListingsViewer() {
     const queuedIds = new Set(state.resolveQueueIds);
     const rows = state.backlogRows;
     if (!rows.length) {
-      els.backlogTableBody.innerHTML = '<tr><td colspan="13" class="empty-state">No backlog candidates match these controls.</td></tr>';
+      els.backlogTableBody.innerHTML = '<tr><td colspan="13" class="empty-state">Backlog candidates matching these controls appear here.</td></tr>';
       syncBacklogSelectionControls();
       return;
     }
@@ -604,7 +614,7 @@ export function createListingsViewer() {
         + `<td>${escapeHtml(formatDate(row.detail_completed_at))}</td>`
         + `<td class="cell-text">${escapeHtml(backlogTitle(row))}${queued ? ' · queued' : ''}</td>`
         + '<td><div class="row-actions">'
-        + `<button type="button" class="secondary backlog-queue-one-button" data-listing-id="${escapeHtml(listingId)}"${queued || !state.resolveQueueAvailable ? ' disabled' : ''}>Queue</button>`
+        + `<button type="button" class="secondary backlog-queue-one-button" data-listing-id="${escapeHtml(listingId)}"${queued || !state.resolveQueueAvailable ? ' disabled' : ''}>Add</button>`
         + (row.href ? `<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
         + '</div></td>'
         + '</tr>';
@@ -631,7 +641,7 @@ export function createListingsViewer() {
   }
 
   async function loadBacklogQueue() {
-    els.backlogMeta.textContent = 'Loading backlog queue...';
+    els.backlogMeta.textContent = 'Loading backlog...';
     const payload = await fetchJson(backlogUrl());
     state.backlogRows = payload.rows || [];
     const visibleIds = new Set(state.backlogRows.map((row) => row.listing_id).filter(Boolean));
@@ -652,8 +662,8 @@ export function createListingsViewer() {
     applyResolveQueuePayload(result);
     state.selectedBacklogQueueIds = state.selectedBacklogQueueIds.filter((id) => !ids.includes(id));
     renderResolveControls(result.addedCount > 0
-      ? `${label}: added ${result.addedCount} listing(s) to the audited resolve queue.`
-      : `${label}: selected rows are already in the resolve queue.`);
+      ? `${label}: ${result.addedCount} listing(s) added.`
+      : `${label}: already in queue.`);
     renderBacklogRows();
     if (state.hideQueuedResolve) {
       await loadRows();
@@ -671,7 +681,7 @@ export function createListingsViewer() {
 
   async function postResolveBatch(payload) {
     state.resolving = true;
-    renderResolveControls('Dispatching backlog resolver...');
+    renderResolveControls('Starting detail worker...');
     try {
       const result = await fetchJson('/api/listings/resolve', {
         method: 'POST',
@@ -679,16 +689,64 @@ export function createListingsViewer() {
         body: JSON.stringify({ ...payload, runtimeArgs: runtimeArgs() }),
       });
       const processId = result.process?.id || '';
-      renderResolveControls(`Queued ${result.listingCount} listing(s) for resolve${processId ? ' in ' + processId : ''}.`);
+      renderResolveControls(`${result.listingCount} listing(s) sent to detail worker${processId ? ' ' + processId : ''}.`);
       watchResolveProcess(processId);
       state.table?.deselectRow?.();
       return result;
     } catch (error) {
-      renderResolveControls(`Resolve dispatch failed: ${error.message}`);
+      renderResolveControls(`Detail worker start issue: ${error.message}`);
       throw error;
     } finally {
       state.resolving = false;
       renderResolveControls();
+    }
+  }
+
+  async function addManualListing(options = {}) {
+    const url = String(options.url || '').trim();
+    if (!url) {
+      renderResolveControls('Paste a Facebook Marketplace URL.');
+      return;
+    }
+    if (els.manualListingAddButton) els.manualListingAddButton.disabled = true;
+    if (els.manualListingDialogAddButton) els.manualListingDialogAddButton.disabled = true;
+    try {
+      const result = await fetchJson('/api/listings/manual', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          fetchNow: Boolean(options.fetchNow),
+          runtimeArgs: runtimeArgs(),
+        }),
+      });
+      const listingId = result.manualListing?.listing?.listing_id || '';
+      const processId = result.manualListing?.fetch?.process?.id || '';
+      renderResolveControls(processId
+        ? `Added ${listingId} and started fetch ${processId}.`
+        : `Added ${listingId || 'listing'} to backlog.`);
+      if (els.manualListingUrl && options.clearToolbar !== false) els.manualListingUrl.value = '';
+      if (els.manualListingFetchNow && options.clearToolbar !== false) els.manualListingFetchNow.checked = false;
+      if (els.manualListingDialogUrl) els.manualListingDialogUrl.value = '';
+      if (els.manualListingDialogFetchNow) els.manualListingDialogFetchNow.checked = false;
+      if (els.manualListingDialogStatus) {
+        els.manualListingDialogStatus.textContent = processId
+          ? `Fetch started: ${processId}.`
+          : 'Added to backlog.';
+      }
+      els.manualListingDialog?.close();
+      await loadResolveQueue();
+      await loadRows();
+      await loadBacklogQueue();
+      return result;
+    } catch (error) {
+      const message = error.message || 'Listing URL could not be added.';
+      renderResolveControls(`Manual add issue: ${message}`);
+      if (els.manualListingDialogStatus) els.manualListingDialogStatus.textContent = message;
+      throw error;
+    } finally {
+      if (els.manualListingAddButton) els.manualListingAddButton.disabled = false;
+      if (els.manualListingDialogAddButton) els.manualListingDialogAddButton.disabled = false;
     }
   }
 
@@ -705,7 +763,7 @@ export function createListingsViewer() {
     const lines = (proc?.logs || []).slice().reverse();
     const errorLine = lines.find((line) => /process_marketplace_homepage_backlog_error|error/i.test(line)
       && !/process_exit|npm error|^\[[^\]]+\]\s*>/.test(line));
-    const raw = stripLogPrefix(errorLine || lines[0] || 'Worker failed.');
+    const raw = stripLogPrefix(errorLine || lines[0] || 'Worker ended with a review status.');
     const text = raw
       .replace(/^process_marketplace_homepage_backlog_error\s+/, '')
       .replace(/\s+/g, ' ')
@@ -727,18 +785,18 @@ export function createListingsViewer() {
     if (!proc) return;
 
     if (proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping') {
-      renderResolveControls(`Resolve worker ${proc.id} is ${proc.status}.`);
+      renderResolveControls(`Detail worker ${proc.id}: ${proc.status}.`);
       return;
     }
 
     stopResolveWatcher();
     if (proc.status === 'failed' || proc.status === 'error' || proc.status === 'lost') {
-      renderResolveControls(`Resolve worker failed: ${summarizeProcessFailure(proc)}`);
+      renderResolveControls(`Detail worker review: ${summarizeProcessFailure(proc)}`);
       await loadResolveQueue();
       return;
     }
 
-    renderResolveControls(`Resolve worker ${proc.id} finished with status ${proc.status}.`);
+    renderResolveControls(`Detail worker ${proc.id}: ${proc.status}.`);
     await loadResolveQueue();
     await loadRows();
   }
@@ -750,7 +808,7 @@ export function createListingsViewer() {
     state.resolvePollTimer = setInterval(() => {
       pollResolveProcess().catch((error) => {
         stopResolveWatcher();
-        renderResolveControls(`Could not read resolve worker status: ${error.message}`);
+        renderResolveControls(`Detail worker status not available: ${error.message}`);
       });
     }, 2000);
   }
@@ -763,7 +821,7 @@ export function createListingsViewer() {
         listingId: row.listing_id,
       });
     } catch (error) {
-      alert(error.message || 'Failed to dispatch listing resolve');
+      alert(error.message || 'Listing detail worker could not be started.');
     }
   }
 
@@ -774,7 +832,7 @@ export function createListingsViewer() {
       .map((row) => row.listing_id)
       .filter(Boolean);
     if (listingIds.length === 0) {
-      renderResolveControls('Selected rows do not contain backlog items.');
+      renderResolveControls('Selected rows are outside the backlog.');
       return;
     }
     try {
@@ -783,13 +841,13 @@ export function createListingsViewer() {
         listingIds,
       });
     } catch (error) {
-      alert(error.message || 'Failed to dispatch selected resolve');
+      alert(error.message || 'Selected detail worker could not be started.');
     }
   }
 
   async function queueSelectedForResolve() {
     if (!state.resolveQueueAvailable) {
-      renderResolveControls('Resolve queue controls are unavailable on this server. Direct resolve still works.');
+      renderResolveControls('Resolve queue is not enabled on this server. Direct processing is available.');
       return;
     }
     const selectedRows = state.table?.getSelectedData?.() || [];
@@ -798,7 +856,7 @@ export function createListingsViewer() {
       .map((row) => row.listing_id)
       .filter(Boolean);
     if (listingIds.length === 0) {
-      renderResolveControls('Selected rows do not contain backlog items.');
+      renderResolveControls('Selected rows are outside the backlog.');
       return;
     }
     const result = await fetchJson('/api/resolve-queue', {
@@ -808,8 +866,8 @@ export function createListingsViewer() {
     });
     applyResolveQueuePayload(result);
     renderResolveControls(result.addedCount > 0
-      ? `Added ${result.addedCount} listing(s) to the resolve queue.`
-      : 'Selected backlog rows are already in the resolve queue.');
+      ? `${result.addedCount} listing(s) added to queue.`
+      : 'Selected backlog rows are already queued.');
     if (state.hideQueuedResolve) {
       state.table?.deselectRow?.();
       await loadRows();
@@ -818,7 +876,7 @@ export function createListingsViewer() {
 
   async function clearResolveQueue(listingIds = []) {
     if (!state.resolveQueueAvailable) {
-      renderResolveControls('Resolve queue controls are unavailable on this server. Direct resolve still works.');
+      renderResolveControls('Resolve queue is not enabled on this server. Direct processing is available.');
       return;
     }
     const result = await fetchJson('/api/resolve-queue', {
@@ -828,23 +886,23 @@ export function createListingsViewer() {
     });
     applyResolveQueuePayload(result);
     renderResolveControls(result.clearedCount > 0
-      ? `Cleared ${result.clearedCount} resolve queue row(s).`
-      : 'Resolve queue is already clear.');
+      ? `${result.clearedCount} queue row(s) cleared.`
+      : 'Resolve queue is clear.');
     await loadRows();
   }
 
   async function resolveQueued() {
     if (!state.resolveQueueAvailable) {
-      renderResolveControls('Resolve queue controls are unavailable on this server. Direct resolve still works.');
+      renderResolveControls('Resolve queue is not enabled on this server. Direct processing is available.');
       return;
     }
     const queuedCount = state.resolveQueueItems.filter((item) => item.status === 'queued').length;
     if (queuedCount === 0) {
-      renderResolveControls('Resolve queue is empty.');
+      renderResolveControls('Resolve queue is ready.');
       return;
     }
     state.resolving = true;
-    renderResolveControls('Dispatching resolve queue...');
+    renderResolveControls('Starting queued detail worker...');
     try {
       const result = await fetchJson('/api/resolve-queue/run', {
         method: 'POST',
@@ -853,12 +911,12 @@ export function createListingsViewer() {
       });
       applyResolveQueuePayload(result.queue || {});
       const processId = result.process?.id || '';
-      renderResolveControls(`Dispatched ${result.listingCount} queued listing(s)${processId ? ' in ' + processId : ''}.`);
+      renderResolveControls(`${result.listingCount} queued listing(s) sent to detail worker${processId ? ' ' + processId : ''}.`);
       watchResolveProcess(processId);
       await loadRows();
     } catch (error) {
-      renderResolveControls(`Resolve queue dispatch failed: ${error.message}`);
-      alert(error.message || 'Failed to dispatch queued resolve');
+      renderResolveControls(`Queued detail worker start issue: ${error.message}`);
+      alert(error.message || 'Queued detail worker could not be started.');
     } finally {
       state.resolving = false;
       renderResolveControls();
@@ -868,7 +926,7 @@ export function createListingsViewer() {
   async function resolveCurrentView() {
     if (state.total === 0) return;
     const label = state.q ? `current query "${state.q}"` : 'all visible query results';
-    if (!confirm(`Resolve all backlog rows matching ${label}?`)) return;
+    if (!confirm(`Process backlog rows matching ${label}?`)) return;
     try {
       await postResolveBatch({
         mode: 'query',
@@ -877,7 +935,7 @@ export function createListingsViewer() {
         ...currentSortPayload(),
       });
     } catch (error) {
-      alert(error.message || 'Failed to dispatch current view resolve');
+      alert(error.message || 'Current view detail worker could not be started.');
     }
   }
 
@@ -941,7 +999,7 @@ export function createListingsViewer() {
     } catch (error) {
       state.resolveQueueAvailable = false;
       payload = {};
-      state.resolveMessage = 'Resolve queue controls are unavailable on this server. Direct resolve still works.';
+      state.resolveMessage = 'Resolve queue is not enabled on this server. Direct processing is available.';
     }
     applyResolveQueuePayload(payload);
     renderResolveControls();
@@ -1009,34 +1067,66 @@ export function createListingsViewer() {
     document.getElementById('refreshListingsButton').addEventListener('click', loadRows);
     els.queueSelectedButton.addEventListener('click', () => {
       queueSelectedForResolve().catch((error) => {
-        renderResolveControls(`Queue update failed: ${error.message}`);
-        alert(error.message || 'Failed to queue selected rows');
+        renderResolveControls(`Queue update issue: ${error.message}`);
+        alert(error.message || 'Selected rows could not be added to queue.');
       });
     });
     els.resolveQueuedButton.addEventListener('click', resolveQueued);
     els.clearResolveQueueButton.addEventListener('click', () => {
       clearResolveQueue().catch((error) => {
-        renderResolveControls(`Queue clear failed: ${error.message}`);
-        alert(error.message || 'Failed to clear resolve queue');
+        renderResolveControls(`Queue clear issue: ${error.message}`);
+        alert(error.message || 'Resolve queue could not be cleared.');
       });
     });
     els.resolveQueuePanel.addEventListener('click', (event) => {
       const button = event.target.closest('.resolve-queue-remove-button');
       if (!button) return;
       clearResolveQueue([button.dataset.listingId]).catch((error) => {
-        renderResolveControls(`Queue remove failed: ${error.message}`);
-        alert(error.message || 'Failed to remove queued listing');
+        renderResolveControls(`Queue row update issue: ${error.message}`);
+        alert(error.message || 'Queued listing could not be cleared.');
       });
     });
     els.hideQueuedResolveCheckbox.addEventListener('change', async () => {
       state.hideQueuedResolve = els.hideQueuedResolveCheckbox.checked;
       await loadRows();
     });
+    els.manualListingAddButton?.addEventListener('click', () => {
+      addManualListing({
+        url: els.manualListingUrl.value,
+        fetchNow: els.manualListingFetchNow.checked,
+      }).catch((error) => {
+        alert(error.message || 'Listing URL could not be added.');
+      });
+    });
+    els.manualListingUrl?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      addManualListing({
+        url: els.manualListingUrl.value,
+        fetchNow: els.manualListingFetchNow.checked,
+      }).catch((error) => {
+        alert(error.message || 'Listing URL could not be added.');
+      });
+    });
     els.resolveSelectedButton.addEventListener('click', resolveSelected);
     els.resolveCurrentButton.addEventListener('click', resolveCurrentView);
+    els.manualListingAddBacklogButton?.addEventListener('click', () => {
+      if (els.manualListingDialogUrl) els.manualListingDialogUrl.value = els.manualListingUrl?.value || '';
+      if (els.manualListingDialogFetchNow) els.manualListingDialogFetchNow.checked = Boolean(els.manualListingFetchNow?.checked);
+      if (els.manualListingDialogStatus) els.manualListingDialogStatus.textContent = '';
+      els.manualListingDialog?.showModal();
+    });
+    document.getElementById('manualListingCloseButton')?.addEventListener('click', () => els.manualListingDialog?.close());
+    els.manualListingForm?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      addManualListing({
+        url: els.manualListingDialogUrl.value,
+        fetchNow: els.manualListingDialogFetchNow.checked,
+      }).catch(() => {});
+    });
     els.refreshBacklogButton.addEventListener('click', () => {
       loadBacklogQueue().catch((error) => {
-        els.backlogMeta.textContent = `Failed to load backlog queue: ${error.message}`;
+        els.backlogMeta.textContent = `Backlog could not be loaded: ${error.message}`;
       });
     });
     for (const control of [
@@ -1050,7 +1140,7 @@ export function createListingsViewer() {
     ]) {
       control.addEventListener('change', () => {
         loadBacklogQueue().catch((error) => {
-          els.backlogMeta.textContent = `Failed to load backlog queue: ${error.message}`;
+          els.backlogMeta.textContent = `Backlog could not be loaded: ${error.message}`;
         });
       });
     }
@@ -1059,7 +1149,7 @@ export function createListingsViewer() {
         if (event.key !== 'Enter') return;
         event.preventDefault();
         loadBacklogQueue().catch((error) => {
-          els.backlogMeta.textContent = `Failed to load backlog queue: ${error.message}`;
+          els.backlogMeta.textContent = `Backlog could not be loaded: ${error.message}`;
         });
       });
     }
@@ -1086,14 +1176,14 @@ export function createListingsViewer() {
       const button = event.target.closest('.backlog-queue-one-button');
       if (!button) return;
       queueBacklogIds([button.dataset.listingId], 'Backlog row').catch((error) => {
-        renderResolveControls(`Backlog queue action failed: ${error.message}`);
-        alert(error.message || 'Failed to queue backlog row');
+        renderResolveControls(`Backlog queue issue: ${error.message}`);
+        alert(error.message || 'Backlog row could not be added.');
       });
     });
     els.queueBacklogSelectedButton.addEventListener('click', () => {
       queueBacklogIds(state.selectedBacklogQueueIds, 'Backlog selection').catch((error) => {
-        renderResolveControls(`Backlog queue action failed: ${error.message}`);
-        alert(error.message || 'Failed to queue selected backlog rows');
+        renderResolveControls(`Backlog queue issue: ${error.message}`);
+        alert(error.message || 'Selected backlog rows could not be added.');
       });
     });
     els.queueBacklogVisibleButton.addEventListener('click', () => {
@@ -1102,8 +1192,8 @@ export function createListingsViewer() {
         .map((row) => row.listing_id)
         .filter((listingId) => listingId && !queuedIds.has(listingId));
       queueBacklogIds(visibleIds, 'Backlog visible rows').catch((error) => {
-        renderResolveControls(`Backlog queue action failed: ${error.message}`);
-        alert(error.message || 'Failed to queue visible backlog rows');
+        renderResolveControls(`Backlog queue issue: ${error.message}`);
+        alert(error.message || 'Visible backlog rows could not be added.');
       });
     });
     document.getElementById('closeSnapshotButton').addEventListener('click', () => {

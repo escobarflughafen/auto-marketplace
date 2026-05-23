@@ -370,13 +370,43 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_history_events_once
+    DROP INDEX IF EXISTS idx_purchase_history_events_once;
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_events_once
     ON purchase_history_events (document_id, record_id, event_type);
   `);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_purchase_history_events_document_time
     ON purchase_history_events (document_id, event_at DESC, created_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_listing_links (
+      document_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      listing_id TEXT NOT NULL,
+      relationship_type TEXT NOT NULL DEFAULT 'same_model',
+      href TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      linked_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (document_id, record_id, listing_id, relationship_type),
+      FOREIGN KEY (document_id, record_id) REFERENCES purchase_history_rows(document_id, record_id) ON DELETE CASCADE,
+      FOREIGN KEY (listing_id) REFERENCES homepage_listings(listing_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_listing_links_record
+    ON purchase_history_listing_links (document_id, record_id, linked_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_listing_links_listing
+    ON purchase_history_listing_links (listing_id, linked_at DESC);
   `);
 }
 
@@ -1134,6 +1164,42 @@ function normalizePurchaseHistoryRow(row) {
   };
 }
 
+function normalizePurchaseHistoryListingRelationship(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (normalized === 'same_listing' || normalized === 'transaction' || normalized === 'exact') {
+    return 'same_listing';
+  }
+  return 'same_model';
+}
+
+function normalizePurchaseHistoryListingLinkRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    document_id: row.document_id,
+    record_id: row.record_id,
+    listing_id: row.listing_id,
+    relationship_type: normalizePurchaseHistoryListingRelationship(row.relationship_type),
+    href: canonicalizeListingUrl(row.href || row.listing_href || ''),
+    note: row.note || '',
+    linked_at: row.linked_at,
+    updated_at: row.updated_at,
+    listing: {
+      href: canonicalizeListingUrl(row.listing_href || row.href || ''),
+      source: row.source || '',
+      source_keyword: row.source_keyword || '',
+      card_title: row.card_title || '',
+      detail_title: row.detail_title || '',
+      detail_price: row.detail_price || '',
+      detail_status: row.detail_status || '',
+      detail_completed_at: row.detail_completed_at || '',
+      screenshot_path: row.screenshot_path || '',
+      snapshot_path: row.snapshot_path || '',
+    },
+  };
+}
+
 function createPurchaseHistoryDocument(db, document) {
   const now = document.createdAt || document.created_at || new Date().toISOString();
   const name = String(document.name || 'Purchase History').trim() || 'Purchase History';
@@ -1192,11 +1258,21 @@ function deletePurchaseHistoryDocument(db, documentId) {
     throw new Error('deletePurchaseHistoryDocument requires documentId');
   }
   return runTransaction(db, () => {
+    db.prepare('DELETE FROM purchase_history_listing_links WHERE document_id = ?').run(id);
     db.prepare('DELETE FROM purchase_history_events WHERE document_id = ?').run(id);
     db.prepare('DELETE FROM purchase_history_rows WHERE document_id = ?').run(id);
     const result = db.prepare('DELETE FROM purchase_history_documents WHERE document_id = ?').run(id);
     return { deleted: result.changes || 0 };
   });
+}
+
+function getPurchaseHistoryRow(db, documentId, recordId) {
+  return normalizePurchaseHistoryRow(db.prepare(`
+    SELECT *
+    FROM purchase_history_rows
+    WHERE document_id = ?
+      AND record_id = ?
+  `).get(String(documentId || '').trim(), String(recordId || '').trim()));
 }
 
 function purchaseHistoryRowProjection(row) {
@@ -1431,6 +1507,114 @@ function listPurchaseHistoryRows(db, documentId, options = {}) {
     ORDER BY COALESCE(purchase_at, '') DESC, updated_at DESC, record_id DESC
     LIMIT ?
   `).all(String(documentId || '').trim(), limit).map(normalizePurchaseHistoryRow);
+}
+
+function listPurchaseHistoryListingLinks(db, options = {}) {
+  const documentId = String(options.documentId || options.document_id || '').trim();
+  const recordId = String(options.recordId || options.record_id || '').trim();
+  const listingId = String(options.listingId || options.listing_id || '').trim();
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 10000;
+  const filters = [];
+  const params = [];
+  if (documentId) {
+    filters.push('links.document_id = ?');
+    params.push(documentId);
+  }
+  if (recordId) {
+    filters.push('links.record_id = ?');
+    params.push(recordId);
+  }
+  if (listingId) {
+    filters.push('links.listing_id = ?');
+    params.push(listingId);
+  }
+  const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  return db.prepare(`
+    SELECT
+      links.*,
+      listings.href AS listing_href,
+      listings.source,
+      listings.source_keyword,
+      listings.card_title,
+      listings.detail_title,
+      listings.detail_price,
+      listings.detail_status,
+      listings.detail_completed_at,
+      listings.screenshot_path,
+      listings.snapshot_path
+    FROM purchase_history_listing_links links
+    LEFT JOIN homepage_listings listings
+      ON listings.listing_id = links.listing_id
+    ${whereSql}
+    ORDER BY links.linked_at DESC, links.listing_id ASC
+    LIMIT ?
+  `).all(...params, limit).map(normalizePurchaseHistoryListingLinkRow);
+}
+
+function upsertPurchaseHistoryListingLink(db, link, options = {}) {
+  const documentId = String(link.documentId || link.document_id || '').trim();
+  const recordId = String(link.recordId || link.record_id || '').trim();
+  const listingId = String(link.listingId || link.listing_id || '').trim();
+  const href = canonicalizeListingUrl(link.href || '');
+  const relationshipType = normalizePurchaseHistoryListingRelationship(link.relationshipType || link.relationship_type);
+  if (!documentId || !recordId || !listingId) {
+    throw new Error('purchase history listing link requires documentId, recordId, and listingId');
+  }
+  const row = getPurchaseHistoryRow(db, documentId, recordId);
+  if (!row) {
+    throw new Error(`Unknown purchase history record: ${recordId}`);
+  }
+  const listing = getHomepageListing(db, listingId);
+  if (!listing) {
+    throw new Error(`Unknown listing: ${listingId}`);
+  }
+  const now = options.linkedAt || options.linked_at || new Date().toISOString();
+  db.prepare(`
+    INSERT INTO purchase_history_listing_links (
+      document_id,
+      record_id,
+      listing_id,
+      relationship_type,
+      href,
+      note,
+      linked_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(document_id, record_id, listing_id, relationship_type) DO UPDATE SET
+      href = excluded.href,
+      note = excluded.note,
+      updated_at = excluded.updated_at
+  `).run(
+    documentId,
+    recordId,
+    listingId,
+    relationshipType,
+    href || listing.href || '',
+    String(link.note || '').trim(),
+    now,
+    now,
+  );
+
+  appendPurchaseHistoryEvent(db, {
+    documentId,
+    recordId,
+    eventType: 'listing_linked',
+    eventAt: now,
+    createdAt: now,
+    eventId: `${documentId}:${recordId}:listing_linked:${relationshipType}:${listingId}:${now}`,
+    data: {
+      listing_id: listingId,
+      href: href || listing.href || '',
+      relationship_type: relationshipType,
+      title: row.title,
+    },
+  });
+
+  return listPurchaseHistoryListingLinks(db, {
+    documentId,
+    recordId,
+    listingId,
+  }).find((item) => item.relationship_type === relationshipType) || null;
 }
 
 function normalizePurchaseHistoryEventRow(row) {
@@ -2645,8 +2829,11 @@ module.exports = {
   listPurchaseHistoryDocuments,
   getPurchaseHistoryDocument,
   deletePurchaseHistoryDocument,
+  getPurchaseHistoryRow,
   upsertPurchaseHistoryRows,
   listPurchaseHistoryRows,
+  upsertPurchaseHistoryListingLink,
+  listPurchaseHistoryListingLinks,
   mergePurchaseHistoryDocuments,
   appendPurchaseHistoryEvent,
   listPurchaseHistoryEvents,

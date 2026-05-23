@@ -30,6 +30,12 @@ test('parseArgs supports unauthenticated homepage collection', () => {
   assert.equal(options.useCredentials, false);
 });
 
+test('parseArgs reads homepage collector worker id', () => {
+  const options = parseArgs(['--worker-id', 'collector-run-1', '--once']);
+
+  assert.equal(options.workerId, 'collector-run-1');
+});
+
 test('parseArgs builds homepage route URLs for major city locations', () => {
   assert.equal(
     parseArgs(['--location', 'Montreal, Quebec']).startUrl,
