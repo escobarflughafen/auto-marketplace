@@ -14,6 +14,15 @@ const store = {
   workerDetailEvents: [],
   workerDetailStats: null,
   credentials: null,
+  purchaseHistoryDocuments: [],
+  selectedPurchaseHistoryDocumentId: localStorage.getItem('marketplace-monitor-history-document') || '',
+  purchaseHistory: [],
+  purchaseHistoryFields: [],
+  purchaseHistoryCanWrite: false,
+  purchaseHistoryCsvPath: '',
+  historyStatsHidden: localStorage.getItem('marketplace-monitor-history-stats-hidden') === 'true',
+  editingPurchaseHistoryRecordId: '',
+  eventRegistry: [],
   workflowSignature: '',
   processSignature: '',
   workerDetailSignature: '',
@@ -27,6 +36,23 @@ const els = {
   workflowForm: document.getElementById('workflowForm'),
   workflowArgsPreview: document.getElementById('workflowArgsPreview'),
   settingsContent: document.getElementById('settingsContent'),
+  historyForm: document.getElementById('historyForm'),
+  historyTableBody: document.getElementById('historyTableBody'),
+  historyMeta: document.getElementById('historyMeta'),
+  historyStatus: document.getElementById('historyStatus'),
+  historyInventoryStatsRow: document.getElementById('historyInventoryStatsRow'),
+  historyToggleStatsButton: document.getElementById('historyToggleStatsButton'),
+  historyDocumentSelect: document.getElementById('historyDocumentSelect'),
+  historyMergeSourceSelect: document.getElementById('historyMergeSourceSelect'),
+  historyItemDialog: document.getElementById('historyItemDialog'),
+  historyImportDialog: document.getElementById('historyImportDialog'),
+  historyManageDialog: document.getElementById('historyManageDialog'),
+  historyEditDialog: document.getElementById('historyEditDialog'),
+  historyEditForm: document.getElementById('historyEditForm'),
+  historyEditStatus: document.getElementById('historyEditStatus'),
+  eventRegistryTableBody: document.getElementById('eventRegistryTableBody'),
+  eventRegistryMeta: document.getElementById('eventRegistryMeta'),
+  eventRegistrySourceSelect: document.getElementById('eventRegistrySourceSelect'),
 };
 
 const CAPTURE_SETTINGS_STORAGE_KEY = 'marketplace-monitor-capture-settings';
@@ -133,6 +159,455 @@ async function fetchJson(url, options) {
   return payload;
 }
 
+function parseMoney(value) {
+  const number = Number.parseFloat(String(value ?? '').replace(/[$,\s]/g, ''));
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatMoney(value) {
+  const number = parseMoney(value);
+  return number === null ? '' : `$${Math.round(number).toLocaleString()}`;
+}
+
+function formatPercent(value) {
+  const number = Number.parseFloat(String(value || ''));
+  return Number.isFinite(number) ? `${number.toFixed(1)}%` : '';
+}
+
+function compactDate(value) {
+  if (!value) return '';
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
+}
+
+function csvEscape(value) {
+  const text = String(value ?? '');
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function renderHistoryCsv(rows = store.purchaseHistory, fields = store.purchaseHistoryFields) {
+  return [
+    fields.join(','),
+    ...rows.map((row) => fields.map((field) => csvEscape(row[field] || '')).join(',')),
+  ].join('\n');
+}
+
+function titleFromHistoryRow(row) {
+  return row.title || [row.brand, row.model, row.variant].filter(Boolean).join(' ') || row.record_id || '';
+}
+
+function historySoldOutcomes() {
+  return new Set(['sold_profitable', 'sold_break_even', 'loss']);
+}
+
+function inventoryStatusFromHistoryRow(row = {}) {
+  const status = String(row.inventory_status || '').trim().toLowerCase();
+  if (['hold', 'listed', 'sold'].includes(status)) {
+    return status;
+  }
+  if (row.decision === 'sold' || row.sold_at || row.sold_price_cad || historySoldOutcomes().has(row.outcome)) {
+    return 'sold';
+  }
+  if (row.listed_at || row.list_price_cad) {
+    return 'listed';
+  }
+  return 'hold';
+}
+
+function resultLabelFromHistoryRow(row = {}) {
+  const outcome = row.outcome || 'pending';
+  return outcome === 'sold_profitable' ? 'profitable'
+    : outcome === 'sold_break_even' ? 'break even'
+      : outcome === 'loss' ? 'loss'
+        : outcome;
+}
+
+function sumMoney(rows, field) {
+  return rows.reduce((sum, row) => {
+    const value = parseMoney(row[field]);
+    return value === null ? sum : sum + value;
+  }, 0);
+}
+
+function averageRoi(rows) {
+  const values = rows
+    .map((row) => Number.parseFloat(String(row.roi_percent || '')))
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) {
+    return '';
+  }
+  return `${(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)}%`;
+}
+
+function renderHistoryStats() {
+  if (!els.historyInventoryStatsRow || !els.historyToggleStatsButton) {
+    return;
+  }
+  els.historyInventoryStatsRow.hidden = store.historyStatsHidden;
+  els.historyToggleStatsButton.textContent = store.historyStatsHidden ? 'Show stats' : 'Hide stats';
+  if (store.historyStatsHidden) {
+    els.historyInventoryStatsRow.innerHTML = '';
+    return;
+  }
+
+  const rows = store.purchaseHistory || [];
+  const byStatus = { hold: [], listed: [], sold: [] };
+  for (const row of rows) {
+    byStatus[inventoryStatusFromHistoryRow(row)]?.push(row);
+  }
+  const activeRows = [...byStatus.hold, ...byStatus.listed];
+  const soldRows = byStatus.sold;
+  const activeCost = sumMoney(activeRows, 'purchase_price_cad');
+  const listedValue = sumMoney(byStatus.listed, 'list_price_cad');
+  const soldRevenue = sumMoney(soldRows, 'sold_price_cad');
+  const realizedProfit = sumMoney(soldRows, 'realized_profit_cad');
+  const cards = [
+    ['Items', String(rows.length), `${byStatus.hold.length} hold / ${byStatus.listed.length} listed / ${byStatus.sold.length} sold`],
+    ['Active cost', formatMoney(activeCost), 'hold + listed cost basis'],
+    ['Listed value', formatMoney(listedValue), 'current asking price'],
+    ['Sold revenue', formatMoney(soldRevenue), 'completed sales'],
+    ['Realized profit', formatMoney(realizedProfit), `avg ROI ${averageRoi(soldRows) || '-'}`],
+  ];
+  els.historyInventoryStatsRow.innerHTML = cards.map(([label, value, meta]) => (
+    '<div class="inventory-stat">'
+      + `<div class="inventory-stat-label">${html(label)}</div>`
+      + `<div class="inventory-stat-value">${html(value || '-')}</div>`
+      + `<div class="process-meta">${html(meta || '')}</div>`
+    + '</div>'
+  )).join('');
+}
+
+function selectedHistoryDocumentId() {
+  return store.selectedPurchaseHistoryDocumentId
+    || els.historyDocumentSelect?.value
+    || store.purchaseHistoryDocuments[0]?.document_id
+    || '';
+}
+
+function renderPurchaseHistoryDocuments() {
+  const options = store.purchaseHistoryDocuments.map((document) => (
+    `<option value="${html(document.document_id)}"${document.document_id === selectedHistoryDocumentId() ? ' selected' : ''}>${html(document.name)} (${html(document.row_count || 0)})</option>`
+  )).join('');
+  if (els.historyDocumentSelect) {
+    els.historyDocumentSelect.innerHTML = options;
+    if (selectedHistoryDocumentId()) {
+      els.historyDocumentSelect.value = selectedHistoryDocumentId();
+    }
+  }
+  if (els.historyMergeSourceSelect) {
+    const current = selectedHistoryDocumentId();
+    els.historyMergeSourceSelect.innerHTML = store.purchaseHistoryDocuments
+      .filter((document) => document.document_id !== current)
+      .map((document) => (
+        `<option value="${html(document.document_id)}">${html(document.name)} (${html(document.row_count || 0)})</option>`
+      )).join('');
+  }
+}
+
+function renderPurchaseHistory() {
+  if (!els.historyTableBody || !els.historyMeta) {
+    return;
+  }
+  renderPurchaseHistoryDocuments();
+  const rows = [...store.purchaseHistory].reverse();
+  const selectedDocument = store.purchaseHistoryDocuments.find((document) => document.document_id === selectedHistoryDocumentId());
+  els.historyMeta.textContent = `${store.purchaseHistory.length} rows${selectedDocument ? ` in ${selectedDocument.name}` : ''}`;
+  renderHistoryStats();
+  if (!rows.length) {
+    els.historyTableBody.innerHTML = '<tr><td colspan="10" class="empty-state">History appears here.</td></tr>';
+    return;
+  }
+  els.historyTableBody.innerHTML = rows.map((row) => {
+    const profit = row.realized_profit_cad || '';
+    const status = inventoryStatusFromHistoryRow(row);
+    const dates = [compactDate(row.purchase_at), compactDate(row.sold_at)].filter(Boolean).join(' - ');
+    return '<tr>'
+      + `<td><div class="history-item-title">${html(titleFromHistoryRow(row))}</div><div class="process-meta">${html([row.brand, row.model, row.mount].filter(Boolean).join(' / '))}</div></td>`
+      + `<td>${html(row.subcategory || '')}</td>`
+      + `<td>${html(formatMoney(row.purchase_price_cad))}</td>`
+      + `<td>${html(formatMoney(row.sold_price_cad || row.list_price_cad))}</td>`
+      + `<td><span class="status ${html(status)}">${html(status)}</span></td>`
+      + `<td>${html(formatMoney(profit))}</td>`
+      + `<td>${html(formatPercent(row.roi_percent))}</td>`
+      + `<td><span class="status ${html(row.outcome || status)}">${html(resultLabelFromHistoryRow(row))}</span></td>`
+      + `<td>${html(dates)}</td>`
+      + `<td><button type="button" class="secondary history-edit-button" data-record-id="${html(row.record_id)}">Edit</button></td>`
+      + '</tr>';
+  }).join('');
+}
+
+function buildHistoryFormRow(form = els.historyForm, existingRow = {}) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const purchasePrice = parseMoney(data.purchase_price_cad);
+  const price = parseMoney(data.price_cad);
+  const inventoryStatus = data.inventory_status || inventoryStatusFromHistoryRow(existingRow);
+  const title = String(data.title || '').trim();
+  const brand = String(data.brand || '').trim().toLowerCase();
+  const model = String(data.model || '').trim().toLowerCase();
+  const mount = String(data.mount || '').trim().toLowerCase();
+  const soldPrice = inventoryStatus === 'sold' ? price : null;
+  const listPrice = inventoryStatus === 'listed' ? price
+    : inventoryStatus === 'sold' ? (parseMoney(existingRow.list_price_cad) ?? price)
+      : null;
+  const row = {
+    ...existingRow,
+    record_id: data.record_id || existingRow.record_id || '',
+    record_source: 'manual',
+    source_platform: 'other',
+    canonical_key: [brand, model, mount].filter(Boolean).join('-').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+    transaction_type: 'buy',
+    decision: inventoryStatus === 'sold' ? 'sold' : 'bought',
+    outcome: 'pending',
+    inventory_status: inventoryStatus,
+    decision_at: data.purchase_at || '',
+    purchase_at: data.purchase_at || '',
+    listed_at: data.listed_at || '',
+    sold_at: data.sold_at || '',
+    category: 'camera_gear',
+    subcategory: data.subcategory || 'camera_body',
+    brand,
+    model,
+    mount,
+    title,
+    condition_grade: data.condition_grade || 'unknown',
+    seller_type: 'unknown',
+    list_price_cad: listPrice !== null ? String(Math.round(listPrice)) : '',
+    purchase_price_cad: purchasePrice !== null ? String(Math.round(purchasePrice)) : '',
+    sold_price_cad: soldPrice !== null ? String(Math.round(soldPrice)) : '',
+    net_cost_cad: purchasePrice !== null ? String(Math.round(purchasePrice)) : '',
+    realized_profit_cad: '',
+    roi_percent: '',
+    expected_sell_price_cad: price !== null ? String(Math.round(price)) : '',
+    expected_net_margin_cad: '',
+    confidence_score: '0.75',
+    price_confidence_score: inventoryStatus === 'sold' ? '0.9' : '0.7',
+    identity_confidence_score: '0.85',
+    condition_risk_score: data.condition_grade === 'poor' || data.condition_grade === 'for_parts' ? '0.75' : '0.2',
+    seller_risk_score: '0.1',
+    watchlist_match: 'true',
+    notes: String(data.notes || '').trim(),
+  };
+  return row;
+}
+
+async function loadPurchaseHistory() {
+  if (!hasApiToken()) {
+    if (els.historyMeta) els.historyMeta.textContent = 'Token needed';
+    return;
+  }
+  const documentId = selectedHistoryDocumentId();
+  const payload = await fetchJson(`/api/purchase-history${documentId ? `?documentId=${encodeURIComponent(documentId)}` : ''}`);
+  store.purchaseHistoryDocuments = payload.documents || [];
+  store.selectedPurchaseHistoryDocumentId = payload.document?.document_id || store.purchaseHistoryDocuments[0]?.document_id || '';
+  if (store.selectedPurchaseHistoryDocumentId) {
+    localStorage.setItem('marketplace-monitor-history-document', store.selectedPurchaseHistoryDocumentId);
+  }
+  store.purchaseHistory = payload.rows || [];
+  store.purchaseHistoryFields = payload.fields || [];
+  store.purchaseHistoryCanWrite = Boolean(payload.auth?.capabilities?.canWrite);
+  store.purchaseHistoryCsvPath = payload.csvPath || '';
+  renderPurchaseHistory();
+  const saveButton = document.getElementById('historySaveButton');
+  if (saveButton) {
+    saveButton.disabled = !store.purchaseHistoryCanWrite;
+  }
+}
+
+async function savePurchaseHistoryRow(event) {
+  event.preventDefault();
+  const saveButton = document.getElementById('historySaveButton');
+  if (saveButton) saveButton.disabled = true;
+  try {
+    const payload = await fetchJson('/api/purchase-history', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ documentId: selectedHistoryDocumentId(), row: buildHistoryFormRow() }),
+    });
+    store.purchaseHistoryDocuments = payload.documents || store.purchaseHistoryDocuments;
+    store.selectedPurchaseHistoryDocumentId = payload.document?.document_id || store.selectedPurchaseHistoryDocumentId;
+    store.purchaseHistory = payload.rows || [];
+    store.purchaseHistoryFields = payload.fields || store.purchaseHistoryFields;
+    renderPurchaseHistory();
+    els.historyForm.reset();
+    els.historyItemDialog?.close();
+    if (els.historyStatus) els.historyStatus.textContent = 'Entry published.';
+  } catch (error) {
+    alert(error.message || 'History entry could not be saved.');
+  } finally {
+    if (saveButton) saveButton.disabled = !store.purchaseHistoryCanWrite;
+  }
+}
+
+function exportPurchaseHistory() {
+  const anchor = document.createElement('a');
+  anchor.href = apiUrl(`/api/purchase-history/export?documentId=${encodeURIComponent(selectedHistoryDocumentId())}`);
+  anchor.download = `${selectedHistoryDocumentId() || 'purchase-history'}.csv`;
+  anchor.click();
+}
+
+function historyRowById(recordId) {
+  return store.purchaseHistory.find((row) => row.record_id === recordId) || null;
+}
+
+function setFormField(form, name, value) {
+  const input = form?.elements?.[name];
+  if (input) {
+    input.value = value || '';
+  }
+}
+
+function openHistoryEditModal(recordId) {
+  const row = historyRowById(recordId);
+  if (!row || !els.historyEditDialog || !els.historyEditForm) {
+    return;
+  }
+  store.editingPurchaseHistoryRecordId = recordId;
+  els.historyEditForm.reset();
+  for (const field of ['record_id', 'title', 'subcategory', 'brand', 'model', 'mount', 'purchase_at', 'purchase_price_cad', 'listed_at', 'sold_at', 'condition_grade', 'notes']) {
+    setFormField(els.historyEditForm, field, row[field] || '');
+  }
+  setFormField(els.historyEditForm, 'price_cad', row.sold_price_cad || row.list_price_cad || '');
+  setFormField(els.historyEditForm, 'inventory_status', inventoryStatusFromHistoryRow(row));
+  if (els.historyEditStatus) els.historyEditStatus.textContent = '';
+  els.historyEditDialog.showModal();
+}
+
+async function saveHistoryEdit(event) {
+  event.preventDefault();
+  const existing = historyRowById(store.editingPurchaseHistoryRecordId) || {};
+  const saveButton = document.getElementById('historyEditSaveButton');
+  if (saveButton) saveButton.disabled = true;
+  try {
+    const payload = await fetchJson('/api/purchase-history', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        documentId: selectedHistoryDocumentId(),
+        row: buildHistoryFormRow(els.historyEditForm, existing),
+      }),
+    });
+    store.purchaseHistoryDocuments = payload.documents || store.purchaseHistoryDocuments;
+    store.purchaseHistory = payload.rows || [];
+    renderPurchaseHistory();
+    els.historyEditDialog.close();
+    if (els.historyStatus) els.historyStatus.textContent = 'Entry updated.';
+  } catch (error) {
+    if (els.historyEditStatus) els.historyEditStatus.textContent = error.message || 'Entry could not be updated.';
+  } finally {
+    if (saveButton) saveButton.disabled = false;
+  }
+}
+
+async function createHistoryDocument() {
+  const input = document.getElementById('historyNewDocumentName');
+  const name = input?.value.trim() || '';
+  if (!name) {
+    alert('Document name is required.');
+    return;
+  }
+  const payload = await fetchJson('/api/purchase-history/documents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  store.purchaseHistoryDocuments = payload.documents || [];
+  store.selectedPurchaseHistoryDocumentId = payload.document?.document_id || '';
+  if (input) input.value = '';
+  renderPurchaseHistory();
+  els.historyManageDialog?.close();
+  await loadPurchaseHistory();
+}
+
+async function importHistoryCsv(file) {
+  if (!file) return;
+  const csvText = await file.text();
+  const mode = document.getElementById('historyImportMode')?.value || 'current';
+  const payload = await fetchJson('/api/purchase-history/import', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      documentId: selectedHistoryDocumentId(),
+      createDocument: mode === 'new',
+      name: file.name.replace(/\.csv$/i, ''),
+      csvText,
+    }),
+  });
+  store.purchaseHistoryDocuments = payload.documents || [];
+  store.selectedPurchaseHistoryDocumentId = payload.document?.document_id || store.selectedPurchaseHistoryDocumentId;
+  store.purchaseHistory = payload.rows || [];
+  store.purchaseHistoryFields = payload.fields || store.purchaseHistoryFields;
+  renderPurchaseHistory();
+  els.historyImportDialog?.close();
+  if (els.historyStatus) {
+    els.historyStatus.textContent = `Imported ${payload.import?.totalRows || 0} rows.`;
+  }
+}
+
+async function mergeHistoryDocument() {
+  const sourceDocumentId = els.historyMergeSourceSelect?.value || '';
+  const targetDocumentId = selectedHistoryDocumentId();
+  if (!sourceDocumentId || !targetDocumentId) {
+    alert('Choose a source document to merge.');
+    return;
+  }
+  const payload = await fetchJson('/api/purchase-history/merge', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sourceDocumentId, targetDocumentId }),
+  });
+  store.purchaseHistoryDocuments = payload.documents || [];
+  store.purchaseHistory = payload.rows || [];
+  renderPurchaseHistory();
+  els.historyManageDialog?.close();
+  if (els.historyStatus) {
+    els.historyStatus.textContent = `Merged ${payload.merge?.total || 0} rows.`;
+  }
+}
+
+function eventRegistryDetails(event) {
+  const data = event.data || {};
+  return [
+    data.price_cad ? `price ${formatMoney(data.price_cad)}` : '',
+    data.inventory_status ? `inventory ${data.inventory_status}` : '',
+    data.reason || data.error || '',
+  ].filter(Boolean).join(' / ');
+}
+
+function renderEventRegistry() {
+  if (!els.eventRegistryTableBody || !els.eventRegistryMeta) {
+    return;
+  }
+  els.eventRegistryMeta.textContent = `${store.eventRegistry.length} recent events`;
+  if (!store.eventRegistry.length) {
+    els.eventRegistryTableBody.innerHTML = '<tr><td colspan="6" class="empty-state">Events appear here.</td></tr>';
+    return;
+  }
+  els.eventRegistryTableBody.innerHTML = store.eventRegistry.map((event) => (
+    '<tr>'
+      + `<td>${html(formatDate(event.event_at))}</td>`
+      + `<td><span class="status ${html(event.source)}">${html(event.source)}</span></td>`
+      + `<td>${html(event.event_type || '')}</td>`
+      + `<td><div class="history-item-title">${html(event.title || '')}</div><div class="process-meta">${html(event.subject_id || '')}</div></td>`
+      + `<td>${html(event.status || '')}</td>`
+      + `<td class="cell-text">${html(eventRegistryDetails(event))}</td>`
+    + '</tr>'
+  )).join('');
+}
+
+async function loadEventRegistry() {
+  if (!hasApiToken()) {
+    if (els.eventRegistryMeta) els.eventRegistryMeta.textContent = 'Token needed';
+    return;
+  }
+  const source = els.eventRegistrySourceSelect?.value || 'all';
+  const payload = await fetchJson(`/api/events?source=${encodeURIComponent(source)}&limit=200`);
+  store.eventRegistry = payload.events || [];
+  renderEventRegistry();
+}
+
 function defaultDraftForWorkflow(workflow) {
   const draft = {};
   for (const field of workflow?.fields || []) {
@@ -190,7 +665,7 @@ function renderSummary() {
     ['Pending', counts.pending || 0],
     ['Processing', counts.processing || 0],
     ['Done', counts.done || 0],
-    ['Error', counts.error || 0],
+    ['Needs review', counts.error || 0],
     ['Sold', counts.sold || 0],
     ['Pending sale', counts.pending_sale || 0],
   ];
@@ -259,7 +734,7 @@ function renderField(field, draft) {
 function renderWorkflowRows(workflow, draft) {
   const fields = workflow?.fields || [];
   if (!fields.length) {
-    return '<tr><td colspan="2" class="empty-state">No workflow fields available.</td></tr>';
+    return '<tr><td colspan="2" class="empty-state">This workflow has no editable fields.</td></tr>';
   }
   return fields.map((field) => renderField(field, draft)).join('');
 }
@@ -284,11 +759,11 @@ function renderCredentialManager() {
       '<tr>'
         + `<td>${html(profile.label)}</td>`
         + `<td>${html(profile.email)}</td>`
-        + `<td>${profile.hasPassword ? 'yes' : 'no'}</td>`
+        + `<td>${profile.hasPassword ? 'saved' : 'empty'}</td>`
         + `<td>${profile.active ? '<span class="status done">active</span>' : ''}</td>`
       + '</tr>'
     )).join('')
-    : '<tr><td colspan="4" class="empty-state">No credential profiles saved.</td></tr>';
+    : '<tr><td colspan="4" class="empty-state">Credential profiles appear here.</td></tr>';
   return '<section class="credential-manager">'
     + '<div class="worker-control-section-title">Credentials</div>'
     + '<div class="credential-grid">'
@@ -423,11 +898,11 @@ function renderWorkerControl() {
   const draft = ensureWorkflowDraft(workflow);
   const rows = renderWorkflowRows(workflow, draft);
   els.workerControl.innerHTML = '<div class="worker-control-title">'
-    + '<div><div class="label">Worker Control</div><div class="process-meta">Draft settings are kept per workflow type.</div></div>'
+    + '<div><div class="label">Worker Setup</div><div class="process-meta">Settings are kept per workflow type.</div></div>'
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
-    + '<div class="worker-control-section-title">Workflow Settings</div>'
+    + '<div class="worker-control-section-title">Workflow</div>'
     + '<div class="tablewrap worker-control-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + '<tr><th><label for="workerControlWorkflowSelect">Workflow</label></th><td><select id="workerControlWorkflowSelect">'
     + store.workflows.map((item) => (
@@ -438,13 +913,13 @@ function renderWorkerControl() {
     + '</tbody></table></div>'
     + '</section>'
     + '<section class="worker-control-column worker-control-right">'
-    + '<div class="worker-control-section-title">Preview & Actions</div>'
+    + '<div class="worker-control-section-title">Command</div>'
     + '<div class="tablewrap worker-control-tablewrap worker-command-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + `<tr><th>Command</th><td><textarea id="workerControlArgsPreview" readonly>${html(els.workflowArgsPreview.value)}</textarea></td></tr>`
-    + '<tr><th>Controls</th><td><div class="worker-control-actions">'
-    + '<button type="button" id="workerControlStartButton">Start Worker</button>'
+    + '<tr><th>Actions</th><td><div class="worker-control-actions">'
+    + '<button type="button" id="workerControlStartButton">Start</button>'
     + '<button type="button" class="secondary" id="workerControlRefreshButton">Refresh</button>'
-    + '<button type="button" class="secondary" id="workerControlReconcileButton">OS Check</button>'
+    + '<button type="button" class="secondary" id="workerControlReconcileButton">Check OS</button>'
     + '</div></td></tr>'
     + '</tbody></table></div>'
     + '</section>'
@@ -524,12 +999,12 @@ function bindCredentialManager() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(credential),
       });
-      if (status) status.textContent = 'Credential saved.';
+      if (status) status.textContent = 'Credential profile saved.';
       await loadCredentials({ render: false });
       renderSettings();
       await loadWorkflows();
     } catch (error) {
-      alert(error.message || 'Failed to save credential');
+      alert(error.message || 'Credential profile could not be saved.');
     } finally {
       saveButton.disabled = false;
     }
@@ -544,12 +1019,12 @@ function bindCredentialManager() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ id: credential.id || select.value }),
       });
-      if (status) status.textContent = 'Active credential updated.';
+      if (status) status.textContent = 'Active credential profile updated.';
       await loadCredentials({ render: false });
       renderSettings();
       await loadWorkflows();
     } catch (error) {
-      alert(error.message || 'Failed to set active credential');
+      alert(error.message || 'Active credential profile could not be updated.');
     } finally {
       setActiveButton.disabled = false;
     }
@@ -664,7 +1139,7 @@ function restoreProcessScrollState(state) {
 function renderProcesses(options = {}) {
   const scrollState = options.preserveScroll ? captureProcessScrollState() : null;
   if (!store.processes.length) {
-    els.processList.innerHTML = '<div class="card"><div class="label">Workers</div><div>No managed workers have been started from this server session.</div></div>';
+    els.processList.innerHTML = '<div class="card"><div class="label">Workers</div><div>Managed workers appear here after they start.</div></div>';
     restoreProcessScrollState(scrollState);
     return;
   }
@@ -683,8 +1158,8 @@ function renderProcesses(options = {}) {
       + `<td><button type="button" class="secondary process-select-button" data-id="${html(proc.id)}">${html(proc.label)}</button></td>`
       + `<td><span class="status ${html(proc.status)}">${html(proc.status)}</span></td>`
       + `<td>${html(proc.pid || '')}</td>`
-      + `<td>${proc.osAlive ? 'alive' : 'not running'}</td>`
-      + `<td>${html(stats.currentListingId || 'idle')}</td>`
+      + `<td>${proc.osAlive ? 'active' : 'inactive'}</td>`
+      + `<td>${html(stats.currentListingId || 'waiting')}</td>`
       + `<td>${html(stats.attempted)}</td>`
       + `<td>${html(stats.done)}</td>`
       + `<td>${html(stats.bypassed)}</td>`
@@ -692,7 +1167,7 @@ function renderProcesses(options = {}) {
       + `<td class="cell-text">${html(latestWorkerAction(proc))}</td>`
       + '<td><div class="row-actions">'
       + `<button type="button" class="secondary process-open-button" data-id="${html(proc.id)}">${selected ? 'View' : 'View'}</button>`
-      + (running ? `<button type="button" class="danger stop-button" data-id="${html(proc.id)}">Stop</button>` : '')
+      + (running ? `<button type="button" class="danger stop-button" data-id="${html(proc.id)}">End</button>` : '')
       + '</div></td>'
       + '</tr>';
   }).join('');
@@ -701,8 +1176,8 @@ function renderProcesses(options = {}) {
     : null;
   document.body.classList.toggle('worker-inspector-open', Boolean(selectedProcess));
   els.processList.innerHTML = '<div class="card">'
-    + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">View a worker for its focused audit workspace. The overview stays compact for scanning and stopping workers.</div></div></div>'
-    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Listing</th><th>Attempted</th><th>Done</th><th>Bypassed</th><th>Errors</th><th>Doing</th><th></th></tr></thead><tbody>'
+    + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Worker status, current listing, and recent activity.</div></div></div>'
+    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Listing</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
     + rows
     + '</tbody></table></div>'
     + '</div>'
@@ -757,7 +1232,7 @@ function renderProcesses(options = {}) {
         });
         await loadWorkflows();
       } catch (error) {
-        alert(error.message || 'Failed to stop worker');
+        alert(error.message || 'Worker stop request could not be sent.');
         button.disabled = false;
       }
     });
@@ -839,7 +1314,7 @@ function workerDetailRenderSignature(process, stats, events) {
 function renderWorkerScreenshotHistory(selectedProcess) {
   const screenshots = selectedProcess?.screenshots || [];
   if (!screenshots.length) {
-    return '<div class="empty-state">No worker screenshots captured yet.</div>';
+    return '<div class="empty-state">Worker screenshots appear here during a run.</div>';
   }
 
   const latest = screenshots[0];
@@ -878,7 +1353,7 @@ function renderWorkerDetail(selectedProcess) {
   const categoryButtons = [
     ['done', 'Done', detailStats.done || 0],
     ['skipped', 'Skipped', detailStats.skipped || 0],
-    ['error', 'Errors', detailStats.error || 0],
+    ['error', 'Review', detailStats.error || 0],
     ['started', 'Started', detailStats.started || 0],
     ['all', 'All', detailStats.total || 0],
   ].map(([category, label, count]) => (
@@ -890,22 +1365,22 @@ function renderWorkerDetail(selectedProcess) {
     ['Audit IDs', (detailStats.workerIds || [selectedProcess?.id]).join(', ')],
     ['Status', selectedProcess?.status || ''],
     ['PID', selectedProcess?.pid || ''],
-    ['OS', selectedProcess?.osAlive ? 'alive' : 'not running'],
-    ['Managed', selectedProcess?.managed ? 'yes' : 'recovered'],
+    ['OS', selectedProcess?.osAlive ? 'active' : 'inactive'],
+    ['Managed', selectedProcess?.managed ? 'managed' : 'recovered'],
     ['Started', formatDate(selectedProcess?.startedAt)],
     ['Exited', formatDate(selectedProcess?.exitedAt)],
-    ['Current listing', stats.currentListingId || 'idle'],
+    ['Current listing', stats.currentListingId || 'waiting'],
   ]);
   const countRows = tableRows([
     ['Attempted', stats.attempted],
     ['Done', stats.done],
-    ['Bypassed', stats.bypassed],
-    ['Errors', stats.errors],
+    ['Skipped', stats.bypassed],
+    ['Review', stats.errors],
     ['Sleeps', stats.sleeps],
     ['Audit events', detailStats.total || 0],
     ['Audit done', detailStats.done || 0],
     ['Audit skipped', detailStats.skipped || 0],
-    ['Audit errors', detailStats.error || 0],
+    ['Audit review', detailStats.error || 0],
   ]);
   const detailRows = [
     workerDetailSectionRow('Status', '<div class="worker-status-grid">'
@@ -930,12 +1405,12 @@ function renderWorkerDetail(selectedProcess) {
       + '<div class="worker-preview-frame">'
       + (previewEvent.screenshotUrl
         ? `<a href="${html(previewEvent.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(previewEvent.screenshotUrl)}" alt="Latest worker screenshot"></a>`
-        : '<div class="empty-state">No screenshot available.</div>')
+        : '<div class="empty-state">Screenshot preview appears after capture.</div>')
       + '</div>'
       + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + previewRows + (workerEventLinks(previewEvent) ? `<tr><th>Links</th><td><div class="row-actions">${workerEventLinks(previewEvent)}</div></td></tr>` : '') + '</tbody></table></div>'
       + '</div>'));
   } else {
-    detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="empty-state">No event preview yet.</div>'));
+    detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="empty-state">Event preview appears after worker activity.</div>'));
   }
 
   const eventRows = store.workerDetailEvents.length
@@ -951,7 +1426,7 @@ function renderWorkerDetail(selectedProcess) {
         + '<td><div class="row-actions">' + workerEventLinks(event) + '</div></td>'
       + '</tr>'
     )).join('')
-    : '<tr><td colspan="8" class="empty-state">No events for this category yet.</td></tr>';
+    : '<tr><td colspan="8" class="empty-state">Events for this category appear here.</td></tr>';
   detailRows.push(workerDetailSectionRow('Audit Events', '<div class="worker-panel-toolbar worker-detail-section-toolbar">'
     + '<div class="worker-panel-title">Audit Events</div>'
     + `<div class="segmented worker-categories">${categoryButtons}</div>`
@@ -970,7 +1445,7 @@ function renderWorkerDetail(selectedProcess) {
         + `<td class="cell-log">${html(parsed.text)}</td>`
         + '</tr>';
     }).join('')
-    : '<tr><td colspan="3" class="empty-state">No text history yet.</td></tr>';
+    : '<tr><td colspan="3" class="empty-state">Text history appears here during a run.</td></tr>';
   detailRows.push(workerDetailSectionRow('Text History', '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + commandRows + '</tbody></table></div>'
     + '<div class="worker-detail-section-tablewrap worker-log-wrap"><table class="worker-log-table"><thead><tr><th>#</th><th>Time</th><th>Line</th></tr></thead><tbody>'
     + logRows
@@ -1086,13 +1561,103 @@ function bindEvents() {
     renderProcesses();
   });
   for (const tab of document.querySelectorAll('.tab')) {
-    tab.addEventListener('click', () => {
+    tab.addEventListener('click', async () => {
       for (const item of document.querySelectorAll('.tab')) item.classList.remove('active');
       for (const panel of document.querySelectorAll('.panel')) panel.classList.remove('active');
       tab.classList.add('active');
       document.getElementById(tab.dataset.panel).classList.add('active');
+      if (tab.dataset.panel === 'reviewPanel') {
+        try {
+          await loadEventRegistry();
+        } catch (error) {
+          alert(error.message || 'Event registry could not be loaded.');
+        }
+      }
     });
   }
+  els.historyForm?.addEventListener('submit', savePurchaseHistoryRow);
+  document.getElementById('historyResetButton')?.addEventListener('click', () => {
+    els.historyForm?.reset();
+    if (els.historyStatus) els.historyStatus.textContent = '';
+  });
+  document.getElementById('historyRefreshButton')?.addEventListener('click', async () => {
+    try {
+      await loadPurchaseHistory();
+    } catch (error) {
+      alert(error.message || 'Purchase history could not be loaded.');
+    }
+  });
+  document.getElementById('historyExportButton')?.addEventListener('click', exportPurchaseHistory);
+  document.getElementById('historyNewItemButton')?.addEventListener('click', () => {
+    els.historyForm?.reset();
+    if (els.historyStatus) els.historyStatus.textContent = '';
+    els.historyItemDialog?.showModal();
+  });
+  document.getElementById('historyOpenImportButton')?.addEventListener('click', () => {
+    els.historyManageDialog?.close();
+    els.historyImportDialog?.showModal();
+  });
+  document.getElementById('historyManageButton')?.addEventListener('click', () => {
+    renderPurchaseHistoryDocuments();
+    els.historyManageDialog?.showModal();
+  });
+  els.historyToggleStatsButton?.addEventListener('click', () => {
+    store.historyStatsHidden = !store.historyStatsHidden;
+    localStorage.setItem('marketplace-monitor-history-stats-hidden', String(store.historyStatsHidden));
+    renderHistoryStats();
+  });
+  document.getElementById('historyItemCloseButton')?.addEventListener('click', () => els.historyItemDialog?.close());
+  document.getElementById('historyImportCloseButton')?.addEventListener('click', () => els.historyImportDialog?.close());
+  document.getElementById('historyManageCloseButton')?.addEventListener('click', () => els.historyManageDialog?.close());
+  els.historyDocumentSelect?.addEventListener('change', async () => {
+    store.selectedPurchaseHistoryDocumentId = els.historyDocumentSelect.value;
+    localStorage.setItem('marketplace-monitor-history-document', store.selectedPurchaseHistoryDocumentId);
+    await loadPurchaseHistory();
+  });
+  document.getElementById('historyCreateDocumentButton')?.addEventListener('click', async () => {
+    try {
+      await createHistoryDocument();
+    } catch (error) {
+      alert(error.message || 'History document could not be created.');
+    }
+  });
+  document.getElementById('historyImportFile')?.addEventListener('change', async (event) => {
+    try {
+      await importHistoryCsv(event.target.files?.[0]);
+      event.target.value = '';
+    } catch (error) {
+      alert(error.message || 'CSV could not be imported.');
+    }
+  });
+  document.getElementById('historyMergeButton')?.addEventListener('click', async () => {
+    try {
+      await mergeHistoryDocument();
+    } catch (error) {
+      alert(error.message || 'History documents could not be merged.');
+    }
+  });
+  els.historyTableBody?.addEventListener('click', (event) => {
+    const button = event.target.closest('.history-edit-button');
+    if (!button) return;
+    openHistoryEditModal(button.dataset.recordId);
+  });
+  els.historyEditForm?.addEventListener('submit', saveHistoryEdit);
+  document.getElementById('historyEditCloseButton')?.addEventListener('click', () => els.historyEditDialog?.close());
+  document.getElementById('historyEditCancelButton')?.addEventListener('click', () => els.historyEditDialog?.close());
+  document.getElementById('eventRegistryRefreshButton')?.addEventListener('click', async () => {
+    try {
+      await loadEventRegistry();
+    } catch (error) {
+      alert(error.message || 'Event registry could not be loaded.');
+    }
+  });
+  els.eventRegistrySourceSelect?.addEventListener('change', async () => {
+    try {
+      await loadEventRegistry();
+    } catch (error) {
+      alert(error.message || 'Event registry could not be loaded.');
+    }
+  });
   els.workflowSelect.addEventListener('change', () => {
     store.selectedWorkflowId = els.workflowSelect.value;
     renderWorkflowForm();
@@ -1108,7 +1673,7 @@ function bindEvents() {
       await loadWorkflows();
       await loadSummary();
     } catch (error) {
-      alert(error.message || 'Failed to start workflow');
+      alert(error.message || 'Workflow could not be started.');
     }
   });
   document.getElementById('refreshWorkflowsButton').addEventListener('click', loadWorkflows);
@@ -1127,12 +1692,14 @@ if (hasApiToken()) {
   await listingsViewer.loadQueryFields();
   await listingsViewer.loadResolveQueue();
   await listingsViewer.loadRows();
+  await loadPurchaseHistory();
   await loadCredentials({ render: false });
   renderSettings();
   await loadWorkflows();
   setInterval(loadSummary, 10000);
   setInterval(syncWorkflowsInBackground, 5000);
 } else {
-  els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Locked</div></div>';
+  els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Token needed</div></div>';
+  renderPurchaseHistory();
   renderSettings();
 }

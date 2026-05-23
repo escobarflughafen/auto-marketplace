@@ -9,6 +9,7 @@ canonical_key,no,string,,Manual normalized key such as brand model mount variant
 transaction_type,yes,enum,buy|sell|trade|watch|skip|comp,What kind of row this is.,Separates personal outcomes from external comps,buy
 decision,yes,enum,bought|sold|skipped|watched|escalated|rejected|comp_only,Decision taken by user or system.,Learns escalation precision,bought
 outcome,yes,enum,sold_profitable|sold_break_even|loss|keeper|good_buy|bad_buy|condition_problem|scam_risk|missed|pending|unknown,Final outcome if known.,Learns good and bad patterns,sold_profitable
+inventory_status,no,enum,hold|listed|sold,Current inventory lifecycle state independent from profitability.,Inventory event tracking,listed
 decision_at,no,date,YYYY-MM-DD,Date the buy or skip decision was made.,Freshness of personal preference,2026-03-12
 listed_at,no,date,YYYY-MM-DD,Approximate source listing date.,Sell-through and freshness analysis,2026-03-10
 purchase_at,no,date,YYYY-MM-DD,Date purchased.,Holding-period calculation,2026-03-12

@@ -10,6 +10,14 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   getHomepageListingCounts,
+  createPurchaseHistoryDocument,
+  listPurchaseHistoryDocuments,
+  getPurchaseHistoryDocument,
+  upsertPurchaseHistoryRows,
+  listPurchaseHistoryRows,
+  mergePurchaseHistoryDocuments,
+  listPurchaseHistoryEvents,
+  listEventRegistry,
   insertWorkflowRun,
   updateWorkflowRun,
   getWorkflowRun,
@@ -35,6 +43,9 @@ const {
   getMarketplaceLocationOptions,
 } = require('./marketplace-utils');
 const {
+  parseCsv,
+} = require('./marketplace-tier3-verdict-dry-run');
+const {
   DEFAULT_CREDENTIALS_PATH,
   listCredentialProfiles,
   normalizeCredentialProfileId,
@@ -45,6 +56,9 @@ const {
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
 const WORKER_SCREENSHOT_ROOT = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots');
+const TRADING_HISTORY_SCHEMA_PATH = path.join(process.cwd(), 'schemas', 'trading-history.schema.csv');
+const PURCHASE_HISTORY_CSV_PATH = path.join(process.cwd(), 'output', 'trading-history.normalized.csv');
+const DEFAULT_PURCHASE_HISTORY_DOCUMENT_ID = 'inventory-import';
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
 const MARKETPLACE_LOCATION_OPTIONS = getMarketplaceLocationOptions();
 const AUTH_MODE_FIELD = {
@@ -140,6 +154,8 @@ const WORKFLOWS = {
   'home-collect': {
     label: 'Homepage Collector',
     script: 'marketplace:home:collect',
+    workerType: 'collector',
+    strategy: 'feed',
     fields: [
       AUTH_MODE_FIELD,
       CREDENTIAL_PROFILE_FIELD,
@@ -166,6 +182,8 @@ const WORKFLOWS = {
   'search-explore': {
     label: 'Search Explorer',
     script: 'marketplace:search:explore',
+    workerType: 'collector',
+    strategy: 'explorer',
     fields: [
       AUTH_MODE_FIELD,
       CREDENTIAL_PROFILE_FIELD,
@@ -193,6 +211,8 @@ const WORKFLOWS = {
   'backlog-resolve': {
     label: 'Resolve Pending Backlog',
     script: 'marketplace:home:process',
+    workerType: 'resolver',
+    strategy: 'filtered',
     fields: [
       AUTH_MODE_FIELD,
       CREDENTIAL_PROFILE_FIELD,
@@ -271,6 +291,8 @@ const WORKFLOWS = {
   'backlog-worker': {
     label: 'Continuous Backlog Worker',
     script: 'marketplace:home:process',
+    workerType: 'resolver',
+    strategy: 'queue',
     fields: [
       AUTH_MODE_FIELD,
       CREDENTIAL_PROFILE_FIELD,
@@ -656,7 +678,11 @@ function getRunningManagedProcesses(db) {
 }
 
 function ensureManagedWorkerIdArg(args, runId, workflow) {
-  if (workflow.script !== 'marketplace:home:process') {
+  if (![
+    'marketplace:home:collect',
+    'marketplace:search:explore',
+    'marketplace:home:process',
+  ].includes(workflow.script)) {
     return args;
   }
 
@@ -1063,8 +1089,310 @@ function authPayloadForAccess(access) {
       canManageQueue: canWrite,
       canManageWorkers: canWrite,
       canManageCredentials: canWrite,
+      canManageHistory: canWrite,
     },
   };
+}
+
+function csvEscape(value) {
+  const text = String(value ?? '');
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function renderCsv(rows, fields) {
+  return [
+    fields.join(','),
+    ...rows.map((row) => fields.map((field) => csvEscape(row[field] ?? '')).join(',')),
+  ].join('\n');
+}
+
+function readTradingHistoryFields() {
+  return parseCsv(fs.readFileSync(TRADING_HISTORY_SCHEMA_PATH, 'utf8'))
+    .map((row) => row.field_name)
+    .filter(Boolean);
+}
+
+function rowLookupValue(row, names) {
+  const entries = Object.entries(row || {});
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(row || {}, name) && row[name] !== '') {
+      return row[name];
+    }
+    const match = entries.find(([key, value]) => key.toLowerCase() === name.toLowerCase() && value !== '');
+    if (match) {
+      return match[1];
+    }
+  }
+  return '';
+}
+
+function rowLooksSold(row = {}) {
+  const statusText = String(rowLookupValue(row, ['inventory_status', 'sale_status', 'status', 'decision', 'outcome']) || '').toLowerCase();
+  return statusText === 'sold'
+    || statusText === 'sold_profitable'
+    || statusText === 'sold_break_even'
+    || statusText === 'loss'
+    || Boolean(rowLookupValue(row, ['sold_at', 'sold_price_cad', 'sold_price', 'sold']));
+}
+
+function normalizeInventoryStatus(row = {}) {
+  const status = String(rowLookupValue(row, ['inventory_status', 'sale_status', 'status']) || '').trim().toLowerCase();
+  if (status === 'hold' || status === 'listed' || status === 'sold') {
+    return status;
+  }
+  if (rowLooksSold(row)) {
+    return 'sold';
+  }
+  if (rowLookupValue(row, ['listed_at', 'list_price_cad', 'price_cad', 'price'])) {
+    return 'listed';
+  }
+  return 'hold';
+}
+
+function normalizeRowsToFields(rows, fields) {
+  const aliases = {
+    inventory_status: ['sale_status', 'status', 'inventory status'],
+    purchase_price_cad: ['cost', 'cost_cad', 'purchase_price', 'purchase price', 'purchase'],
+    list_price_cad: ['price_cad', 'price', 'list_price', 'list price', 'listed', 'listed_cad'],
+    sold_price_cad: ['sold', 'sold_cad', 'sold_price', 'sold price'],
+    purchase_at: ['date', 'purchased', 'purchased_at', 'purchase date'],
+    listed_at: ['listed date', 'listed_date'],
+    sold_at: ['sold date', 'sold_date'],
+    subcategory: ['kind', 'type'],
+  };
+  return rows.map((row) => Object.fromEntries(fields.map((field) => {
+    const exact = row?.[field];
+    if (exact !== undefined && exact !== '') {
+      return [field, exact];
+    }
+    if (field === 'inventory_status') {
+      return [field, normalizeInventoryStatus(row)];
+    }
+    if (field === 'sold_price_cad' && rowLooksSold(row)) {
+      return [field, rowLookupValue(row, aliases.sold_price_cad) || rowLookupValue(row, ['price_cad', 'price'])];
+    }
+    if (field === 'list_price_cad' && rowLooksSold(row)) {
+      return [field, rowLookupValue(row, aliases.list_price_cad)];
+    }
+    return [field, rowLookupValue(row, aliases[field] || [])];
+  })));
+}
+
+function parseTradingHistoryCsv(text, fields = readTradingHistoryFields()) {
+  return normalizeRowsToFields(parseCsv(text), fields);
+}
+
+function historyDbRowsToCsvRows(rows, fields) {
+  return rows.map((row) => {
+    const data = row.data || {};
+    const normalized = Object.fromEntries(fields.map((field) => [field, data[field] ?? '']));
+    if (!normalized.inventory_status) {
+      normalized.inventory_status = normalizeInventoryStatus(normalized);
+    }
+    return normalized;
+  });
+}
+
+function ensurePurchaseHistorySeedDocument(db, fields = readTradingHistoryFields()) {
+  let documents = listPurchaseHistoryDocuments(db);
+  if (documents.length > 0) {
+    return documents;
+  }
+
+  const seeded = createPurchaseHistoryDocument(db, {
+    documentId: DEFAULT_PURCHASE_HISTORY_DOCUMENT_ID,
+    name: 'Inventory Import',
+    description: 'Seeded from output/trading-history.normalized.csv',
+  });
+
+  if (fs.existsSync(PURCHASE_HISTORY_CSV_PATH)) {
+    const rows = parseTradingHistoryCsv(fs.readFileSync(PURCHASE_HISTORY_CSV_PATH, 'utf8'), fields);
+    if (rows.length > 0) {
+      upsertPurchaseHistoryRows(db, seeded.document_id, rows);
+    }
+  }
+
+  documents = listPurchaseHistoryDocuments(db);
+  return documents;
+}
+
+function selectedPurchaseHistoryDocument(db, requestedDocumentId, fields = readTradingHistoryFields()) {
+  const documents = ensurePurchaseHistorySeedDocument(db, fields);
+  if (!documents.length) {
+    return null;
+  }
+  if (requestedDocumentId) {
+    const requested = documents.find((document) => document.document_id === requestedDocumentId)
+      || getPurchaseHistoryDocument(db, requestedDocumentId);
+    if (requested) {
+      return requested;
+    }
+  }
+  return documents[0];
+}
+
+function nextPurchaseHistoryRecordId(rows) {
+  const prefix = `manual-history-${new Date().getFullYear()}-`;
+  const next = rows.reduce((max, row) => {
+    const match = String(row.record_id || '').match(/^manual-history-\d{4}-(\d+)$/);
+    return match ? Math.max(max, Number.parseInt(match[1], 10)) : max;
+  }, 0) + 1;
+  return `${prefix}${String(next).padStart(3, '0')}`;
+}
+
+function parseHistoryNumber(value) {
+  const text = String(value ?? '').replace(/[$,%\s,]/g, '');
+  if (!text) {
+    return null;
+  }
+  const number = Number.parseFloat(text);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatHistoryNumber(value, digits = 2) {
+  if (!Number.isFinite(value)) {
+    return '';
+  }
+  return String(Number(value.toFixed(digits)));
+}
+
+function daysBetweenDates(startDate, endDate) {
+  if (!startDate || !endDate) {
+    return '';
+  }
+  const start = Date.parse(`${startDate}T00:00:00Z`);
+  const end = Date.parse(`${endDate}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return '';
+  }
+  return String(Math.round((end - start) / 86400000));
+}
+
+function applyPurchaseHistoryCalculations(row) {
+  const purchase = parseHistoryNumber(row.purchase_price_cad);
+  let sold = parseHistoryNumber(row.sold_price_cad);
+  const list = parseHistoryNumber(row.list_price_cad);
+  const inventoryStatus = normalizeInventoryStatus(row);
+  const isSold = inventoryStatus === 'sold';
+  row.inventory_status = inventoryStatus;
+  const extraCostFields = [
+    'fees_cad',
+    'shipping_cad',
+    'tax_cad',
+    'travel_cost_cad',
+    'repair_cost_cad',
+    'other_cost_cad',
+  ];
+  const extraCosts = extraCostFields
+    .map((field) => parseHistoryNumber(row[field]) || 0)
+    .reduce((sum, value) => sum + value, 0);
+  const netCost = purchase !== null || extraCosts > 0 ? (purchase || 0) + extraCosts : null;
+  if (netCost !== null) {
+    row.net_cost_cad = formatHistoryNumber(netCost, 0);
+  }
+
+  if (isSold && sold === null && list !== null) {
+    sold = list;
+    row.sold_price_cad = formatHistoryNumber(sold, 0);
+  }
+
+  const expectedSell = (isSold ? sold : null) ?? list;
+  if (expectedSell !== null) {
+    row.expected_sell_price_cad = formatHistoryNumber(expectedSell, 0);
+  }
+  if (expectedSell !== null && netCost !== null) {
+    row.expected_net_margin_cad = formatHistoryNumber(expectedSell - netCost, 0);
+  }
+  if (isSold && sold !== null && netCost !== null) {
+    const profit = sold - netCost;
+    row.realized_profit_cad = formatHistoryNumber(profit, 0);
+    row.roi_percent = netCost > 0 ? formatHistoryNumber((profit / netCost) * 100, 1) : '';
+    row.outcome = profit > 0 ? 'sold_profitable' : profit < 0 ? 'loss' : 'sold_break_even';
+    row.decision = 'sold';
+  } else if (!isSold) {
+    row.realized_profit_cad = '';
+    row.roi_percent = '';
+    if (!row.outcome || row.outcome === 'sold_profitable' || row.outcome === 'sold_break_even' || row.outcome === 'loss') {
+      row.outcome = 'pending';
+    }
+    if (row.decision === 'sold') {
+      row.decision = 'bought';
+    }
+  } else if (!row.outcome) {
+    row.outcome = 'pending';
+  }
+
+  const startDate = row.listed_at || row.purchase_at || row.decision_at;
+  row.days_to_sell = daysBetweenDates(startDate, row.sold_at);
+  return row;
+}
+
+function sanitizePurchaseHistoryRow(input, fields, existingRows) {
+  const row = Object.fromEntries(fields.map((field) => [field, String(input?.[field] ?? '').trim()]));
+  const now = new Date().toISOString();
+  row.record_id ||= nextPurchaseHistoryRecordId(existingRows);
+  row.record_version ||= '1';
+  row.record_source ||= 'manual';
+  row.source_platform ||= 'other';
+  row.transaction_type ||= 'buy';
+  row.inventory_status ||= normalizeInventoryStatus(row);
+  row.decision ||= row.inventory_status === 'sold' ? 'sold' : 'bought';
+  row.outcome ||= 'pending';
+  row.category ||= 'camera_gear';
+  row.subcategory ||= 'camera_body';
+  row.bundle_type ||= 'single';
+  row.seller_type ||= 'unknown';
+  row.location_region ||= 'BC';
+  row.location_country ||= 'CA';
+  row.confidence_score ||= '0.75';
+  row.price_confidence_score ||= row.sold_price_cad ? '0.9' : '0.7';
+  row.identity_confidence_score ||= '0.85';
+  row.condition_risk_score ||= '0.2';
+  row.seller_risk_score ||= '0.1';
+  row.watchlist_match ||= 'true';
+  row.created_at ||= now;
+  row.updated_at = now;
+  if (!row.title) {
+    row.title = [row.brand, row.model, row.variant].filter(Boolean).join(' ');
+  }
+  if (!row.canonical_key) {
+    row.canonical_key = [row.brand, row.model, row.mount]
+      .filter(Boolean)
+      .join('-')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+  return applyPurchaseHistoryCalculations(row);
+}
+
+function purchaseHistoryPayload(db, access, requestedDocumentId = '') {
+  const fields = readTradingHistoryFields();
+  const documents = ensurePurchaseHistorySeedDocument(db, fields);
+  const document = selectedPurchaseHistoryDocument(db, requestedDocumentId, fields);
+  const dbRows = document ? listPurchaseHistoryRows(db, document.document_id) : [];
+  const rows = historyDbRowsToCsvRows(dbRows, fields);
+  return {
+    fields,
+    documents,
+    document,
+    rows,
+    stats: {
+      totalRows: rows.length,
+    },
+    auth: authPayloadForAccess(access),
+  };
+}
+
+function writeCsv(response, filename, rows, fields) {
+  response.writeHead(200, {
+    'content-type': 'text/csv; charset=utf-8',
+    'content-disposition': `attachment; filename="${filename.replace(/"/g, '')}"`,
+  });
+  response.end(`${renderCsv(rows, fields)}\n`);
 }
 
 function writeAuthError(response, access) {
@@ -1315,6 +1643,197 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/purchase-history/documents' && request.method === 'GET') {
+      try {
+        const fields = readTradingHistoryFields();
+        writeJson(response, 200, {
+          fields,
+          documents: ensurePurchaseHistorySeedDocument(db, fields),
+          auth: authPayloadForAccess(access),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history/documents' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const document = createPurchaseHistoryDocument(db, {
+          name: body.name || 'Purchase History',
+          description: body.description || '',
+        });
+        writeJson(response, 201, {
+          ...purchaseHistoryPayload(db, access, document.document_id),
+          document,
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history/export' && request.method === 'GET') {
+      try {
+        const fields = readTradingHistoryFields();
+        const document = selectedPurchaseHistoryDocument(db, requestUrl.searchParams.get('documentId') || '', fields);
+        if (!document) {
+          writeJson(response, 404, { error: 'No purchase history document available' });
+          return;
+        }
+        const rows = historyDbRowsToCsvRows(listPurchaseHistoryRows(db, document.document_id), fields);
+        writeCsv(response, `${document.document_id}.csv`, rows, fields);
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history/import' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const fields = readTradingHistoryFields();
+        ensurePurchaseHistorySeedDocument(db, fields);
+        let document = body.createDocument
+          ? createPurchaseHistoryDocument(db, {
+            name: body.name || 'Imported History',
+            description: body.description || 'Imported from CSV',
+          })
+          : selectedPurchaseHistoryDocument(db, body.documentId || '', fields);
+        if (!document) {
+          document = createPurchaseHistoryDocument(db, {
+            name: body.name || 'Imported History',
+            description: body.description || 'Imported from CSV',
+          });
+        }
+        const existingRows = listPurchaseHistoryRows(db, document.document_id).map((row) => row.data);
+        const importedRows = parseTradingHistoryCsv(body.csvText || '', fields);
+        const rows = [...existingRows];
+        const sanitizedRows = importedRows.map((row) => {
+          const sanitized = sanitizePurchaseHistoryRow(row, fields, rows);
+          rows.push(sanitized);
+          return sanitized;
+        });
+        const result = upsertPurchaseHistoryRows(db, document.document_id, sanitizedRows);
+        writeJson(response, 201, {
+          ...purchaseHistoryPayload(db, access, document.document_id),
+          import: {
+            insertedRows: result.inserted,
+            updatedRows: result.updated,
+            totalRows: result.total,
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history/merge' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const result = mergePurchaseHistoryDocuments(db, {
+          sourceDocumentId: body.sourceDocumentId,
+          targetDocumentId: body.targetDocumentId,
+        });
+        writeJson(response, 200, {
+          ...purchaseHistoryPayload(db, access, body.targetDocumentId),
+          merge: result,
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history/events' && request.method === 'GET') {
+      try {
+        writeJson(response, 200, {
+          events: listPurchaseHistoryEvents(db, {
+            documentId: requestUrl.searchParams.get('documentId') || '',
+            recordId: requestUrl.searchParams.get('recordId') || '',
+          }),
+          auth: authPayloadForAccess(access),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/events' && request.method === 'GET') {
+      try {
+        writeJson(response, 200, {
+          events: listEventRegistry(db, {
+            source: requestUrl.searchParams.get('source') || 'all',
+            limit: Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10),
+          }),
+          auth: authPayloadForAccess(access),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history' && request.method === 'GET') {
+      try {
+        writeJson(response, 200, purchaseHistoryPayload(db, access, requestUrl.searchParams.get('documentId') || ''));
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const fields = readTradingHistoryFields();
+        const document = selectedPurchaseHistoryDocument(db, body.documentId || '', fields);
+        if (!document) {
+          writeJson(response, 404, { error: 'No purchase history document available' });
+          return;
+        }
+        const existingRows = listPurchaseHistoryRows(db, document.document_id).map((row) => row.data);
+        const incomingRows = Array.isArray(body.rows) ? body.rows : [body.row || body];
+        const rows = [...existingRows];
+        const sanitizedRows = incomingRows.map((incomingRow) => {
+          const sanitized = sanitizePurchaseHistoryRow(incomingRow, fields, rows);
+          rows.push(sanitized);
+          return sanitized;
+        });
+        const result = upsertPurchaseHistoryRows(db, document.document_id, sanitizedRows);
+        writeJson(response, 201, {
+          ...purchaseHistoryPayload(db, access, document.document_id),
+          write: {
+            insertedRows: result.inserted,
+            updatedRows: result.updated,
+            totalRows: result.total,
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/listings') {
       const query = requestUrl.searchParams.get('q') || '';
       const limit = requestUrl.searchParams.get('limit') || '50';
@@ -1492,6 +2011,8 @@ function createServer(options) {
           id,
           label: workflow.label,
           script: workflow.script,
+          workerType: workflow.workerType || '',
+          strategy: workflow.strategy || '',
           fields: fieldsForWorkflow(workflow),
           defaultArgs: buildDefaultArgsFromFields(fieldsForWorkflow(workflow)),
         })),

@@ -20,27 +20,27 @@
         <span class="route-badge route-badge-market">M</span>
         <div>
           <h1>Marketplace<br>Monitor</h1>
-          <div class="sub">Browse collected rows, watch queue state, and manage Marketplace workers.</div>
+          <div class="sub">Collected listings, queue state, and Marketplace worker activity.</div>
         </div>
       </div>
     </section>
 
     <section class="access-warning" id="tokenWarning" hidden>
       <div>
-        <strong>API token missing.</strong>
-        Open the admin or read-only monitor URL printed by the server, or add <code>?token=...</code> to this page.
+        <strong>Monitor token.</strong>
+        Use the admin or read-only URL printed by the server, or add <code>?token=...</code> to this page.
       </div>
     </section>
 
     <section class="workspace-surface">
       <div class="workspace-row query-row">
         <form class="querybar" id="queryForm">
-          <input id="queryInput" name="q" placeholder='Try: title contains "pentax 67" and price >= 2000 or status =~ pending sort:recent'>
+          <input id="queryInput" name="q" placeholder='title contains "pentax 67" and price >= 2000 sort:recent'>
           <button type="submit">Search</button>
           <button type="button" class="secondary" id="clearButton">Clear</button>
         </form>
         <div class="tips">
-          KQL-style search: <code>status != done</code> <code>price >= 2000</code> <code>source_keyword in ("nikon","leica")</code>
+          Query examples: <code>status != done</code> <code>price >= 2000</code> <code>source_keyword in ("nikon","leica")</code>
         </div>
       </div>
 
@@ -48,19 +48,21 @@
 
       <nav class="tabs workspace-row">
         <button type="button" class="tab active" data-panel="listingsPanel">Listings</button>
+        <button type="button" class="tab" data-panel="historyPanel">History</button>
+        <button type="button" class="tab" data-panel="reviewPanel">Review</button>
         <button type="button" class="tab" data-panel="opsPanel">Workers</button>
         <button type="button" class="tab" data-panel="settingsPanel">Settings</button>
       </nav>
 
       <section class="panel active" id="listingsPanel">
       <nav class="subtabs listing-subtabs">
-        <button type="button" class="subtab active" data-listing-view="queryResultsView">Query Results</button>
-        <button type="button" class="subtab" data-listing-view="backlogQueueView">Backlog Queue</button>
+        <button type="button" class="subtab active" data-listing-view="queryResultsView">Results</button>
+        <button type="button" class="subtab" data-listing-view="backlogQueueView">Backlog</button>
       </nav>
       <section class="listing-view active" id="queryResultsView">
       <div class="query-tools">
         <div class="card">
-          <div class="label">Query Builder</div>
+          <div class="label">Query</div>
           <div class="builder-row">
             <select id="queryFieldSelect"></select>
             <select id="queryOperatorSelect"></select>
@@ -71,12 +73,12 @@
             </select>
           </div>
           <div class="builder-actions">
-            <button type="button" id="addClauseButton">Add Clause</button>
+            <button type="button" id="addClauseButton">Add Filter</button>
             <button type="button" class="secondary" id="wrapQueryButton">Wrap</button>
           </div>
         </div>
         <div class="card query-helper">
-          <div class="label">Shortcuts</div>
+          <div class="label">Saved Filters</div>
           <button type="button" class="example-query" data-query='status == pending sort:rank'>Pending by rank</button>
           <button type="button" class="example-query" data-query='status != done and source == search'>Search backlog</button>
           <button type="button" class="example-query" data-query='title contains "pentax" and price >= 2000'>Pentax over 2000</button>
@@ -87,7 +89,7 @@
         <div class="segmented" id="listingStatusTools">
           <button type="button" class="secondary" data-query="">All</button>
           <button type="button" class="secondary" data-query="status == pending sort:rank">Pending</button>
-          <button type="button" class="secondary" data-query="status == error sort:recent">Errors</button>
+          <button type="button" class="secondary" data-query="status == error sort:recent">Review</button>
           <button type="button" class="secondary" data-query="status == sold sort:recent">Sold</button>
           <button type="button" class="secondary" data-query="status == pending_sale sort:recent">Pending sale</button>
           <button type="button" class="secondary" data-query="status == done sort:completed">Done</button>
@@ -105,16 +107,16 @@
         <button type="button" class="secondary" id="refreshListingsButton">Refresh</button>
       </div>
       <div class="resolve-toolbar">
-        <button type="button" class="secondary" id="queueSelectedButton" disabled>Queue Selected</button>
-        <button type="button" class="secondary" id="resolveQueuedButton" disabled>Run Queue</button>
-        <button type="button" class="secondary" id="clearResolveQueueButton" disabled>Clear Queue</button>
+        <button type="button" class="secondary" id="queueSelectedButton" disabled>Add Selected</button>
+        <button type="button" class="secondary" id="resolveQueuedButton" disabled>Process Queue</button>
+        <button type="button" class="secondary" id="clearResolveQueueButton" disabled>Clear</button>
         <label class="inline-control resolve-hide-control">
           <input id="hideQueuedResolveCheckbox" type="checkbox" checked>
           Hide queued
         </label>
-        <button type="button" class="secondary" id="resolveSelectedButton" disabled>Resolve Selected Now</button>
-        <button type="button" class="secondary" id="resolveCurrentButton">Resolve All In View</button>
-        <div class="process-meta" id="listingResolveMeta">No listing resolve batch queued.</div>
+        <button type="button" class="secondary" id="resolveSelectedButton" disabled>Process Selected</button>
+        <button type="button" class="secondary" id="resolveCurrentButton">Process View</button>
+        <div class="process-meta" id="listingResolveMeta">Resolve queue is ready.</div>
       </div>
       <div class="resolve-queue-panel" id="resolveQueuePanel"></div>
       <div class="listings-main" id="listingsMain">
@@ -125,7 +127,7 @@
         <aside class="card snapshot-panel" id="snapshotPanel" hidden role="dialog" aria-labelledby="snapshotTitle">
           <div class="snapshot-header">
             <div>
-              <div class="label">Worker POV</div>
+              <div class="label">Worker View</div>
               <h2 id="snapshotTitle">Listing snapshot</h2>
               <div class="process-meta" id="snapshotMeta"></div>
             </div>
@@ -134,7 +136,7 @@
           <div class="snapshot-grid">
             <div class="snapshot-image-wrap" id="snapshotImageWrap"></div>
             <div>
-              <div class="label">Captured Details</div>
+              <div class="label">Details</div>
               <dl class="detail-list" id="snapshotDetails"></dl>
               <div class="builder-actions" id="snapshotLinks"></div>
             </div>
@@ -149,7 +151,7 @@
             <select id="backlogStatusFilter">
               <option value="all">Eligible</option>
               <option value="pending">Pending</option>
-              <option value="error">Errors</option>
+              <option value="error">Review</option>
               <option value="processing">Stale processing</option>
               <option value="sold">Sold</option>
               <option value="pending_sale">Pending sale</option>
@@ -194,8 +196,8 @@
             </select>
           </label>
           <button type="button" class="secondary" id="refreshBacklogButton">Refresh</button>
-          <button type="button" class="secondary" id="queueBacklogSelectedButton" disabled>Queue Selected</button>
-          <button type="button" class="secondary" id="queueBacklogVisibleButton" disabled>Queue Visible</button>
+          <button type="button" class="secondary" id="queueBacklogSelectedButton" disabled>Add Selected</button>
+          <button type="button" class="secondary" id="queueBacklogVisibleButton" disabled>Add Visible</button>
         </div>
         <div class="backlog-advanced">
           <label class="inline-control">
@@ -236,11 +238,98 @@
               </tr>
             </thead>
             <tbody id="backlogTableBody">
-              <tr><td colspan="13" class="empty-state">No backlog preview loaded.</td></tr>
+              <tr><td colspan="13" class="empty-state">Backlog preview appears here.</td></tr>
             </tbody>
           </table>
         </div>
       </section>
+      </section>
+
+      <section class="panel" id="historyPanel">
+        <div class="history-document-bar">
+          <label class="inline-control">
+            Document
+            <select id="historyDocumentSelect"></select>
+          </label>
+          <button type="button" id="historyNewItemButton">New Item</button>
+          <button type="button" class="secondary" id="historyManageButton">Tools</button>
+        </div>
+        <div class="history-layout">
+          <section class="history-table-section">
+            <div class="history-table-header">
+              <div>
+                <div class="worker-control-section-title">Purchase History</div>
+                <div class="process-meta" id="historyMeta">History not loaded.</div>
+              </div>
+              <div class="history-header-actions">
+                <button type="button" class="secondary history-toggle-stats-button" id="historyToggleStatsButton">Hide stats</button>
+                <div class="process-meta" id="historyStatus"></div>
+              </div>
+            </div>
+            <div class="inventory-stats-row" id="historyInventoryStatsRow"></div>
+            <div class="tablewrap history-tablewrap" tabindex="0">
+              <table class="history-table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th>Kind</th>
+                    <th>Cost</th>
+                    <th>Price</th>
+                    <th>Status</th>
+                    <th>Profit</th>
+                    <th>ROI</th>
+                    <th>Result</th>
+                    <th>Dates</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="historyTableBody">
+                  <tr><td colspan="10" class="empty-state">History appears here.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="panel" id="reviewPanel">
+        <div class="history-document-bar">
+          <label class="inline-control">
+            Source
+            <select id="eventRegistrySourceSelect">
+              <option value="all">All</option>
+              <option value="inventory">Inventory</option>
+              <option value="listing">Listings</option>
+              <option value="workflow">Workers</option>
+            </select>
+          </label>
+          <button type="button" class="secondary" id="eventRegistryRefreshButton">Refresh</button>
+        </div>
+        <section class="history-table-section">
+          <div class="history-table-header">
+            <div>
+              <div class="worker-control-section-title">Event Registry</div>
+              <div class="process-meta" id="eventRegistryMeta">Events not loaded.</div>
+            </div>
+          </div>
+          <div class="tablewrap event-registry-tablewrap" tabindex="0">
+            <table class="event-registry-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Event</th>
+                  <th>Subject</th>
+                  <th>Status</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="eventRegistryTableBody">
+                <tr><td colspan="6" class="empty-state">Events appear here.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section class="panel" id="opsPanel">
@@ -249,7 +338,7 @@
         <select id="workflowSelect" hidden></select>
         <div id="workflowForm" hidden></div>
         <textarea id="workflowArgsPreview" hidden readonly></textarea>
-        <button type="button" id="startWorkflowButton" hidden>Start Worker</button>
+        <button type="button" id="startWorkflowButton" hidden>Start</button>
         <button type="button" class="secondary" id="refreshWorkflowsButton" hidden>Refresh</button>
         <button type="button" class="secondary" id="reconcileWorkflowsButton" hidden>OS Check</button>
         <div id="processList" class="process-list"></div>
@@ -261,6 +350,136 @@
       </section>
     </section>
   </div>
+
+  <dialog class="history-edit-dialog" id="historyItemDialog">
+    <form id="historyForm" class="history-form history-edit-form" method="dialog">
+      <div class="history-edit-title">
+        <div class="worker-control-section-title">New Item</div>
+        <button type="button" class="secondary" id="historyItemCloseButton">Close</button>
+      </div>
+      <label>Item<input id="historyTitle" name="title" type="text" required></label>
+      <label>Kind<select id="historySubcategory" name="subcategory">
+        <option value="camera_body">Camera body</option>
+        <option value="lens">Lens</option>
+        <option value="accessory">Accessory</option>
+      </select></label>
+      <label>Brand<input id="historyBrand" name="brand" type="text" required></label>
+      <label>Model<input id="historyModel" name="model" type="text" required></label>
+      <label>Purchased<input id="historyPurchaseAt" name="purchase_at" type="date"></label>
+      <label>Cost CAD<input id="historyPurchasePrice" name="purchase_price_cad" type="number" min="0" step="1"></label>
+      <label>Price CAD<input id="historyPrice" name="price_cad" type="number" min="0" step="1"></label>
+      <label>Status<select id="historyInventoryStatus" name="inventory_status">
+        <option value="hold">Hold</option>
+        <option value="listed">Listed</option>
+        <option value="sold">Sold</option>
+      </select></label>
+      <details class="history-advanced-fields">
+        <summary>More fields</summary>
+        <div class="history-form-section">
+          <label>Mount<input id="historyMount" name="mount" type="text"></label>
+          <label>Listed at<input id="historyListedAt" name="listed_at" type="date"></label>
+          <label>Sold at<input id="historySoldAt" name="sold_at" type="date"></label>
+          <label>Condition<select id="historyCondition" name="condition_grade">
+            <option value="unknown">Unknown</option>
+            <option value="like_new">Like new</option>
+            <option value="good">Good</option>
+            <option value="fair">Fair</option>
+            <option value="poor">Poor</option>
+            <option value="for_parts">For parts</option>
+          </select></label>
+        </div>
+      </details>
+      <label class="history-notes-field">Notes<textarea id="historyNotes" name="notes" rows="3"></textarea></label>
+      <div class="history-actions">
+        <button type="submit" id="historySaveButton">Add & Publish</button>
+        <button type="button" class="secondary" id="historyResetButton">Reset</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="history-edit-dialog history-compact-dialog" id="historyImportDialog">
+    <div class="history-form history-edit-form">
+      <div class="history-edit-title">
+        <div class="worker-control-section-title">Import CSV</div>
+        <button type="button" class="secondary" id="historyImportCloseButton">Close</button>
+      </div>
+      <label class="history-notes-field">File<input id="historyImportFile" type="file" accept=".csv,text/csv"></label>
+      <label>Destination<select id="historyImportMode">
+        <option value="current">Current document</option>
+        <option value="new">New document</option>
+      </select></label>
+    </div>
+  </dialog>
+
+  <dialog class="history-edit-dialog history-compact-dialog" id="historyManageDialog">
+    <div class="history-form history-edit-form">
+      <div class="history-edit-title">
+        <div class="worker-control-section-title">History Tools</div>
+        <button type="button" class="secondary" id="historyManageCloseButton">Close</button>
+      </div>
+      <div class="history-tool-grid">
+        <button type="button" class="secondary" id="historyOpenImportButton">Import CSV</button>
+        <button type="button" class="secondary" id="historyExportButton">Export CSV</button>
+        <button type="button" class="secondary" id="historyRefreshButton">Refresh</button>
+      </div>
+      <label class="history-notes-field">New document<input id="historyNewDocumentName" type="text" placeholder="document name"></label>
+      <div class="history-actions">
+        <button type="button" id="historyCreateDocumentButton">Create</button>
+      </div>
+      <label class="history-notes-field">Merge from<select id="historyMergeSourceSelect"></select></label>
+      <div class="history-actions">
+        <button type="button" class="secondary" id="historyMergeButton">Merge Into Current</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="history-edit-dialog" id="historyEditDialog">
+    <form id="historyEditForm" class="history-form history-edit-form" method="dialog">
+      <input id="historyEditRecordId" name="record_id" type="hidden">
+      <div class="history-edit-title">
+        <div class="worker-control-section-title">Edit Item</div>
+        <button type="button" class="secondary" id="historyEditCloseButton">Close</button>
+      </div>
+      <label>Item<input id="historyEditTitle" name="title" type="text" required></label>
+      <label>Kind<select id="historyEditSubcategory" name="subcategory">
+        <option value="camera_body">Camera body</option>
+        <option value="lens">Lens</option>
+        <option value="accessory">Accessory</option>
+      </select></label>
+      <label>Brand<input id="historyEditBrand" name="brand" type="text" required></label>
+      <label>Model<input id="historyEditModel" name="model" type="text" required></label>
+      <label>Purchased<input id="historyEditPurchaseAt" name="purchase_at" type="date"></label>
+      <label>Cost CAD<input id="historyEditPurchasePrice" name="purchase_price_cad" type="number" min="0" step="1"></label>
+      <label>Price CAD<input id="historyEditPrice" name="price_cad" type="number" min="0" step="1"></label>
+      <label>Status<select id="historyEditInventoryStatus" name="inventory_status">
+        <option value="hold">Hold</option>
+        <option value="listed">Listed</option>
+        <option value="sold">Sold</option>
+      </select></label>
+      <details class="history-advanced-fields">
+        <summary>More fields</summary>
+        <div class="history-form-section">
+          <label>Mount<input id="historyEditMount" name="mount" type="text"></label>
+          <label>Listed at<input id="historyEditListedAt" name="listed_at" type="date"></label>
+          <label>Sold at<input id="historyEditSoldAt" name="sold_at" type="date"></label>
+          <label>Condition<select id="historyEditCondition" name="condition_grade">
+            <option value="unknown">Unknown</option>
+            <option value="like_new">Like new</option>
+            <option value="good">Good</option>
+            <option value="fair">Fair</option>
+            <option value="poor">Poor</option>
+            <option value="for_parts">For parts</option>
+          </select></label>
+        </div>
+      </details>
+      <label class="history-notes-field">Notes<textarea id="historyEditNotes" name="notes" rows="4"></textarea></label>
+      <div class="history-actions">
+        <button type="submit" id="historyEditSaveButton">Save & Publish</button>
+        <button type="button" class="secondary" id="historyEditCancelButton">Cancel</button>
+      </div>
+      <div class="process-meta" id="historyEditStatus"></div>
+    </form>
+  </dialog>
 
   <script type="module" src="/app/app.js"></script>
 </body>

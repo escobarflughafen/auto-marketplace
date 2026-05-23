@@ -19,6 +19,12 @@ const {
   releaseHomepageListingClaim,
   markHomepageListingInactive,
   getHomepageListingCounts,
+  createPurchaseHistoryDocument,
+  listPurchaseHistoryDocuments,
+  upsertPurchaseHistoryRows,
+  listPurchaseHistoryRows,
+  listPurchaseHistoryEvents,
+  mergePurchaseHistoryDocuments,
   runTransaction,
   appendListingEvent,
   appendWorkflowEvent,
@@ -253,6 +259,113 @@ test('worker event helpers link legacy pid audit rows to workflow runs', () => {
     });
     assert.equal(errorEvents.length, 1);
     assert.equal(errorEvents[0].worker_id, 'pid-9002');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('purchase history documents store rows and merge by record id', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const primary = createPurchaseHistoryDocument(db, {
+      name: 'Primary History',
+    });
+    const imported = createPurchaseHistoryDocument(db, {
+      name: 'Imported CSV',
+    });
+
+    upsertPurchaseHistoryRows(db, primary.document_id, [{
+      record_id: 'trade-001',
+      category: 'camera_gear',
+      subcategory: 'camera_body',
+      brand: 'nikon',
+      model: 'fm2',
+      mount: 'f-mount',
+      title: 'Nikon FM2',
+      purchase_price_cad: '200',
+      purchase_at: '2026-05-01',
+      inventory_status: 'hold',
+      outcome: 'pending',
+    }]);
+
+    upsertPurchaseHistoryRows(db, primary.document_id, [{
+      record_id: 'trade-001',
+      category: 'camera_gear',
+      subcategory: 'camera_body',
+      brand: 'nikon',
+      model: 'fm2',
+      mount: 'f-mount',
+      title: 'Nikon FM2',
+      purchase_price_cad: '200',
+      purchase_at: '2026-05-01',
+      listed_at: '2026-05-03',
+      list_price_cad: '320',
+      inventory_status: 'listed',
+      outcome: 'pending',
+    }]);
+
+    upsertPurchaseHistoryRows(db, primary.document_id, [{
+      record_id: 'trade-001',
+      category: 'camera_gear',
+      subcategory: 'camera_body',
+      brand: 'nikon',
+      model: 'fm2',
+      mount: 'f-mount',
+      title: 'Nikon FM2',
+      purchase_price_cad: '200',
+      purchase_at: '2026-05-01',
+      listed_at: '2026-05-03',
+      sold_at: '2026-05-05',
+      sold_price_cad: '300',
+      inventory_status: 'sold',
+      outcome: 'sold_profitable',
+    }]);
+
+    assert.deepEqual(
+      listPurchaseHistoryEvents(db, { documentId: primary.document_id, recordId: 'trade-001' })
+        .map((event) => event.event_type)
+        .sort(),
+      ['inventory_added', 'listed', 'sold'],
+    );
+
+    upsertPurchaseHistoryRows(db, imported.document_id, [
+      {
+        record_id: 'trade-001',
+        category: 'camera_gear',
+        subcategory: 'camera_body',
+        brand: 'nikon',
+        model: 'fm2',
+        mount: 'f-mount',
+        title: 'Nikon FM2 updated',
+        purchase_price_cad: '220',
+        outcome: 'pending',
+      },
+      {
+        record_id: 'trade-002',
+        category: 'camera_gear',
+        subcategory: 'lens',
+        brand: 'pentax',
+        model: '67-105mm',
+        mount: 'pentax-67',
+        title: 'Pentax 67 105mm',
+        purchase_price_cad: '450',
+        outcome: 'pending',
+      },
+    ]);
+
+    const merge = mergePurchaseHistoryDocuments(db, {
+      sourceDocumentId: imported.document_id,
+      targetDocumentId: primary.document_id,
+    });
+    assert.equal(merge.inserted, 1);
+    assert.equal(merge.updated, 1);
+
+    const rows = listPurchaseHistoryRows(db, primary.document_id);
+    assert.equal(rows.length, 2);
+    assert.equal(rows.find((row) => row.record_id === 'trade-001').data.title, 'Nikon FM2 updated');
+    assert.equal(listPurchaseHistoryDocuments(db).length, 2);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

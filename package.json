@@ -18,6 +18,7 @@
     "marketplace:home:tier3:dry-run": "node scripts/marketplace-tier3-verdict-dry-run.js",
     "marketplace:home:export": "node scripts/export-marketplace-homepage.js",
     "marketplace:home:serve": "node scripts/serve-marketplace-homepage.js",
+    "history:normalize-inventory": "node scripts/normalize-inventory-trading-history.js",
     "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh"
   },
   "dependencies": {

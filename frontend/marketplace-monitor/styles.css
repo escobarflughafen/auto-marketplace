@@ -592,6 +592,196 @@ button:not(:disabled):hover,
   width: 38px;
   text-align: center;
 }
+.history-document-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--fill);
+}
+.history-document-bar select {
+  min-width: 120px;
+  padding: 5px 7px;
+}
+.history-layout {
+  display: block;
+  min-width: 0;
+}
+.history-table-section {
+  min-width: 0;
+  background: #fff;
+}
+.history-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.history-form label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.history-form input,
+.history-form select,
+.history-form textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 400;
+  text-transform: none;
+}
+.history-notes-field,
+.history-actions,
+.history-advanced-fields,
+.history-form .process-meta {
+  grid-column: 1 / -1;
+}
+.history-advanced-fields {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--fill);
+}
+.history-advanced-fields summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.history-form-section {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+.history-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.history-tool-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.history-table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.history-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.history-toggle-stats-button {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.inventory-stats-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--fill);
+}
+.inventory-stats-row[hidden] {
+  display: none;
+}
+.inventory-stat {
+  min-width: 0;
+  padding: 10px 12px;
+  border-right: 1px solid var(--line);
+}
+.inventory-stat:last-child {
+  border-right: 0;
+}
+.inventory-stat-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.inventory-stat-value {
+  margin-top: 3px;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.history-tablewrap {
+  max-height: min(68vh, 760px);
+  border: 0;
+  border-radius: 0;
+}
+.history-table {
+  min-width: 1080px;
+}
+.event-registry-table {
+  min-width: 980px;
+}
+.history-table th,
+.history-table td,
+.event-registry-table th,
+.event-registry-table td {
+  padding: 8px 10px;
+}
+.history-table td:nth-child(1) {
+  min-width: 260px;
+}
+.history-item-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.history-edit-button {
+  padding: 4px 7px;
+  font-size: 12px;
+}
+.history-edit-dialog {
+  width: min(760px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  padding: 0;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-floating);
+}
+.history-compact-dialog {
+  width: min(520px, calc(100vw - 24px));
+}
+.history-edit-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.42);
+}
+.history-edit-form {
+  padding: 12px;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+}
+.history-edit-title {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
 .segmented {
   display: flex;
   gap: 0;
@@ -753,6 +943,16 @@ td code {
 .status.processing { color: var(--accent); }
 .status.error { color: var(--bad); }
 .status.done { color: var(--good); }
+.status.sold_profitable,
+.status.keeper { color: var(--good); }
+.status.loss,
+.status.condition_problem { color: var(--bad); }
+.status.sold_break_even { color: var(--warm); }
+.status.hold { color: var(--warm); }
+.status.listed { color: var(--accent); }
+.status.inventory { color: var(--good); }
+.status.listing { color: var(--accent); }
+.status.workflow { color: var(--warm); }
 .status.sold, .status.pending_sale { color: #6b7280; }
 .status.running { color: var(--accent); }
 .status.failed, .status.lost { color: var(--bad); }
@@ -1691,7 +1891,7 @@ textarea {
   :root[data-theme="classic"] .theme-field {
     padding: 0 0 2px;
   }
-  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-live-screen-grid, .worker-control-columns, .credential-grid, .settings-grid { grid-template-columns: 1fr; }
+  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-live-screen-grid, .worker-control-columns, .credential-grid, .settings-grid, .history-form, .history-form-section, .history-tool-grid { grid-template-columns: 1fr; }
   .backlog-toolbar,
   .backlog-advanced {
     align-items: stretch;
@@ -1704,6 +1904,40 @@ textarea {
   .backlog-advanced input,
   .backlog-toolbar select,
   .backlog-advanced select {
+    width: 100%;
+  }
+  .history-document-bar {
+    align-items: stretch;
+  }
+  .history-document-bar .inline-control,
+  .history-document-bar button {
+    flex: 1 1 150px;
+  }
+  .history-document-bar select {
+    width: 100%;
+  }
+  .history-edit-title {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .history-table-header,
+  .history-header-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .inventory-stats-row {
+    grid-template-columns: 1fr;
+  }
+  .inventory-stat {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .inventory-stat:last-child {
+    border-bottom: 0;
+  }
+  .history-edit-title button,
+  .history-toggle-stats-button,
+  .history-actions button {
     width: 100%;
   }
   .querybar button {

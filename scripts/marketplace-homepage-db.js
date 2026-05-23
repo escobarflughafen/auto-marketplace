@@ -308,6 +308,76 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_resolve_queue_events_run_time
     ON resolve_queue_events (workflow_run_id, event_at DESC);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_documents (
+      document_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_documents_updated
+    ON purchase_history_documents (updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_rows (
+      document_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      canonical_key TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT '',
+      subcategory TEXT NOT NULL DEFAULT '',
+      brand TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      mount TEXT NOT NULL DEFAULT '',
+      purchase_at TEXT NOT NULL DEFAULT '',
+      sold_at TEXT NOT NULL DEFAULT '',
+      outcome TEXT NOT NULL DEFAULT '',
+      data_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (document_id, record_id),
+      FOREIGN KEY (document_id) REFERENCES purchase_history_documents(document_id) ON DELETE CASCADE
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_rows_document_updated
+    ON purchase_history_rows (document_id, updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_rows_identity
+    ON purchase_history_rows (document_id, brand, model, mount);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_events (
+      event_id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      data_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES purchase_history_documents(document_id) ON DELETE CASCADE
+    );
+  `);
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_history_events_once
+    ON purchase_history_events (document_id, record_id, event_type);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_events_document_time
+    ON purchase_history_events (document_id, event_at DESC, created_at DESC);
+  `);
 }
 
 function ensureColumn(db, tableName, columnName, definitionSql) {
@@ -1003,6 +1073,500 @@ function runTransaction(db, callback) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+function normalizeDocumentId(value, fallback = 'history') {
+  const text = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  return text || fallback;
+}
+
+function uniquePurchaseHistoryDocumentId(db, name) {
+  const base = normalizeDocumentId(name || 'history');
+  let candidate = base;
+  let suffix = 2;
+  while (getPurchaseHistoryDocument(db, candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function normalizePurchaseHistoryDocumentRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    document_id: row.document_id,
+    name: row.name,
+    description: row.description || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    row_count: row.row_count || 0,
+  };
+}
+
+function normalizePurchaseHistoryRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    document_id: row.document_id,
+    record_id: row.record_id,
+    canonical_key: row.canonical_key || '',
+    title: row.title || '',
+    category: row.category || '',
+    subcategory: row.subcategory || '',
+    brand: row.brand || '',
+    model: row.model || '',
+    mount: row.mount || '',
+    purchase_at: row.purchase_at || '',
+    sold_at: row.sold_at || '',
+    outcome: row.outcome || '',
+    data: parseJsonObject(row.data_json),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function createPurchaseHistoryDocument(db, document) {
+  const now = document.createdAt || document.created_at || new Date().toISOString();
+  const name = String(document.name || 'Purchase History').trim() || 'Purchase History';
+  const documentId = String(document.documentId || document.document_id || uniquePurchaseHistoryDocumentId(db, name)).trim();
+  db.prepare(`
+    INSERT INTO purchase_history_documents (
+      document_id,
+      name,
+      description,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(document_id) DO UPDATE SET
+      name = excluded.name,
+      description = excluded.description,
+      updated_at = excluded.updated_at
+  `).run(
+    documentId,
+    name,
+    String(document.description || '').trim(),
+    now,
+    document.updatedAt || document.updated_at || now,
+  );
+  return getPurchaseHistoryDocument(db, documentId);
+}
+
+function listPurchaseHistoryDocuments(db) {
+  return db.prepare(`
+    SELECT
+      documents.*,
+      COUNT(rows.record_id) AS row_count
+    FROM purchase_history_documents documents
+    LEFT JOIN purchase_history_rows rows
+      ON rows.document_id = documents.document_id
+    GROUP BY documents.document_id
+    ORDER BY documents.updated_at DESC, documents.created_at DESC
+  `).all().map(normalizePurchaseHistoryDocumentRow);
+}
+
+function getPurchaseHistoryDocument(db, documentId) {
+  return normalizePurchaseHistoryDocumentRow(db.prepare(`
+    SELECT
+      documents.*,
+      COUNT(rows.record_id) AS row_count
+    FROM purchase_history_documents documents
+    LEFT JOIN purchase_history_rows rows
+      ON rows.document_id = documents.document_id
+    WHERE documents.document_id = ?
+    GROUP BY documents.document_id
+  `).get(String(documentId || '').trim()));
+}
+
+function deletePurchaseHistoryDocument(db, documentId) {
+  const id = String(documentId || '').trim();
+  if (!id) {
+    throw new Error('deletePurchaseHistoryDocument requires documentId');
+  }
+  return runTransaction(db, () => {
+    db.prepare('DELETE FROM purchase_history_events WHERE document_id = ?').run(id);
+    db.prepare('DELETE FROM purchase_history_rows WHERE document_id = ?').run(id);
+    const result = db.prepare('DELETE FROM purchase_history_documents WHERE document_id = ?').run(id);
+    return { deleted: result.changes || 0 };
+  });
+}
+
+function purchaseHistoryRowProjection(row) {
+  const data = row && typeof row === 'object' ? row : {};
+  const recordId = String(data.record_id || data.recordId || '').trim();
+  if (!recordId) {
+    throw new Error('purchase history row requires record_id');
+  }
+  return {
+    recordId,
+    canonicalKey: String(data.canonical_key || data.canonicalKey || '').trim(),
+    title: String(data.title || '').trim(),
+    category: String(data.category || '').trim(),
+    subcategory: String(data.subcategory || '').trim(),
+    brand: String(data.brand || '').trim().toLowerCase(),
+    model: String(data.model || '').trim().toLowerCase(),
+    mount: String(data.mount || '').trim().toLowerCase(),
+    purchaseAt: String(data.purchase_at || data.purchaseAt || '').trim(),
+    soldAt: String(data.sold_at || data.soldAt || '').trim(),
+    outcome: String(data.outcome || '').trim(),
+    data: {
+      ...data,
+      record_id: recordId,
+    },
+  };
+}
+
+function normalizeInventoryStatus(data = {}) {
+  const status = String(data.inventory_status || data.inventoryStatus || '').trim().toLowerCase();
+  if (status === 'hold' || status === 'listed' || status === 'sold') {
+    return status;
+  }
+  const outcome = String(data.outcome || '').trim();
+  if (
+    data.decision === 'sold'
+    || data.sold_at
+    || data.sold_price_cad
+    || outcome === 'sold_profitable'
+    || outcome === 'sold_break_even'
+    || outcome === 'loss'
+  ) {
+    return 'sold';
+  }
+  if (data.listed_at || data.list_price_cad) {
+    return 'listed';
+  }
+  return 'hold';
+}
+
+function purchaseHistoryLifecycleEvents(data = {}) {
+  const status = normalizeInventoryStatus(data);
+  const addedAt = String(data.purchase_at || data.decision_at || data.created_at || '').trim();
+  const listedAt = String(data.listed_at || '').trim();
+  const soldAt = String(data.sold_at || '').trim();
+  const events = [{
+    eventType: 'inventory_added',
+    eventAt: addedAt || new Date().toISOString(),
+  }];
+  if (status === 'listed' || status === 'sold' || listedAt) {
+    events.push({
+      eventType: 'listed',
+      eventAt: listedAt || addedAt || new Date().toISOString(),
+    });
+  }
+  if (status === 'sold' || soldAt || data.sold_price_cad) {
+    events.push({
+      eventType: 'sold',
+      eventAt: soldAt || listedAt || addedAt || new Date().toISOString(),
+    });
+  }
+  return events;
+}
+
+function appendPurchaseHistoryEvent(db, event) {
+  const documentId = String(event.documentId || event.document_id || '').trim();
+  const recordId = String(event.recordId || event.record_id || '').trim();
+  const eventType = String(event.eventType || event.event_type || '').trim();
+  if (!documentId || !recordId || !eventType) {
+    throw new Error('purchase history event requires documentId, recordId, and eventType');
+  }
+  const createdAt = event.createdAt || event.created_at || new Date().toISOString();
+  const eventAt = String(event.eventAt || event.event_at || createdAt).trim();
+  const eventId = String(event.eventId || event.event_id || `${documentId}:${recordId}:${eventType}`).trim();
+  db.prepare(`
+    INSERT OR IGNORE INTO purchase_history_events (
+      event_id,
+      document_id,
+      record_id,
+      event_type,
+      event_at,
+      data_json,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    eventId,
+    documentId,
+    recordId,
+    eventType,
+    eventAt,
+    serializeJson(event.data || {}),
+    createdAt,
+  );
+}
+
+function emitPurchaseHistoryLifecycleEvents(db, documentId, projection, previousData, now) {
+  const previousTypes = new Set(purchaseHistoryLifecycleEvents(previousData || {}).map((event) => event.eventType));
+  for (const event of purchaseHistoryLifecycleEvents(projection.data)) {
+    if (previousData && previousTypes.has(event.eventType)) {
+      continue;
+    }
+    appendPurchaseHistoryEvent(db, {
+      documentId,
+      recordId: projection.recordId,
+      eventType: event.eventType,
+      eventAt: event.eventAt,
+      createdAt: now,
+      data: {
+        title: projection.title,
+        inventory_status: normalizeInventoryStatus(projection.data),
+        price_cad: projection.data.sold_price_cad || projection.data.list_price_cad || '',
+      },
+    });
+  }
+}
+
+function upsertPurchaseHistoryRows(db, documentId, rows, options = {}) {
+  const id = String(documentId || '').trim();
+  if (!id) {
+    throw new Error('upsertPurchaseHistoryRows requires documentId');
+  }
+  const document = getPurchaseHistoryDocument(db, id);
+  if (!document) {
+    throw new Error(`Unknown purchase history document: ${id}`);
+  }
+  const incomingRows = Array.isArray(rows) ? rows : [rows];
+  const now = options.updatedAt || new Date().toISOString();
+  return runTransaction(db, () => {
+    let inserted = 0;
+    let updated = 0;
+    const statement = db.prepare(`
+      INSERT INTO purchase_history_rows (
+        document_id,
+        record_id,
+        canonical_key,
+        title,
+        category,
+        subcategory,
+        brand,
+        model,
+        mount,
+        purchase_at,
+        sold_at,
+        outcome,
+        data_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(document_id, record_id) DO UPDATE SET
+        canonical_key = excluded.canonical_key,
+        title = excluded.title,
+        category = excluded.category,
+        subcategory = excluded.subcategory,
+        brand = excluded.brand,
+        model = excluded.model,
+        mount = excluded.mount,
+        purchase_at = excluded.purchase_at,
+        sold_at = excluded.sold_at,
+        outcome = excluded.outcome,
+        data_json = excluded.data_json,
+        updated_at = excluded.updated_at
+    `);
+
+    for (const row of incomingRows) {
+      const projection = purchaseHistoryRowProjection(row);
+      const previous = db.prepare(`
+        SELECT record_id, data_json
+        FROM purchase_history_rows
+        WHERE document_id = ? AND record_id = ?
+      `).get(id, projection.recordId);
+      statement.run(
+        id,
+        projection.recordId,
+        projection.canonicalKey,
+        projection.title,
+        projection.category,
+        projection.subcategory,
+        projection.brand,
+        projection.model,
+        projection.mount,
+        projection.purchaseAt,
+        projection.soldAt,
+        projection.outcome,
+        serializeJson(projection.data),
+        now,
+        now,
+      );
+      emitPurchaseHistoryLifecycleEvents(
+        db,
+        id,
+        projection,
+        previous ? parseJsonObject(previous.data_json) : null,
+        now,
+      );
+      if (previous) {
+        updated += 1;
+      } else {
+        inserted += 1;
+      }
+    }
+
+    db.prepare(`
+      UPDATE purchase_history_documents
+      SET updated_at = ?
+      WHERE document_id = ?
+    `).run(now, id);
+
+    return {
+      document: getPurchaseHistoryDocument(db, id),
+      inserted,
+      updated,
+      total: incomingRows.length,
+    };
+  });
+}
+
+function listPurchaseHistoryRows(db, documentId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 10000;
+  return db.prepare(`
+    SELECT *
+    FROM purchase_history_rows
+    WHERE document_id = ?
+    ORDER BY COALESCE(purchase_at, '') DESC, updated_at DESC, record_id DESC
+    LIMIT ?
+  `).all(String(documentId || '').trim(), limit).map(normalizePurchaseHistoryRow);
+}
+
+function normalizePurchaseHistoryEventRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    event_id: row.event_id,
+    document_id: row.document_id,
+    record_id: row.record_id,
+    event_type: row.event_type,
+    event_at: row.event_at,
+    data: parseJsonObject(row.data_json),
+    created_at: row.created_at,
+  };
+}
+
+function listPurchaseHistoryEvents(db, options = {}) {
+  const documentId = String(options.documentId || options.document_id || '').trim();
+  const recordId = String(options.recordId || options.record_id || '').trim();
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 1000;
+  const filters = [];
+  const params = [];
+  if (documentId) {
+    filters.push('document_id = ?');
+    params.push(documentId);
+  }
+  if (recordId) {
+    filters.push('record_id = ?');
+    params.push(recordId);
+  }
+  params.push(limit);
+  return db.prepare(`
+    SELECT *
+    FROM purchase_history_events
+    ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+    ORDER BY event_at DESC, created_at DESC
+    LIMIT ?
+  `).all(...params).map(normalizePurchaseHistoryEventRow);
+}
+
+function normalizeEventRegistryRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    source: row.source,
+    event_id: row.event_id,
+    event_type: row.event_type,
+    event_at: row.event_at,
+    status: row.status || '',
+    subject_id: row.subject_id || '',
+    title: row.title || '',
+    data: parseJsonObject(row.data_json),
+  };
+}
+
+function listEventRegistry(db, options = {}) {
+  const source = String(options.source || 'all').trim().toLowerCase();
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 200;
+  const rows = db.prepare(`
+    SELECT *
+    FROM (
+      SELECT
+        'inventory' AS source,
+        events.event_id,
+        events.event_type,
+        events.event_at,
+        COALESCE(rows.outcome, '') AS status,
+        events.record_id AS subject_id,
+        COALESCE(rows.title, events.record_id) AS title,
+        events.data_json
+      FROM purchase_history_events events
+      LEFT JOIN purchase_history_rows rows
+        ON rows.document_id = events.document_id
+        AND rows.record_id = events.record_id
+      UNION ALL
+      SELECT
+        'listing' AS source,
+        events.event_id,
+        events.event_type,
+        events.event_at,
+        events.status,
+        events.listing_id AS subject_id,
+        COALESCE(listings.detail_title, listings.card_title, events.listing_id) AS title,
+        events.content_json AS data_json
+      FROM listing_events events
+      LEFT JOIN homepage_listings listings
+        ON listings.listing_id = events.listing_id
+      UNION ALL
+      SELECT
+        'workflow' AS source,
+        events.event_id,
+        events.event_type,
+        events.event_at,
+        events.status,
+        events.workflow_run_id AS subject_id,
+        COALESCE(runs.label, events.workflow_run_id) AS title,
+        events.content_json AS data_json
+      FROM workflow_events events
+      LEFT JOIN workflow_runs runs
+        ON runs.run_id = events.workflow_run_id
+    )
+    WHERE (? = 'all' OR source = ?)
+    ORDER BY event_at DESC
+    LIMIT ?
+  `).all(source, source, limit);
+  return rows.map(normalizeEventRegistryRow);
+}
+
+function mergePurchaseHistoryDocuments(db, options = {}) {
+  const sourceDocumentId = String(options.sourceDocumentId || options.source_document_id || '').trim();
+  const targetDocumentId = String(options.targetDocumentId || options.target_document_id || '').trim();
+  if (!sourceDocumentId || !targetDocumentId) {
+    throw new Error('mergePurchaseHistoryDocuments requires sourceDocumentId and targetDocumentId');
+  }
+  if (sourceDocumentId === targetDocumentId) {
+    throw new Error('Cannot merge a purchase history document into itself');
+  }
+  const source = getPurchaseHistoryDocument(db, sourceDocumentId);
+  const target = getPurchaseHistoryDocument(db, targetDocumentId);
+  if (!source) {
+    throw new Error(`Unknown source purchase history document: ${sourceDocumentId}`);
+  }
+  if (!target) {
+    throw new Error(`Unknown target purchase history document: ${targetDocumentId}`);
+  }
+  const sourceRows = listPurchaseHistoryRows(db, sourceDocumentId).map((row) => row.data);
+  const result = upsertPurchaseHistoryRows(db, targetDocumentId, sourceRows);
+  return {
+    source,
+    target: getPurchaseHistoryDocument(db, targetDocumentId),
+    inserted: result.inserted,
+    updated: result.updated,
+    total: result.total,
+  };
 }
 
 function buildResolveQueueEventId(eventAt, listingId, eventType) {
@@ -2077,6 +2641,16 @@ module.exports = {
   releaseHomepageListingClaim,
   markHomepageListingInactive,
   getHomepageListingCounts,
+  createPurchaseHistoryDocument,
+  listPurchaseHistoryDocuments,
+  getPurchaseHistoryDocument,
+  deletePurchaseHistoryDocument,
+  upsertPurchaseHistoryRows,
+  listPurchaseHistoryRows,
+  mergePurchaseHistoryDocuments,
+  appendPurchaseHistoryEvent,
+  listPurchaseHistoryEvents,
+  listEventRegistry,
   hashContent,
   runTransaction,
   appendListingEvent,
