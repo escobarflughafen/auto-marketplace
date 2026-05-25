@@ -99,7 +99,7 @@ function runtimeArgs() {
 function apiUrl(url) {
   const token = new URLSearchParams(window.location.search).get('token')
     || new URLSearchParams(window.location.search).get('apiToken');
-  if (!token || !String(url).startsWith('/api/')) {
+  if (!token || !/^\/(?:api|files)\//.test(String(url))) {
     return url;
   }
   const next = new URL(url, window.location.origin);
@@ -168,10 +168,10 @@ function actionsFormatter(cell) {
     actions.push(`<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>`);
   }
   if (row.screenshotUrl) {
-    actions.push(`<a class="button-link compact" href="${escapeHtml(row.screenshotUrl)}" target="_blank" rel="noreferrer">Shot</a>`);
+    actions.push(`<a class="button-link compact" href="${escapeHtml(apiUrl(row.screenshotUrl))}" target="_blank" rel="noreferrer">Shot</a>`);
   }
   if (row.snapshotUrl) {
-    actions.push(`<a class="button-link compact" href="${escapeHtml(row.snapshotUrl)}" target="_blank" rel="noreferrer">MD</a>`);
+    actions.push(`<a class="button-link compact" href="${escapeHtml(apiUrl(row.snapshotUrl))}" target="_blank" rel="noreferrer">MD</a>`);
   }
   return `<div class="row-actions">${actions.join('')}</div>`;
 }
@@ -454,8 +454,10 @@ export function createListingsViewer() {
     positionSnapshotPanel();
     els.snapshotTitle.textContent = displayTitleForRow(row);
     els.snapshotMeta.textContent = `${row.listing_id} · ${row.detail_status} · ${row.source || 'unknown source'}${row.source_keyword ? ' · ' + row.source_keyword : ''}`;
-    els.snapshotImageWrap.innerHTML = row.screenshotUrl
-      ? `<a href="${escapeHtml(row.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="snapshot-image" src="${escapeHtml(row.screenshotUrl)}" alt="Worker screenshot for ${escapeHtml(row.listing_id)}"></a>`
+    const screenshotUrl = row.screenshotUrl ? apiUrl(row.screenshotUrl) : '';
+    const snapshotUrl = row.snapshotUrl ? apiUrl(row.snapshotUrl) : '';
+    els.snapshotImageWrap.innerHTML = screenshotUrl
+      ? `<a href="${escapeHtml(screenshotUrl)}" target="_blank" rel="noreferrer"><img class="snapshot-image" src="${escapeHtml(screenshotUrl)}" alt="Worker screenshot for ${escapeHtml(row.listing_id)}"></a>`
       : '<div class="empty-state">Worker screenshot appears after detail capture. Current row data is shown below.</div>';
     const details = [
       resolved ? null : ['Detail capture', 'Available row data is shown until capture completes.'],
@@ -481,8 +483,8 @@ export function createListingsViewer() {
     )).join('');
     els.snapshotLinks.innerHTML = [
       row.href ? `<a class="button-link" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">Facebook</a>` : '',
-      row.snapshotUrl ? `<a class="button-link" href="${escapeHtml(row.snapshotUrl)}" target="_blank" rel="noreferrer">Snapshot</a>` : '',
-      row.screenshotUrl ? `<a class="button-link" href="${escapeHtml(row.screenshotUrl)}" target="_blank" rel="noreferrer">Screenshot</a>` : '',
+      snapshotUrl ? `<a class="button-link" href="${escapeHtml(snapshotUrl)}" target="_blank" rel="noreferrer">Snapshot</a>` : '',
+      screenshotUrl ? `<a class="button-link" href="${escapeHtml(screenshotUrl)}" target="_blank" rel="noreferrer">Screenshot</a>` : '',
     ].filter(Boolean).join('');
   }
 
@@ -1039,16 +1041,33 @@ export function createListingsViewer() {
     renderResolveControls();
   }
 
+  async function setListingView(viewId, options = {}) {
+    const nextViewId = viewId === 'backlogQueueView' ? 'backlogQueueView' : 'queryResultsView';
+    const tab = document.querySelector(`.listing-subtabs .subtab[data-listing-view="${nextViewId}"]`);
+    const view = document.getElementById(nextViewId);
+    if (!tab || !view) return;
+    for (const item of document.querySelectorAll('.listing-subtabs .subtab')) item.classList.remove('active');
+    for (const item of document.querySelectorAll('.listing-view')) item.classList.remove('active');
+    tab.classList.add('active');
+    view.classList.add('active');
+    if (nextViewId === 'backlogQueueView' && state.backlogRows.length === 0 && options.load !== false) {
+      await loadBacklogQueue();
+    }
+    if (options.notify) {
+      document.dispatchEvent(new CustomEvent('marketplace-listing-view-change', {
+        detail: { listingView: nextViewId },
+      }));
+    }
+  }
+
+  function activeListingView() {
+    return document.querySelector('.listing-view.active')?.id || 'queryResultsView';
+  }
+
   function bindEvents() {
     for (const tab of document.querySelectorAll('.listing-subtabs .subtab')) {
       tab.addEventListener('click', async () => {
-        for (const item of document.querySelectorAll('.listing-subtabs .subtab')) item.classList.remove('active');
-        for (const view of document.querySelectorAll('.listing-view')) view.classList.remove('active');
-        tab.classList.add('active');
-        document.getElementById(tab.dataset.listingView).classList.add('active');
-        if (tab.dataset.listingView === 'backlogQueueView' && state.backlogRows.length === 0) {
-          await loadBacklogQueue();
-        }
+        await setListingView(tab.dataset.listingView, { notify: true });
       });
     }
     document.getElementById('queryForm').addEventListener('submit', async (event) => {
@@ -1239,5 +1258,7 @@ export function createListingsViewer() {
     loadResolveQueue,
     loadBacklogQueue,
     loadRows,
+    setListingView,
+    activeListingView,
   };
 }

@@ -8,6 +8,15 @@ const WORKFLOW_SELECTION_STORAGE_KEY = 'marketplace-monitor-selected-workflow';
 const WORKFLOW_ACTIVE_POLL_MS = 5000;
 const WORKFLOW_IDLE_POLL_MS = 15000;
 const WORKFLOW_HIDDEN_POLL_MS = 30000;
+const DEFAULT_ROUTE = '/listings';
+const ROUTES = {
+  '/listings': { panel: 'listingsPanel', listingView: 'queryResultsView' },
+  '/listings/backlog': { panel: 'listingsPanel', listingView: 'backlogQueueView' },
+  '/history': { panel: 'historyPanel' },
+  '/review': { panel: 'reviewPanel' },
+  '/workers': { panel: 'opsPanel' },
+  '/settings': { panel: 'settingsPanel' },
+};
 
 function readJsonStorage(key, fallback) {
   try {
@@ -133,7 +142,7 @@ function renderTokenWarning() {
 
 function apiUrl(url) {
   const token = apiToken();
-  if (!token || !String(url).startsWith('/api/')) {
+  if (!token || !/^\/(?:api|files)\//.test(String(url))) {
     return url;
   }
   const next = new URL(url, window.location.origin);
@@ -1685,7 +1694,7 @@ function renderProcesses(options = {}) {
   document.body.classList.toggle('worker-inspector-open', Boolean(selectedProcess));
   els.processList.innerHTML = '<div class="card">'
     + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Worker status, current listing, and recent activity.</div></div></div>'
-    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Listing</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
+    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Work</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
     + rows
     + '</tbody></table></div>'
     + '</div>'
@@ -1780,8 +1789,8 @@ function workerDetailSectionRow(section, contentHtml) {
 
 function workerEventLinks(event) {
   return [
-    event?.screenshotUrl ? `<a class="button-link compact" href="${html(event.screenshotUrl)}" target="_blank" rel="noreferrer">Shot</a>` : '',
-    event?.snapshotUrl ? `<a class="button-link compact" href="${html(event.snapshotUrl)}" target="_blank" rel="noreferrer">MD</a>` : '',
+    event?.screenshotUrl ? `<a class="button-link compact" href="${html(apiUrl(event.screenshotUrl))}" target="_blank" rel="noreferrer">Shot</a>` : '',
+    event?.snapshotUrl ? `<a class="button-link compact" href="${html(apiUrl(event.snapshotUrl))}" target="_blank" rel="noreferrer">MD</a>` : '',
     event?.source_url ? `<a class="button-link compact" href="${html(event.source_url)}" target="_blank" rel="noreferrer">FB</a>` : '',
   ].filter(Boolean).join('');
 }
@@ -1827,15 +1836,15 @@ function renderWorkerScreenshotHistory(selectedProcess) {
 
   const latest = screenshots[0];
   const thumbs = screenshots.slice(0, 24).map((shot, index) => (
-    `<a class="worker-shot-thumb${index === 0 ? ' active' : ''}" href="${html(shot.url)}" target="_blank" rel="noreferrer" title="${html(formatDate(shot.capturedAt))}">`
-      + `<img src="${html(shot.url)}" alt="Worker screenshot ${html(index + 1)}">`
+    `<a class="worker-shot-thumb${index === 0 ? ' active' : ''}" href="${html(apiUrl(shot.url))}" target="_blank" rel="noreferrer" title="${html(formatDate(shot.capturedAt))}">`
+      + `<img src="${html(apiUrl(shot.url))}" alt="Worker screenshot ${html(index + 1)}">`
       + `<span>${html(formatDate(shot.capturedAt))}</span>`
     + '</a>'
   )).join('');
 
   return '<div class="worker-live-screen-grid">'
     + '<div class="worker-live-screen-frame">'
-    + `<a href="${html(latest.url)}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(latest.url)}" alt="Latest live worker screenshot"></a>`
+    + `<a href="${html(apiUrl(latest.url))}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(apiUrl(latest.url))}" alt="Latest live worker screenshot"></a>`
     + '</div>'
     + '<div class="worker-live-screen-side">'
     + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>'
@@ -1912,7 +1921,7 @@ function renderWorkerDetail(selectedProcess) {
     detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="worker-preview-grid">'
       + '<div class="worker-preview-frame">'
       + (previewEvent.screenshotUrl
-        ? `<a href="${html(previewEvent.screenshotUrl)}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(previewEvent.screenshotUrl)}" alt="Latest worker screenshot"></a>`
+        ? `<a href="${html(apiUrl(previewEvent.screenshotUrl))}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(apiUrl(previewEvent.screenshotUrl))}" alt="Latest worker screenshot"></a>`
         : '<div class="empty-state">Screenshot preview appears after capture.</div>')
       + '</div>'
       + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + previewRows + (workerEventLinks(previewEvent) ? `<tr><th>Links</th><td><div class="row-actions">${workerEventLinks(previewEvent)}</div></td></tr>` : '') + '</tbody></table></div>'
@@ -2081,6 +2090,69 @@ async function syncWorkflowsInBackground() {
   }
 }
 
+function normalizeRoute(value = window.location.hash) {
+  const raw = String(value || '').replace(/^#/, '').trim();
+  const pathOnly = raw.split('?')[0].replace(/\/+$/, '') || DEFAULT_ROUTE;
+  if (pathOnly === '/backlog') return '/listings/backlog';
+  if (pathOnly === '/ops') return '/workers';
+  return ROUTES[pathOnly] ? pathOnly : DEFAULT_ROUTE;
+}
+
+function routeForPanel(panelId) {
+  return Object.entries(ROUTES).find(([, route]) => route.panel === panelId && !route.listingView)?.[0]
+    || Object.entries(ROUTES).find(([, route]) => route.panel === panelId)?.[0]
+    || DEFAULT_ROUTE;
+}
+
+function routeForListingView(listingView) {
+  return listingView === 'backlogQueueView' ? '/listings/backlog' : '/listings';
+}
+
+function updateLocationRoute(routePath, options = {}) {
+  const nextHash = `#${routePath}`;
+  if (window.location.hash === nextHash) return;
+  if (options.replace) {
+    window.history.replaceState(null, '', nextHash);
+  } else {
+    window.history.pushState(null, '', nextHash);
+  }
+}
+
+async function runRouteLoader(routePath) {
+  if (!hasApiToken()) return;
+  const route = ROUTES[routePath] || ROUTES[DEFAULT_ROUTE];
+  if (route.listingView === 'backlogQueueView') {
+    await listingsViewer.setListingView('backlogQueueView', { notify: false });
+  } else if (route.listingView) {
+    await listingsViewer.setListingView(route.listingView, { load: false, notify: false });
+  }
+  if (route.panel === 'reviewPanel') {
+    await loadEventRegistry();
+  } else if (route.panel === 'opsPanel') {
+    await loadWorkflows();
+    scheduleWorkflowSync();
+  }
+}
+
+async function navigateToRoute(routePath, options = {}) {
+  const normalized = normalizeRoute(routePath);
+  const route = ROUTES[normalized] || ROUTES[DEFAULT_ROUTE];
+  for (const item of document.querySelectorAll('.tab')) {
+    item.classList.toggle('active', item.dataset.panel === route.panel);
+  }
+  for (const panel of document.querySelectorAll('.panel')) {
+    panel.classList.toggle('active', panel.id === route.panel);
+  }
+  updateLocationRoute(normalized, options);
+  await runRouteLoader(normalized);
+}
+
+function applyRouteFromLocation(options = {}) {
+  navigateToRoute(normalizeRoute(window.location.hash), { replace: options.replace !== false }).catch((error) => {
+    alert(error.message || 'Route could not be loaded.');
+  });
+}
+
 function bindEvents() {
   setTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
   document.addEventListener('keydown', (event) => {
@@ -2094,27 +2166,23 @@ function bindEvents() {
   });
   for (const tab of document.querySelectorAll('.tab')) {
     tab.addEventListener('click', async () => {
-      for (const item of document.querySelectorAll('.tab')) item.classList.remove('active');
-      for (const panel of document.querySelectorAll('.panel')) panel.classList.remove('active');
-      tab.classList.add('active');
-      document.getElementById(tab.dataset.panel).classList.add('active');
-      if (tab.dataset.panel === 'reviewPanel') {
-        try {
-          await loadEventRegistry();
-        } catch (error) {
-          alert(error.message || 'Event registry could not be loaded.');
-        }
-      }
-      if (tab.dataset.panel === 'opsPanel') {
-        try {
-          await loadWorkflows();
-          scheduleWorkflowSync();
-        } catch (error) {
-          alert(error.message || 'Workers could not be loaded.');
-        }
+      try {
+        await navigateToRoute(routeForPanel(tab.dataset.panel));
+      } catch (error) {
+        alert(error.message || 'Route could not be loaded.');
       }
     });
   }
+  document.addEventListener('marketplace-listing-view-change', (event) => {
+    navigateToRoute(routeForListingView(event.detail?.listingView), { replace: false }).catch((error) => {
+      alert(error.message || 'Listing route could not be loaded.');
+    });
+  });
+  window.addEventListener('hashchange', () => {
+    navigateToRoute(normalizeRoute(window.location.hash), { replace: true }).catch((error) => {
+      alert(error.message || 'Route could not be loaded.');
+    });
+  });
   els.historyForm?.addEventListener('submit', savePurchaseHistoryRow);
   document.getElementById('historyResetButton')?.addEventListener('click', () => {
     els.historyForm?.reset();
@@ -2265,10 +2333,12 @@ if (hasApiToken()) {
   await loadCredentials({ render: false });
   renderSettings();
   await loadWorkflows();
+  applyRouteFromLocation({ replace: !window.location.hash });
   setInterval(loadSummary, 10000);
   scheduleWorkflowSync();
 } else {
   els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Token needed</div></div>';
   renderPurchaseHistory();
   renderSettings();
+  applyRouteFromLocation({ replace: !window.location.hash });
 }

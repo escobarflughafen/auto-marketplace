@@ -379,6 +379,12 @@ const WORKFLOWS = {
   },
 };
 
+const WORKFLOW_CONCURRENCY_LIMITS = {
+  collector: 1,
+  resolver: 2,
+  worker: 1,
+};
+
 const QUERY_FIELDS = [
   { value: 'id', label: 'Listing ID', type: 'text' },
   { value: 'status', label: 'Status', type: 'enum', values: ['pending', 'processing', 'done', 'error', 'sold', 'pending_sale'] },
@@ -469,8 +475,16 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function workflowTypeForId(workflowId) {
+  return WORKFLOWS[workflowId]?.workerType || 'worker';
+}
+
+function workflowConcurrencyLimit(workerType) {
+  return WORKFLOW_CONCURRENCY_LIMITS[workerType] || WORKFLOW_CONCURRENCY_LIMITS.worker;
+}
+
 function isManagedStatusActive(status) {
-  return status === 'starting' || status === 'running' || status === 'stopping';
+  return status === 'starting' || status === 'running' || status === 'stopping' || status === 'stop_failed';
 }
 
 function pidIsAlive(pid) {
@@ -541,6 +555,7 @@ function publicProcessRecord(record) {
   return {
     id: record.id,
     workflowId: record.workflowId,
+    workerType: workflowTypeForId(record.workflowId),
     label: record.label,
     script: record.script,
     args: record.args,
@@ -565,6 +580,7 @@ function publicWorkflowRunRecord(run, options = {}) {
   return {
     id: run.run_id,
     workflowId: run.workflow_id,
+    workerType: workflowTypeForId(run.workflow_id),
     label: run.label,
     script: run.script,
     args: run.args,
@@ -607,7 +623,7 @@ function stripLogPrefix(line) {
 }
 
 function latestActionFromLogs(logs = []) {
-  return logs.slice().reverse().find((line) => /job_start|job_done|job_error|job_bypassed|backlog_sleep|backlog_item_sleep|backlog_exit/.test(line))
+  return logs.slice().reverse().find((line) => /job_start|job_done|job_error|job_bypassed|backlog_sleep|backlog_item_sleep|backlog_exit|cycle_start|cycle_done|collector_sleep|collector_exit|round_start|round_done|search_explorer_sleep|search_explorer_exit/.test(line))
     || logs[logs.length - 1]
     || '';
 }
@@ -622,6 +638,11 @@ function runtimeStatsFromLogs(logs = []) {
   const stats = { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
   for (const line of logs) {
     const listingMatch = line.match(/listing_id=([^\s]+)/);
+    const collectedMatch = line.match(/\bcollected=(\d+)/);
+    const newMatch = line.match(/\bnew=(\d+)/);
+    const sameMatch = line.match(/\bexisting_same=(\d+)/);
+    const updatedMatch = line.match(/\bexisting_updated=(\d+)/);
+    const queryMatch = line.match(/\bquery="([^"]+)"/);
     if (/job_start/.test(line)) {
       stats.attempted += 1;
       stats.currentListingId = listingMatch?.[1] || stats.currentListingId;
@@ -636,6 +657,28 @@ function runtimeStatsFromLogs(logs = []) {
       stats.currentListingId = '';
     } else if (/backlog_sleep|backlog_item_sleep/.test(line)) {
       stats.sleeps += 1;
+    } else if (/cycle_start/.test(line)) {
+      stats.attempted += 1;
+      stats.currentListingId = 'feed';
+    } else if (/round_start/.test(line)) {
+      stats.attempted += 1;
+      stats.currentListingId = queryMatch?.[1] ? `search: ${queryMatch[1]}` : 'search';
+    } else if (/cycle_done|round_done/.test(line)) {
+      stats.done += collectedMatch ? Number.parseInt(collectedMatch[1], 10) : 0;
+      stats.bypassed += (sameMatch ? Number.parseInt(sameMatch[1], 10) : 0)
+        + (updatedMatch ? Number.parseInt(updatedMatch[1], 10) : 0);
+      if (newMatch) {
+        stats.currentListingId = `${newMatch[1]} new`;
+      } else {
+        stats.currentListingId = '';
+      }
+    } else if (/collector_sleep|search_explorer_sleep/.test(line)) {
+      stats.sleeps += 1;
+      stats.currentListingId = 'sleeping';
+    } else if (/collector_exit|search_explorer_exit/.test(line)) {
+      stats.currentListingId = '';
+    } else if (/collect_marketplace_search_explorer_error|collector_.*error|search_explorer_.*error/.test(line)) {
+      stats.errors += 1;
     }
   }
   return stats;
@@ -919,8 +962,11 @@ function startManagedWorkflow(db, workflowId, extraArgs = []) {
   }
 
   const running = getRunningManagedProcesses(db);
-  if (running.length > 0) {
-    const error = new Error(`A workflow is already running: ${running[0].label}`);
+  const workerType = workflow.workerType || 'worker';
+  const limit = workflowConcurrencyLimit(workerType);
+  const runningForType = running.filter((record) => (record.workerType || workflowTypeForId(record.workflowId)) === workerType);
+  if (runningForType.length >= limit) {
+    const error = new Error(`${workerType} worker limit reached: ${runningForType.length}/${limit} running`);
     error.statusCode = 409;
     throw error;
   }
@@ -1608,6 +1654,18 @@ function contentTypeForPath(filePath) {
   }
 }
 
+function isPublicScriptOrStylePath(filePath) {
+  return ['.css', '.js', '.mjs'].includes(path.extname(filePath).toLowerCase());
+}
+
+function requireReadAccess(response, access) {
+  if (access.role) {
+    return true;
+  }
+  writeAuthError(response, access);
+  return false;
+}
+
 function serveStaticFrontend(response, relativePath) {
   const requestedPath = path.resolve(FRONTEND_DIR, relativePath);
   const relative = path.relative(FRONTEND_DIR, requestedPath);
@@ -1767,9 +1825,7 @@ function createServer(options) {
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
-    const access = requestUrl.pathname.startsWith('/api/')
-      ? accessForRequest(options, request, requestUrl)
-      : { role: 'public', canWrite: false };
+    const access = accessForRequest(options, request, requestUrl);
 
     if (requestUrl.pathname === '/healthz') {
       writeJson(response, 200, {
@@ -1785,12 +1841,20 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname.startsWith('/app/')) {
-      serveStaticFrontend(response, decodeURIComponent(requestUrl.pathname.replace(/^\/app\//, '')));
+      const relativePath = decodeURIComponent(requestUrl.pathname.replace(/^\/app\//, ''));
+      if (!isPublicScriptOrStylePath(relativePath) && !requireReadAccess(response, access)) {
+        return;
+      }
+      serveStaticFrontend(response, relativePath);
       return;
     }
 
     if (requestUrl.pathname.startsWith('/vendor/tabulator/')) {
-      serveVendorAsset(response, decodeURIComponent(requestUrl.pathname.replace(/^\/vendor\/tabulator\//, '')));
+      const relativePath = decodeURIComponent(requestUrl.pathname.replace(/^\/vendor\/tabulator\//, ''));
+      if (!isPublicScriptOrStylePath(relativePath) && !requireReadAccess(response, access)) {
+        return;
+      }
+      serveVendorAsset(response, relativePath);
       return;
     }
 
@@ -2391,6 +2455,9 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname.startsWith('/files/')) {
+      if (!requireReadAccess(response, access)) {
+        return;
+      }
       const filePath = resolveFilePathFromRequest(requestUrl.pathname);
       if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
         writeJson(response, 404, { error: 'File not found' });
