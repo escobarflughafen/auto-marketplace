@@ -11,7 +11,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
-  <link rel="stylesheet" href="/app/styles.css">
+  <link rel="stylesheet" href="/app/styles.css?v=history-grid-20260525">
 </head>
 <body>
   <div class="shell">
@@ -281,27 +281,7 @@
               </div>
             </div>
             <div class="inventory-stats-row" id="historyInventoryStatsRow"></div>
-            <div class="tablewrap history-tablewrap" tabindex="0">
-              <table class="history-table">
-                <thead>
-                  <tr>
-                    <th><button type="button" class="sort-button" data-history-sort="title">Item</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="subcategory">Kind</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="cost">Cost</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="price">Price</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="status">Status</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="profit">Profit</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="roi">ROI</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="result">Result</button></th>
-                    <th><button type="button" class="sort-button" data-history-sort="date">Dates</button></th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="historyTableBody">
-                  <tr><td colspan="10" class="empty-state">History appears here.</td></tr>
-                </tbody>
-              </table>
-            </div>
+            <div id="historyTable" class="utility-table history-tabulator"></div>
           </section>
         </div>
       </section>
@@ -528,6 +508,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="/app/app.js"></script>
+  <script type="module" src="/app/app.js?v=history-grid-20260525"></script>
 </body>
 </html>

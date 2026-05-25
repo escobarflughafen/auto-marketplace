@@ -228,6 +228,7 @@ export function createListingsViewer() {
     resolveMessage: 'Resolve queue is ready.',
     resolveProcessId: '',
     resolvePollTimer: null,
+    resolvePollInFlight: false,
     table: null,
   };
 
@@ -773,14 +774,16 @@ export function createListingsViewer() {
 
   function stopResolveWatcher() {
     if (state.resolvePollTimer) {
-      clearInterval(state.resolvePollTimer);
+      clearTimeout(state.resolvePollTimer);
       state.resolvePollTimer = null;
     }
+    state.resolvePollInFlight = false;
+    state.resolveProcessId = '';
   }
 
   async function pollResolveProcess() {
     if (!state.resolveProcessId) return;
-    const payload = await fetchJson('/api/workflows');
+    const payload = await fetchJson('/api/workflows?reconcile=0&stats=0');
     const proc = (payload.processes || []).find((item) => item.id === state.resolveProcessId);
     if (!proc) return;
 
@@ -801,16 +804,36 @@ export function createListingsViewer() {
     await loadRows();
   }
 
+  function scheduleResolvePoll(delay = 2000) {
+    if (state.resolvePollTimer) {
+      clearTimeout(state.resolvePollTimer);
+    }
+    state.resolvePollTimer = setTimeout(async () => {
+      if (state.resolvePollInFlight) {
+        scheduleResolvePoll();
+        return;
+      }
+      state.resolvePollInFlight = true;
+      try {
+        await pollResolveProcess();
+      } catch (error) {
+        stopResolveWatcher();
+        renderResolveControls(`Detail worker status not available: ${error.message}`);
+        return;
+      } finally {
+        state.resolvePollInFlight = false;
+      }
+      if (state.resolveProcessId) {
+        scheduleResolvePoll();
+      }
+    }, delay);
+  }
+
   function watchResolveProcess(processId) {
     stopResolveWatcher();
     state.resolveProcessId = processId || '';
     if (!state.resolveProcessId) return;
-    state.resolvePollTimer = setInterval(() => {
-      pollResolveProcess().catch((error) => {
-        stopResolveWatcher();
-        renderResolveControls(`Detail worker status not available: ${error.message}`);
-      });
-    }, 2000);
+    scheduleResolvePoll(1000);
   }
 
   async function resolveListing(row) {

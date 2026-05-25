@@ -1,12 +1,28 @@
+import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
 import { createListingsViewer } from './listings-viewer.js';
 
 const listingsViewer = createListingsViewer();
 
+const WORKFLOW_DRAFTS_STORAGE_KEY = 'marketplace-monitor-workflow-drafts';
+const WORKFLOW_SELECTION_STORAGE_KEY = 'marketplace-monitor-selected-workflow';
+const WORKFLOW_ACTIVE_POLL_MS = 5000;
+const WORKFLOW_IDLE_POLL_MS = 15000;
+const WORKFLOW_HIDDEN_POLL_MS = 30000;
+
+function readJsonStorage(key, fallback) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '');
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
 const store = {
   summary: null,
   workflows: [],
-  workflowDrafts: {},
-  selectedWorkflowId: '',
+  workflowDrafts: readJsonStorage(WORKFLOW_DRAFTS_STORAGE_KEY, {}),
+  selectedWorkflowId: localStorage.getItem(WORKFLOW_SELECTION_STORAGE_KEY) || '',
   processes: [],
   selectedProcessId: '',
   workerDetailProcess: null,
@@ -24,11 +40,14 @@ const store = {
   historySoldRange: localStorage.getItem('marketplace-monitor-history-sold-range') || 'all',
   editingPurchaseHistoryRecordId: '',
   eventRegistry: [],
-  historySort: { key: 'date', direction: 'desc' },
+  historySort: { key: 'title', direction: 'asc' },
   eventRegistrySort: { key: 'time', direction: 'desc' },
   workflowSignature: '',
   processSignature: '',
   workerDetailSignature: '',
+  workflowPollTimer: null,
+  workflowPollInFlight: false,
+  historyTable: null,
 };
 
 const els = {
@@ -41,6 +60,7 @@ const els = {
   settingsContent: document.getElementById('settingsContent'),
   historyForm: document.getElementById('historyForm'),
   historyTableBody: document.getElementById('historyTableBody'),
+  historyTable: document.getElementById('historyTable'),
   historyMeta: document.getElementById('historyMeta'),
   historyStatus: document.getElementById('historyStatus'),
   historyInventoryStatsRow: document.getElementById('historyInventoryStatsRow'),
@@ -206,6 +226,10 @@ function renderHistoryCsv(rows = store.purchaseHistory, fields = store.purchaseH
 
 function titleFromHistoryRow(row) {
   return row.title || [row.brand, row.model, row.variant].filter(Boolean).join(' ') || row.record_id || '';
+}
+
+function historyItemNameSortValue(row) {
+  return row.title || [row.brand, row.model, row.variant].filter(Boolean).join(' ') || '';
 }
 
 function historySoldOutcomes() {
@@ -375,7 +399,7 @@ function updateSortButtons(selector, activeKey, direction) {
 function historySortValue(row, key) {
   switch (key) {
     case 'title':
-      return titleFromHistoryRow(row);
+      return historyItemNameSortValue(row);
     case 'subcategory':
       return row.subcategory || '';
     case 'cost':
@@ -399,6 +423,175 @@ function historySortValue(row, key) {
       return Number.isFinite(parsed) ? parsed : null;
     }
   }
+}
+
+function historyColumnTitle(key, label) {
+  if (store.historySort.key !== key) return label;
+  return `${label} ${store.historySort.direction === 'asc' ? '↑' : '↓'}`;
+}
+
+function historyColumnHeaderClick(key) {
+  return () => {
+    store.historySort = {
+      key,
+      direction: store.historySort.key === key && store.historySort.direction === 'asc' ? 'desc' : 'asc',
+    };
+    renderPurchaseHistory();
+  };
+}
+
+function historyStatusFormatter(cell) {
+  const value = cell.getValue() || '';
+  return `<span class="status ${html(value)}">${html(value)}</span>`;
+}
+
+function historyItemFormatter(cell) {
+  const row = cell.getData();
+  const title = titleFromHistoryRow(row);
+  const meta = [row.brand, row.model, row.mount].filter(Boolean).join(' / ');
+  return `<div class="history-item-title">${html(title)}</div><div class="process-meta">${html(meta)}</div>`;
+}
+
+function historyEditFormatter(cell) {
+  return `<button type="button" class="secondary history-edit-button" data-record-id="${html(cell.getData().record_id)}">Edit</button>`;
+}
+
+function historyTableColumns() {
+  return [
+    {
+      title: historyColumnTitle('title', 'Item'),
+      field: '_itemName',
+      minWidth: 260,
+      widthGrow: 3,
+      responsive: 0,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('title'),
+      formatter: historyItemFormatter,
+    },
+    {
+      title: historyColumnTitle('subcategory', 'Kind'),
+      field: 'subcategory',
+      width: 130,
+      responsive: 2,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('subcategory'),
+    },
+    {
+      title: historyColumnTitle('cost', 'Cost'),
+      field: '_cost',
+      width: 100,
+      hozAlign: 'right',
+      responsive: 0,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('cost'),
+      formatter: (cell) => formatMoney(cell.getValue()),
+    },
+    {
+      title: historyColumnTitle('price', 'Price'),
+      field: '_price',
+      width: 100,
+      hozAlign: 'right',
+      responsive: 0,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('price'),
+      formatter: (cell) => formatMoney(cell.getValue()),
+    },
+    {
+      title: historyColumnTitle('status', 'Status'),
+      field: '_status',
+      width: 110,
+      responsive: 0,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('status'),
+      formatter: historyStatusFormatter,
+    },
+    {
+      title: historyColumnTitle('profit', 'Profit'),
+      field: '_profit',
+      width: 110,
+      hozAlign: 'right',
+      responsive: 1,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('profit'),
+      formatter: (cell) => formatMoney(cell.getValue()),
+    },
+    {
+      title: historyColumnTitle('roi', 'ROI'),
+      field: '_roi',
+      width: 90,
+      hozAlign: 'right',
+      responsive: 3,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('roi'),
+      formatter: (cell) => formatPercent(cell.getValue()),
+    },
+    {
+      title: historyColumnTitle('result', 'Result'),
+      field: '_result',
+      width: 140,
+      responsive: 4,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('result'),
+      formatter: historyStatusFormatter,
+    },
+    {
+      title: historyColumnTitle('date', 'Dates'),
+      field: '_dates',
+      width: 150,
+      responsive: 5,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('date'),
+    },
+    {
+      title: '',
+      field: '_actions',
+      width: 78,
+      responsive: 0,
+      headerSort: false,
+      formatter: historyEditFormatter,
+      cellClick: (_event, cell) => openHistoryEditModal(cell.getData().record_id),
+    },
+  ];
+}
+
+function historyTableData(rows) {
+  return rows.map((row) => {
+    const status = inventoryStatusFromHistoryRow(row);
+    const roi = Number.parseFloat(String(row.roi_percent || ''));
+    return {
+      ...row,
+      _itemName: historyItemNameSortValue(row),
+      _cost: parseMoney(row.purchase_price_cad),
+      _price: parseMoney(row.sold_price_cad || row.list_price_cad),
+      _status: status,
+      _profit: parseMoney(row.realized_profit_cad),
+      _roi: Number.isFinite(roi) ? roi : null,
+      _result: resultLabelFromHistoryRow(row),
+      _dates: [compactDate(row.purchase_at), compactDate(row.sold_at)].filter(Boolean).join(' - '),
+    };
+  });
+}
+
+function renderHistoryTable(rows) {
+  if (!els.historyTable) return;
+  const data = historyTableData(rows);
+  const columns = historyTableColumns();
+  if (!store.historyTable) {
+    store.historyTable = new Tabulator(els.historyTable, {
+      data,
+      height: 'min(68vh, 760px)',
+      layout: 'fitColumns',
+      responsiveLayout: 'hide',
+      placeholder: 'History appears here.',
+      columnHeaderSortMulti: false,
+      movableColumns: true,
+      resizableColumnFit: true,
+      columns,
+    });
+    return;
+  }
+  store.historyTable.setColumns(columns);
+  store.historyTable.setData(data);
 }
 
 function eventSortValue(event, key) {
@@ -448,7 +641,7 @@ function renderPurchaseHistoryDocuments() {
 }
 
 function renderPurchaseHistory() {
-  if (!els.historyTableBody || !els.historyMeta) {
+  if (!els.historyTable || !els.historyMeta) {
     return;
   }
   renderPurchaseHistoryDocuments();
@@ -456,28 +649,7 @@ function renderPurchaseHistory() {
   const selectedDocument = store.purchaseHistoryDocuments.find((document) => document.document_id === selectedHistoryDocumentId());
   els.historyMeta.textContent = `${store.purchaseHistory.length} rows${selectedDocument ? ` in ${selectedDocument.name}` : ''}`;
   renderHistoryStats();
-  updateSortButtons('[data-history-sort]', store.historySort.key, store.historySort.direction);
-  if (!rows.length) {
-    els.historyTableBody.innerHTML = '<tr><td colspan="10" class="empty-state">History appears here.</td></tr>';
-    return;
-  }
-  els.historyTableBody.innerHTML = rows.map((row) => {
-    const profit = row.realized_profit_cad || '';
-    const status = inventoryStatusFromHistoryRow(row);
-    const dates = [compactDate(row.purchase_at), compactDate(row.sold_at)].filter(Boolean).join(' - ');
-    return '<tr>'
-      + `<td><div class="history-item-title">${html(titleFromHistoryRow(row))}</div><div class="process-meta">${html([row.brand, row.model, row.mount].filter(Boolean).join(' / '))}</div></td>`
-      + `<td>${html(row.subcategory || '')}</td>`
-      + `<td>${html(formatMoney(row.purchase_price_cad))}</td>`
-      + `<td>${html(formatMoney(row.sold_price_cad || row.list_price_cad))}</td>`
-      + `<td><span class="status ${html(status)}">${html(status)}</span></td>`
-      + `<td>${html(formatMoney(profit))}</td>`
-      + `<td>${html(formatPercent(row.roi_percent))}</td>`
-      + `<td><span class="status ${html(row.outcome || status)}">${html(resultLabelFromHistoryRow(row))}</span></td>`
-      + `<td>${html(dates)}</td>`
-      + `<td><button type="button" class="secondary history-edit-button" data-record-id="${html(row.record_id)}">Edit</button></td>`
-      + '</tr>';
-  }).join('');
+  renderHistoryTable(rows);
 }
 
 function buildHistoryFormRow(form = els.historyForm, existingRow = {}) {
@@ -856,16 +1028,93 @@ function defaultDraftForWorkflow(workflow) {
   return draft;
 }
 
+function persistWorkflowDrafts() {
+  localStorage.setItem(WORKFLOW_DRAFTS_STORAGE_KEY, JSON.stringify(store.workflowDrafts));
+}
+
+function persistSelectedWorkflow() {
+  if (store.selectedWorkflowId) {
+    localStorage.setItem(WORKFLOW_SELECTION_STORAGE_KEY, store.selectedWorkflowId);
+  }
+}
+
 function ensureWorkflowDraft(workflow) {
   if (!workflow) return {};
+  const defaults = defaultDraftForWorkflow(workflow);
   if (!store.workflowDrafts[workflow.id]) {
-    store.workflowDrafts[workflow.id] = defaultDraftForWorkflow(workflow);
+    store.workflowDrafts[workflow.id] = defaults;
+    persistWorkflowDrafts();
+  } else {
+    store.workflowDrafts[workflow.id] = {
+      ...defaults,
+      ...store.workflowDrafts[workflow.id],
+    };
   }
   return store.workflowDrafts[workflow.id];
 }
 
 function selectedWorkflow() {
   return store.workflows.find((workflow) => workflow.id === store.selectedWorkflowId) || store.workflows[0];
+}
+
+function isPanelActive(panelId) {
+  return document.getElementById(panelId)?.classList.contains('active') || false;
+}
+
+function workflowsPollDelayMs() {
+  if (document.hidden) return WORKFLOW_HIDDEN_POLL_MS;
+  return isPanelActive('opsPanel') ? WORKFLOW_ACTIVE_POLL_MS : WORKFLOW_IDLE_POLL_MS;
+}
+
+function workerTypeLabel(value) {
+  return value === 'resolver' ? 'Resolver'
+    : value === 'collector' ? 'Collector'
+      : value || 'Worker';
+}
+
+function workflowModeLabel(workflow) {
+  if (!workflow) return '';
+  if (workflow.workerType === 'collector') {
+    return workflow.strategy === 'feed' ? 'Feed'
+      : workflow.strategy === 'explorer' ? 'Search'
+        : workflow.label;
+  }
+  if (workflow.workerType === 'resolver') {
+    return workflow.strategy === 'queue' ? 'Backlog Queue'
+      : workflow.strategy === 'filtered' ? 'Selection / Filter'
+        : workflow.label;
+  }
+  return workflow.label;
+}
+
+function workflowWorkerTypes() {
+  return [...new Set(store.workflows.map((workflow) => workflow.workerType || 'worker'))];
+}
+
+function workflowsForType(workerType) {
+  return store.workflows.filter((workflow) => (workflow.workerType || 'worker') === workerType);
+}
+
+function selectWorkflowId(workflowId) {
+  if (!store.workflows.some((workflow) => workflow.id === workflowId)) {
+    return;
+  }
+  store.selectedWorkflowId = workflowId;
+  if (els.workflowSelect) {
+    els.workflowSelect.value = workflowId;
+  }
+  persistSelectedWorkflow();
+}
+
+function selectWorkerType(workerType) {
+  const current = selectedWorkflow();
+  if ((current?.workerType || 'worker') === workerType) {
+    return;
+  }
+  const next = workflowsForType(workerType)[0];
+  if (next) {
+    selectWorkflowId(next.id);
+  }
 }
 
 function buildWorkflowArgs(workflow = selectedWorkflow()) {
@@ -915,9 +1164,11 @@ function renderWorkflowOptions() {
   )).join('');
   if (selected && store.workflows.some((workflow) => workflow.id === selected)) {
     els.workflowSelect.value = selected;
+    persistSelectedWorkflow();
   } else if (store.workflows[0]) {
     store.selectedWorkflowId = store.workflows[0].id;
     els.workflowSelect.value = store.selectedWorkflowId;
+    persistSelectedWorkflow();
   }
 }
 
@@ -1116,10 +1367,15 @@ function handleWorkflowFieldChange(event) {
   const fieldId = event.target.dataset.fieldId;
   const field = workflow.fields.find((item) => item.id === fieldId);
   draft[fieldId] = field?.kind === 'boolean' ? event.target.checked : event.target.value;
+  persistWorkflowDrafts();
   els.workflowArgsPreview.value = buildWorkflowArgs(workflow).join(' ');
   const preview = document.getElementById('workerControlArgsPreview');
   if (preview) {
     preview.value = els.workflowArgsPreview.value;
+  }
+  const saved = document.getElementById('workerConfigStatus');
+  if (saved) {
+    saved.textContent = 'Saved for next run.';
   }
 }
 
@@ -1131,17 +1387,23 @@ function renderWorkerControl() {
 
   const draft = ensureWorkflowDraft(workflow);
   const rows = renderWorkflowRows(workflow, draft);
+  const selectedType = workflow.workerType || 'worker';
+  const typeButtons = workflowWorkerTypes().map((workerType) => (
+    `<button type="button" class="secondary${workerType === selectedType ? ' active' : ''}" data-worker-type="${html(workerType)}">${html(workerTypeLabel(workerType))}</button>`
+  )).join('');
+  const modeOptions = workflowsForType(selectedType).map((item) => (
+    `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(workflowModeLabel(item))}</option>`
+  )).join('');
   els.workerControl.innerHTML = '<div class="worker-control-title">'
-    + '<div><div class="label">Worker Setup</div><div class="process-meta">Settings are kept per workflow type.</div></div>'
+    + '<div><div class="label">Worker Setup</div><div class="process-meta">Saved per worker mode on this browser.</div></div>'
+    + `<div class="segmented worker-type-tabs">${typeButtons}</div>`
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
-    + '<div class="worker-control-section-title">Workflow</div>'
+    + `<div class="worker-control-section-title">${html(workerTypeLabel(selectedType))} Mode</div>`
     + '<div class="tablewrap worker-control-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
-    + '<tr><th><label for="workerControlWorkflowSelect">Workflow</label></th><td><select id="workerControlWorkflowSelect">'
-    + store.workflows.map((item) => (
-      `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(item.label)}</option>`
-    )).join('')
+    + '<tr><th><label for="workerControlWorkflowSelect">Mode</label></th><td><select id="workerControlWorkflowSelect">'
+    + modeOptions
     + '</select></td></tr>'
     + rows
     + '</tbody></table></div>'
@@ -1152,17 +1414,24 @@ function renderWorkerControl() {
     + `<tr><th>Command</th><td><textarea id="workerControlArgsPreview" readonly>${html(els.workflowArgsPreview.value)}</textarea></td></tr>`
     + '<tr><th>Actions</th><td><div class="worker-control-actions">'
     + '<button type="button" id="workerControlStartButton">Start</button>'
+    + '<button type="button" class="secondary" id="workerControlResetButton">Reset Params</button>'
     + '<button type="button" class="secondary" id="workerControlRefreshButton">Refresh</button>'
     + '<button type="button" class="secondary" id="workerControlReconcileButton">Check OS</button>'
     + '</div></td></tr>'
+    + '<tr><th>Saved</th><td><div class="process-meta" id="workerConfigStatus">Using saved params for this mode.</div></td></tr>'
     + '</tbody></table></div>'
     + '</section>'
     + '</div>';
 
+  els.workerControl.querySelectorAll('[data-worker-type]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectWorkerType(button.dataset.workerType);
+      renderWorkflowForm();
+    });
+  });
   const workflowSelect = document.getElementById('workerControlWorkflowSelect');
   workflowSelect.addEventListener('change', () => {
-    store.selectedWorkflowId = workflowSelect.value;
-    els.workflowSelect.value = workflowSelect.value;
+    selectWorkflowId(workflowSelect.value);
     renderWorkflowForm();
   });
   for (const input of els.workerControl.querySelectorAll('[data-field-id]')) {
@@ -1170,6 +1439,11 @@ function renderWorkerControl() {
     input.addEventListener('change', handleWorkflowFieldChange);
   }
   document.getElementById('workerControlStartButton').addEventListener('click', () => document.getElementById('startWorkflowButton').click());
+  document.getElementById('workerControlResetButton').addEventListener('click', () => {
+    store.workflowDrafts[workflow.id] = defaultDraftForWorkflow(workflow);
+    persistWorkflowDrafts();
+    renderWorkflowForm();
+  });
   document.getElementById('workerControlRefreshButton').addEventListener('click', () => document.getElementById('refreshWorkflowsButton').click());
   document.getElementById('workerControlReconcileButton').addEventListener('click', () => document.getElementById('reconcileWorkflowsButton').click());
 }
@@ -1746,11 +2020,14 @@ async function loadSummary() {
 
 async function loadWorkflows(options = {}) {
   const background = options.background === true;
-  const payload = await fetchJson('/api/workflows');
+  const light = options.light === true;
+  const payload = await fetchJson(light ? '/api/workflows?reconcile=0&stats=0' : '/api/workflows');
   const nextWorkflows = payload.workflows || [];
   const nextWorkflowSignature = JSON.stringify(nextWorkflows.map((workflow) => ({
     id: workflow.id,
     label: workflow.label,
+    workerType: workflow.workerType,
+    strategy: workflow.strategy,
     fields: workflow.fields,
   })));
   const workflowDefinitionsChanged = nextWorkflowSignature !== store.workflowSignature;
@@ -1765,10 +2042,11 @@ async function loadWorkflows(options = {}) {
     renderWorkflowOptions();
     renderWorkflowForm();
   }
-  if (!background || (!store.selectedProcessId && processDefinitionsChanged)) {
+  const shouldRenderWorkerPanel = !background || isPanelActive('opsPanel');
+  if (shouldRenderWorkerPanel && (!background || (!store.selectedProcessId && processDefinitionsChanged))) {
     renderProcesses({ preserveScroll: background });
   }
-  if (store.selectedProcessId) {
+  if (shouldRenderWorkerPanel && store.selectedProcessId && !light) {
     await loadWorkerDetail({
       render: true,
       preserveScroll: background,
@@ -1777,10 +2055,30 @@ async function loadWorkflows(options = {}) {
   }
 }
 
-function syncWorkflowsInBackground() {
-  loadWorkflows({ background: true }).catch((error) => {
+function scheduleWorkflowSync(delay = workflowsPollDelayMs()) {
+  if (store.workflowPollTimer) {
+    clearTimeout(store.workflowPollTimer);
+  }
+  store.workflowPollTimer = setTimeout(syncWorkflowsInBackground, delay);
+}
+
+async function syncWorkflowsInBackground() {
+  if (store.workflowPollInFlight) {
+    scheduleWorkflowSync();
+    return;
+  }
+  store.workflowPollInFlight = true;
+  try {
+    await loadWorkflows({
+      background: true,
+      light: !isPanelActive('opsPanel'),
+    });
+  } catch (error) {
     console.warn('Background workflow sync failed:', error.message || error);
-  });
+  } finally {
+    store.workflowPollInFlight = false;
+    scheduleWorkflowSync();
+  }
 }
 
 function bindEvents() {
@@ -1805,6 +2103,14 @@ function bindEvents() {
           await loadEventRegistry();
         } catch (error) {
           alert(error.message || 'Event registry could not be loaded.');
+        }
+      }
+      if (tab.dataset.panel === 'opsPanel') {
+        try {
+          await loadWorkflows();
+          scheduleWorkflowSync();
+        } catch (error) {
+          alert(error.message || 'Workers could not be loaded.');
         }
       }
     });
@@ -1919,11 +2225,14 @@ function bindEvents() {
     });
   });
   els.workflowSelect.addEventListener('change', () => {
-    store.selectedWorkflowId = els.workflowSelect.value;
+    selectWorkflowId(els.workflowSelect.value);
     renderWorkflowForm();
   });
   document.getElementById('startWorkflowButton').addEventListener('click', async () => {
     const workflow = selectedWorkflow();
+    if (!workflow) return;
+    persistWorkflowDrafts();
+    persistSelectedWorkflow();
     try {
       await fetchJson('/api/workflows/start', {
         method: 'POST',
@@ -1957,7 +2266,7 @@ if (hasApiToken()) {
   renderSettings();
   await loadWorkflows();
   setInterval(loadSummary, 10000);
-  setInterval(syncWorkflowsInBackground, 5000);
+  scheduleWorkflowSync();
 } else {
   els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Token needed</div></div>';
   renderPurchaseHistory();

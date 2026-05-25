@@ -641,7 +641,14 @@ function runtimeStatsFromLogs(logs = []) {
   return stats;
 }
 
-function reconcileWorkflowRuns(db) {
+function publicWorkflowRunRecords(db, runs, options = {}) {
+  if (options.includeStats === false) {
+    return runs.map((run) => publicWorkflowRunRecord(run));
+  }
+  return runs.map((run) => publicWorkflowRunRecordWithStats(db, run));
+}
+
+function reconcileWorkflowRuns(db, options = {}) {
   const now = nowIso();
   const runs = listWorkflowRuns(db, { limit: 50 });
   for (const run of runs) {
@@ -671,11 +678,14 @@ function reconcileWorkflowRuns(db) {
     }
   }
 
-  return listWorkflowRuns(db, { limit: 50 }).map((run) => publicWorkflowRunRecordWithStats(db, run));
+  return publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), options);
 }
 
-function listManagedProcesses(db) {
-  return reconcileWorkflowRuns(db);
+function listManagedProcesses(db, options = {}) {
+  if (options.reconcile === false) {
+    return publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), options);
+  }
+  return reconcileWorkflowRuns(db, options);
 }
 
 function getRunningManagedProcesses(db) {
@@ -2224,7 +2234,9 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
-      if (access.canWrite) {
+      const reconcile = requestUrl.searchParams.get('reconcile') !== '0';
+      const includeStats = requestUrl.searchParams.get('stats') !== '0';
+      if (access.canWrite && reconcile) {
         refreshResolveQueueRunStatuses(db);
       }
       writeJson(response, 200, {
@@ -2238,8 +2250,8 @@ function createServer(options) {
           defaultArgs: buildDefaultArgsFromFields(fieldsForWorkflow(workflow)),
         })),
         processes: access.canWrite
-          ? listManagedProcesses(db)
-          : listWorkflowRuns(db, { limit: 50 }).map((run) => publicWorkflowRunRecordWithStats(db, run)),
+          ? listManagedProcesses(db, { reconcile, includeStats })
+          : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats }),
       });
       return;
     }
