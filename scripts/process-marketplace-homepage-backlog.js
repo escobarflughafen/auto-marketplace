@@ -42,6 +42,15 @@ const {
   describeFacebookMarketplaceSession,
   normalizeAuthMode,
 } = require('./marketplace-profile-auth');
+const {
+  applyWorkerScreenshotDefaults,
+  normalizeWorkerScreenshotOptions,
+  safeWorkerPathSegment,
+  captureWorkerScreenshot,
+  workerScreenshotDirectory,
+  pruneWorkerScreenshots,
+  startWorkerScreenshotMonitor,
+} = require('./marketplace-worker-screenshots');
 
 const log = createLogger('process-marketplace-homepage-backlog');
 
@@ -91,7 +100,7 @@ function parseFloatFlag(value, flagName, minimum = 0) {
 }
 
 function parseArgs(argv) {
-  const options = {
+  const options = applyWorkerScreenshotDefaults({
     dbPath: DEFAULT_DB_PATH,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     captureDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'details'),
@@ -100,11 +109,6 @@ function parseArgs(argv) {
     screenshotFullPage: false,
     artifactBudgetKb: 200,
     captureThumbnails: false,
-    workerScreenshotDir: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots'),
-    workerScreenshotIntervalSeconds: 10,
-    workerScreenshotHistoryLimit: 100,
-    workerScreenshotFormat: 'jpeg',
-    workerScreenshotQuality: 55,
     logFile: path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'homepage-backlog.log'),
     pollIntervalSeconds: 15,
     pollJitterMin: 1,
@@ -136,7 +140,7 @@ function parseArgs(argv) {
     drain: false,
     resolveInactive: false,
     headless: true,
-  };
+  });
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -360,16 +364,7 @@ function parseArgs(argv) {
   if (options.screenshotQuality > 100) {
     throw new Error('Expected --screenshot-quality to be <= 100');
   }
-  options.workerScreenshotFormat = String(options.workerScreenshotFormat || '').trim().toLowerCase();
-  if (options.workerScreenshotFormat === 'jpg') {
-    options.workerScreenshotFormat = 'jpeg';
-  }
-  if (!['jpeg', 'png'].includes(options.workerScreenshotFormat)) {
-    throw new Error('Expected --worker-screenshot-format to be jpeg or png');
-  }
-  if (options.workerScreenshotQuality > 100) {
-    throw new Error('Expected --worker-screenshot-quality to be <= 100');
-  }
+  normalizeWorkerScreenshotOptions(options);
 
   if (options.once && options.drain) {
     throw new Error('Use either --once or --drain, not both');
@@ -408,73 +403,6 @@ async function appendLog(logFile, message) {
   process.stdout.write(line);
   await ensureDir(path.dirname(logFile));
   await fs.promises.appendFile(logFile, line, 'utf8');
-}
-
-function safeWorkerPathSegment(workerId) {
-  return String(workerId || 'worker')
-    .replace(/[^a-z0-9_.-]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 160) || 'worker';
-}
-
-function workerScreenshotDirectory(options) {
-  const rootDir = path.isAbsolute(options.workerScreenshotDir)
-    ? options.workerScreenshotDir
-    : path.join(process.cwd(), options.workerScreenshotDir);
-  return path.join(rootDir, safeWorkerPathSegment(options.workerId));
-}
-
-async function pruneWorkerScreenshots(directory, historyLimit) {
-  if (historyLimit <= 0) {
-    return;
-  }
-
-  let entries = [];
-  try {
-    entries = await fs.promises.readdir(directory, { withFileTypes: true });
-  } catch (error) {
-    if (error.code === 'ENOENT') return;
-    throw error;
-  }
-
-  const screenshots = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !/\.(?:png|jpe?g)$/i.test(entry.name)) {
-      continue;
-    }
-    const filePath = path.join(directory, entry.name);
-    const stat = await fs.promises.stat(filePath).catch(() => null);
-    if (stat) {
-      screenshots.push({ filePath, mtimeMs: stat.mtimeMs });
-    }
-  }
-
-  screenshots.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  await Promise.all(screenshots.slice(historyLimit).map((item) => (
-    fs.promises.unlink(item.filePath).catch(() => {})
-  )));
-}
-
-async function captureWorkerScreenshot(page, options) {
-  if (!page || page.isClosed()) {
-    return '';
-  }
-
-  const directory = workerScreenshotDirectory(options);
-  await ensureDir(directory);
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const format = options.workerScreenshotFormat === 'png' ? 'png' : 'jpeg';
-  const filePath = path.join(directory, `${timestamp}.${screenshotExtension(format)}`);
-  const screenshotOptions = {
-    type: format,
-    fullPage: false,
-  };
-  if (format === 'jpeg') {
-    screenshotOptions.quality = Math.max(1, Math.min(100, Number.parseInt(String(options.workerScreenshotQuality), 10) || 55));
-  }
-  await page.screenshot({ path: filePath, ...screenshotOptions });
-  await pruneWorkerScreenshots(directory, options.workerScreenshotHistoryLimit);
-  return filePath;
 }
 
 function screenshotExtension(format) {
@@ -530,39 +458,6 @@ async function captureListingScreenshot(page, screenshotPath, options = {}) {
     bytes: selected.buffer.length,
     budgetBytes,
     withinBudget: !budgetBytes || selected.buffer.length <= budgetBytes,
-  };
-}
-
-function startWorkerScreenshotMonitor(options, lifecycle) {
-  const intervalSeconds = Number(options.workerScreenshotIntervalSeconds || 0);
-  if (intervalSeconds <= 0 || options.workerScreenshotHistoryLimit <= 0) {
-    return () => {};
-  }
-
-  let busy = false;
-  let stopped = false;
-  const intervalMs = intervalSeconds * 1000;
-  const tick = async () => {
-    if (stopped || busy || lifecycle.shutdownRequested) {
-      return;
-    }
-    busy = true;
-    try {
-      await captureWorkerScreenshot(lifecycle.currentPage, options);
-    } catch (error) {
-      await appendLog(
-        options.logFile,
-        `worker_screenshot_error error="${error instanceof Error ? error.message : String(error)}"`,
-      );
-    } finally {
-      busy = false;
-    }
-  };
-  const timer = setInterval(tick, intervalMs);
-  tick().catch(() => {});
-  return () => {
-    stopped = true;
-    clearInterval(timer);
   };
 }
 
@@ -1227,7 +1122,9 @@ async function main() {
       logger: (message) => appendLog(options.logFile, message),
     });
     lifecycle.currentPage = page;
-    stopScreenshotMonitor = startWorkerScreenshotMonitor(options, lifecycle);
+    stopScreenshotMonitor = startWorkerScreenshotMonitor(options, lifecycle, {
+      log: (message) => appendLog(options.logFile, message),
+    });
     const sessionSummary = await describeFacebookMarketplaceSession(context, page, {
       credentialsPath: options.credentialsPath,
       credentialsProfile: options.credentialsProfile,

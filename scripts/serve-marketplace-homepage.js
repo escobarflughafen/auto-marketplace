@@ -384,6 +384,26 @@ const WORKFLOW_CONCURRENCY_LIMITS = {
   resolver: 2,
   worker: 1,
 };
+const WORKFLOW_SCRIPTS_WITH_WORKER_ID = new Set([
+  'marketplace:home:collect',
+  'marketplace:search:explore',
+  'marketplace:home:process',
+]);
+const COMMON_WORKER_SCREENSHOT_VALUE_FLAGS = new Set([
+  '--worker-screenshot-format',
+  '--worker-screenshot-quality',
+]);
+const PROCESS_SCREENSHOT_VALUE_FLAGS = new Set([
+  '--screenshot-format',
+  '--screenshot-quality',
+  '--artifact-budget-kb',
+]);
+const PROCESS_SCREENSHOT_BOOLEAN_FLAGS = new Set([
+  '--screenshot-full-page',
+  '--full-page-screenshot',
+  '--screenshot-viewport',
+  '--viewport-screenshot',
+]);
 
 const QUERY_FIELDS = [
   { value: 'id', label: 'Listing ID', type: 'text' },
@@ -737,7 +757,8 @@ function getRunningManagedProcesses(db) {
 }
 
 function ensureManagedWorkerIdArg(args, runId, workflow) {
-  const supportsWorkerId = fieldsForWorkflow(workflow)
+  const supportsWorkerId = WORKFLOW_SCRIPTS_WITH_WORKER_ID.has(workflow.script)
+    || fieldsForWorkflow(workflow)
     .some((field) => field.flag === '--worker-id'
       || field.args?.includes?.('--worker-id')
       || field.options?.some((option) => option.args?.includes?.('--worker-id')));
@@ -764,6 +785,185 @@ function normalizeWorkflowArgs(value) {
   return value.match(/(?:[^\s"]+|"[^"]*")+/g)
     ?.map((arg) => arg.replace(/^"|"$/g, ''))
     .filter(Boolean) || [];
+}
+
+function workflowArgError(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+}
+
+function normalizeArgToken(arg) {
+  return String(arg || '').trim();
+}
+
+function validateFlagToken(flag) {
+  if (!/^--[a-z0-9][a-z0-9-]*$/i.test(flag)) {
+    throw workflowArgError(`Unsafe workflow argument flag: ${flag || '(empty)'}`);
+  }
+}
+
+function assertSafeWorkflowArgValue(flag, value) {
+  const text = String(value ?? '');
+  if (!text || text.startsWith('--')) {
+    throw workflowArgError(`Missing value for workflow argument ${flag}`);
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(text)) {
+    throw workflowArgError(`Unsafe control character in workflow argument ${flag}`);
+  }
+  if (/^[=+@]/u.test(text) || /^-[-+=@]/u.test(text)) {
+    throw workflowArgError(`Unsafe workflow argument value for ${flag}`);
+  }
+  if (text.length > 2000) {
+    throw workflowArgError(`Workflow argument value is too long for ${flag}`);
+  }
+}
+
+function validateNumberFieldValue(flag, value, field = {}) {
+  assertSafeWorkflowArgValue(flag, value);
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw workflowArgError(`Expected numeric value for workflow argument ${flag}`);
+  }
+  if (field.min !== undefined && numeric < Number(field.min)) {
+    throw workflowArgError(`Expected ${flag} to be >= ${field.min}`);
+  }
+  if (field.max !== undefined && numeric > Number(field.max)) {
+    throw workflowArgError(`Expected ${flag} to be <= ${field.max}`);
+  }
+}
+
+function validateEnumValue(flag, value, allowedValues) {
+  assertSafeWorkflowArgValue(flag, value);
+  if (!allowedValues.has(String(value))) {
+    throw workflowArgError(`Unexpected value for workflow argument ${flag}`);
+  }
+}
+
+function validateWorkflowPathValue(flag, value, rootDir) {
+  assertSafeWorkflowArgValue(flag, value);
+  const resolved = path.resolve(String(value));
+  const root = path.resolve(rootDir);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    throw workflowArgError(`Workflow argument ${flag} must stay under ${root}`);
+  }
+}
+
+function workflowArgSpec(workflow, options = {}) {
+  const booleanFlags = new Set();
+  const valueValidators = new Map();
+
+  const addBooleanFlag = (flag) => {
+    if (!flag) return;
+    validateFlagToken(flag);
+    booleanFlags.add(flag);
+  };
+  const addValueFlag = (flag, validator) => {
+    if (!flag) return;
+    validateFlagToken(flag);
+    valueValidators.set(flag, validator);
+  };
+
+  for (const field of fieldsForWorkflow(workflow)) {
+    if (field.kind === 'boolean') {
+      addBooleanFlag(field.flag);
+      continue;
+    }
+    if (field.kind === 'choice') {
+      for (const option of field.options || []) {
+        const optionArgs = Array.isArray(option.args) ? option.args : [];
+        for (let index = 0; index < optionArgs.length; index += 1) {
+          const flag = String(optionArgs[index] || '');
+          if (!flag.startsWith('--')) {
+            continue;
+          }
+          const next = optionArgs[index + 1];
+          if (next && !String(next).startsWith('--')) {
+            const allowedValues = new Set(
+              (field.options || [])
+                .flatMap((item) => item.args || [])
+                .filter((item, itemIndex, allArgs) => itemIndex > 0 && String(allArgs[itemIndex - 1]) === flag),
+            );
+            addValueFlag(flag, (value) => validateEnumValue(flag, value, allowedValues));
+            index += 1;
+          } else {
+            addBooleanFlag(flag);
+          }
+        }
+      }
+      continue;
+    }
+    if (field.kind === 'number') {
+      addValueFlag(field.flag, (value) => validateNumberFieldValue(field.flag, value, field));
+      continue;
+    }
+    addValueFlag(field.flag, (value) => assertSafeWorkflowArgValue(field.flag, value));
+  }
+
+  for (const flag of COMMON_WORKER_SCREENSHOT_VALUE_FLAGS) {
+    if (flag === '--worker-screenshot-format') {
+      addValueFlag(flag, (value) => validateEnumValue(flag, value, new Set(['jpeg', 'jpg', 'png'])));
+    } else {
+      addValueFlag(flag, (value) => validateNumberFieldValue(flag, value, { min: 1, max: 100 }));
+    }
+  }
+
+  if (workflow.script === 'marketplace:home:process') {
+    for (const flag of PROCESS_SCREENSHOT_BOOLEAN_FLAGS) {
+      addBooleanFlag(flag);
+    }
+    for (const flag of PROCESS_SCREENSHOT_VALUE_FLAGS) {
+      if (flag === '--screenshot-format') {
+        addValueFlag(flag, (value) => validateEnumValue(flag, value, new Set(['jpeg', 'jpg', 'png'])));
+      } else {
+        addValueFlag(flag, (value) => validateNumberFieldValue(flag, value, {
+          min: flag.includes('quality') ? 1 : 0,
+          max: flag.includes('quality') ? 100 : undefined,
+        }));
+      }
+    }
+  }
+
+  if (options.allowInternalArgs && workflow.script === 'marketplace:home:process') {
+    addBooleanFlag('--use-credentials');
+    addBooleanFlag('--drain');
+    addValueFlag('--listing-id-file', (value) => validateWorkflowPathValue('--listing-id-file', value, RESOLVE_BATCH_DIR));
+  }
+
+  return { booleanFlags, valueValidators };
+}
+
+function validateWorkflowArgs(workflow, args, options = {}) {
+  const { booleanFlags, valueValidators } = workflowArgSpec(workflow, options);
+  const normalized = normalizeWorkflowArgs(args).map(normalizeArgToken).filter(Boolean);
+  const safeArgs = [];
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const flag = normalized[index];
+    validateFlagToken(flag);
+    if (booleanFlags.has(flag)) {
+      safeArgs.push(flag);
+      continue;
+    }
+    const validator = valueValidators.get(flag);
+    if (!validator) {
+      throw workflowArgError(`Unsupported workflow argument: ${flag}`);
+    }
+    const value = normalized[index + 1];
+    validator(value);
+    safeArgs.push(flag, String(value));
+    index += 1;
+  }
+
+  return safeArgs;
+}
+
+function validateWorkflowStartArgs(workflowId, args, options = {}) {
+  const workflow = WORKFLOWS[workflowId];
+  if (!workflow) {
+    throw workflowArgError(`Unknown workflow: ${workflowId}`);
+  }
+  return validateWorkflowArgs(workflow, args, options);
 }
 
 function normalizeScreenshotRuntimeArgs(value) {
@@ -909,7 +1109,9 @@ function resolveListingsFromViewer(db, body = {}) {
     ...normalizeScreenshotRuntimeArgs(body.runtimeArgs),
   ];
 
-  const started = startManagedWorkflow(db, mode === 'listing' ? 'backlog-resolve' : 'backlog-worker', args);
+  const started = startManagedWorkflow(db, mode === 'listing' ? 'backlog-resolve' : 'backlog-worker', args, {
+    allowInternalArgs: true,
+  });
   return {
     process: started,
     listingIds,
@@ -953,7 +1155,7 @@ function resolveQueuedListingsFromViewer(db, body = {}) {
   };
 }
 
-function startManagedWorkflow(db, workflowId, extraArgs = []) {
+function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
   const workflow = WORKFLOWS[workflowId];
   if (!workflow) {
     const error = new Error(`Unknown workflow: ${workflowId}`);
@@ -971,7 +1173,10 @@ function startManagedWorkflow(db, workflowId, extraArgs = []) {
     throw error;
   }
 
-  const initialArgs = extraArgs.length > 0 ? extraArgs : buildDefaultArgsFromFields(fieldsForWorkflow(workflow));
+  const rawInitialArgs = extraArgs.length > 0 ? extraArgs : buildDefaultArgsFromFields(fieldsForWorkflow(workflow));
+  const initialArgs = validateWorkflowArgs(workflow, rawInitialArgs, {
+    allowInternalArgs: options.allowInternalArgs === true,
+  });
   const record = buildManagedProcessRecord(workflowId, initialArgs);
   const args = ensureManagedWorkerIdArg(initialArgs, record.id, workflow);
   record.args = args;
@@ -2431,7 +2636,7 @@ function createServer(options) {
       }
       try {
         const body = await readRequestJson(request);
-        const started = startManagedWorkflow(db, body.workflowId, normalizeWorkflowArgs(body.args));
+        const started = startManagedWorkflow(db, body.workflowId, body.args);
         writeJson(response, 201, { process: started });
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });
@@ -2503,4 +2708,14 @@ function main() {
   process.once('SIGTERM', () => server.close(() => process.exit(0)));
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  parseArgs,
+  normalizeWorkflowArgs,
+  validateWorkflowStartArgs,
+  buildDefaultArgsFromFields,
+  fieldsForWorkflow,
+};

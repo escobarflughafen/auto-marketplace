@@ -36,6 +36,22 @@ test('parseArgs reads homepage collector worker id', () => {
   assert.equal(options.workerId, 'collector-run-1');
 });
 
+test('parseArgs reads homepage collector live screenshot options', () => {
+  const options = parseArgs([
+    '--worker-screenshot-dir', 'tmp/screens',
+    '--worker-screenshot-interval-seconds', '10',
+    '--worker-screenshot-history-limit', '100',
+    '--worker-screenshot-format', 'jpg',
+    '--worker-screenshot-quality', '70',
+  ]);
+
+  assert.equal(options.workerScreenshotDir, 'tmp/screens');
+  assert.equal(options.workerScreenshotIntervalSeconds, 10);
+  assert.equal(options.workerScreenshotHistoryLimit, 100);
+  assert.equal(options.workerScreenshotFormat, 'jpeg');
+  assert.equal(options.workerScreenshotQuality, 70);
+});
+
 test('parseArgs builds homepage route URLs for major city locations', () => {
   assert.equal(
     parseArgs(['--location', 'Montreal, Quebec']).startUrl,

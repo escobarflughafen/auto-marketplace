@@ -39,6 +39,11 @@ const {
   describeFacebookMarketplaceSession,
   normalizeAuthMode,
 } = require('./marketplace-profile-auth');
+const {
+  applyWorkerScreenshotDefaults,
+  normalizeWorkerScreenshotOptions,
+  startWorkerScreenshotMonitor,
+} = require('./marketplace-worker-screenshots');
 
 const DEFAULT_AREA = 'vancouver';
 const DEFAULT_SEARCH_URL_TEMPLATE = 'https://www.facebook.com/marketplace/%AREA%/search/?query=%QUERY%';
@@ -63,7 +68,7 @@ function parseIntegerFlag(value, flagName, minimum = 0) {
 }
 
 function parseArgs(argv) {
-  const options = {
+  const options = applyWorkerScreenshotDefaults({
     query: '',
     area: DEFAULT_AREA,
     areaExplicit: false,
@@ -97,7 +102,7 @@ function parseArgs(argv) {
     bagMinTimesSeen: 1,
     includeSeedInBag: true,
     workerId: `pid-${process.pid}`,
-  };
+  });
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -214,6 +219,26 @@ function parseArgs(argv) {
         options.workerId = readFlagValue(argv, index, arg);
         index += 1;
         break;
+      case '--worker-screenshot-dir':
+        options.workerScreenshotDir = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--worker-screenshot-interval-seconds':
+        options.workerScreenshotIntervalSeconds = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--worker-screenshot-history-limit':
+        options.workerScreenshotHistoryLimit = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--worker-screenshot-format':
+        options.workerScreenshotFormat = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--worker-screenshot-quality':
+        options.workerScreenshotQuality = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
       case '--headed':
         options.headless = false;
         break;
@@ -267,6 +292,7 @@ function parseArgs(argv) {
     throw new Error('Expected --refresh-jitter-max to be >= --refresh-jitter-min');
   }
   options.authMode = normalizeAuthMode(options.authMode, options.useCredentials);
+  normalizeWorkerScreenshotOptions(options);
 
   if (options.reseedRoundMax < options.reseedRoundMin) {
     throw new Error('Expected --reseed-round-max to be >= --reseed-round-min');
@@ -614,7 +640,7 @@ async function chooseRoundQuery(db, state, options) {
   };
 }
 
-async function runRound(page, db, options, state) {
+async function runRound(page, db, options, state, lifecycle = null) {
   const countsBefore = getHomepageListingCounts(db);
   const bagCountsBefore = getSearchTitleBagCounts(db);
   const sessionSummary = await describeFacebookMarketplaceSession(page.context(), page, {
@@ -651,6 +677,9 @@ async function runRound(page, db, options, state) {
   );
 
   const activePage = await safeGoto(page.context(), page, searchUrl);
+  if (lifecycle) {
+    lifecycle.currentPage = activePage;
+  }
   await waitForMarketplaceResults(activePage, {
     timeoutMs: 20000,
     settleTimeMs: 1200,
@@ -758,9 +787,10 @@ async function sleep(ms) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(path.dirname(options.logFile));
+  await ensureDir(options.workerScreenshotDir);
   await appendLog(
     options.logFile,
-    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId}`,
+    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -797,6 +827,11 @@ async function main() {
     },
   });
 
+  const lifecycle = {
+    shutdownRequested: false,
+    currentPage: null,
+  };
+  let stopScreenshotMonitor = () => {};
   try {
     let page = await ensureFacebookMarketplaceLogin(context, {
       startUrl: buildSearchUrl(options.area, options.query, options.searchUrlTemplate),
@@ -806,6 +841,10 @@ async function main() {
       credentialsProfile: options.credentialsProfile,
       loginTimeoutMs: options.loginTimeoutMs,
       logger: log,
+    });
+    lifecycle.currentPage = page;
+    stopScreenshotMonitor = startWorkerScreenshotMonitor(options, lifecycle, {
+      log: (message) => appendLog(options.logFile, message),
     });
     const knownLocationArea = getKnownMarketplaceAreaFromLocation(options.location);
     if (knownLocationArea) {
@@ -818,10 +857,12 @@ async function main() {
         logger: log,
       });
     }
+    lifecycle.currentPage = page;
     page = await setMarketplaceRadius(page, {
       radiusMiles: options.radiusMiles,
       logger: log,
     });
+    lifecycle.currentPage = page;
     const initialSessionSummary = await describeFacebookMarketplaceSession(context, page, {
       credentialsPath: options.credentialsPath,
       credentialsProfile: options.credentialsProfile,
@@ -850,8 +891,9 @@ async function main() {
 
     do {
       const roundStartedAt = Date.now();
-      const result = await runRound(page, db, options, state);
+      const result = await runRound(page, db, options, state, lifecycle);
       page = result.page;
+      lifecycle.currentPage = page;
       process.stdout.write(renderCycleSummaryForConsole(result.cycleSummary));
 
       if (options.once) {
@@ -897,6 +939,8 @@ async function main() {
     });
     throw error;
   } finally {
+    lifecycle.shutdownRequested = true;
+    stopScreenshotMonitor();
     appendCollectorWorkflowEvent(db, options, 'browser_context_closing', {
       status: 'stopping',
       payload: {

@@ -178,6 +178,12 @@ function captureSettingsArgs() {
   } else {
     args.push('--screenshot-format', 'jpeg', '--screenshot-quality', String(settings.itemScreenshotQuality));
   }
+  args.push(...workerScreenshotSettingsArgs(settings));
+  return args;
+}
+
+function workerScreenshotSettingsArgs(settings = readCaptureSettings()) {
+  const args = [];
   if (settings.workerScreenshotMode === 'original') {
     args.push('--worker-screenshot-format', 'png');
   } else {
@@ -1145,6 +1151,8 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
   }
   if (workflow?.script === 'marketplace:home:process') {
     args.push(...captureSettingsArgs());
+  } else if (['marketplace:home:collect', 'marketplace:search:explore'].includes(workflow?.script)) {
+    args.push(...workerScreenshotSettingsArgs());
   }
   return args;
 }
