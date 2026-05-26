@@ -382,6 +382,39 @@ button:not(:disabled):hover,
   font-size: 20px;
   font-weight: 600;
 }
+.pre-render-card {
+  min-height: 56px;
+}
+.skeleton-block {
+  display: block;
+  width: 100%;
+  min-width: 28px;
+  height: 0.8rem;
+  background: linear-gradient(90deg, var(--fill-strong), var(--fill), var(--fill-strong));
+  border: 1px solid var(--line-soft);
+}
+.skeleton-value {
+  width: 4.5rem;
+  height: 1.45rem;
+  margin-top: 5px;
+}
+.skeleton-line {
+  height: 0.78rem;
+}
+.skeleton-meta-line {
+  width: 72%;
+  margin-top: 6px;
+}
+.skeleton-input {
+  height: 1.9rem;
+}
+.skeleton-command {
+  height: 4.8rem;
+}
+.prerender-tablewrap {
+  border: 0;
+  border-radius: 0;
+}
 .tabs {
   display: flex;
   gap: 0;
@@ -1378,8 +1411,19 @@ textarea {
 .worker-categories {
   margin: 0;
 }
+.worker-event-filter-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.worker-event-type-filter select {
+  width: min(320px, 52vw);
+}
 .worker-events-table {
-  min-width: 1180px;
+  min-width: 1320px;
   table-layout: fixed;
 }
 .worker-events-table th:first-child,
@@ -1388,25 +1432,35 @@ textarea {
 }
 .worker-events-table th:nth-child(2),
 .worker-events-table td:nth-child(2) {
-  width: 150px;
+  width: 90px;
 }
 .worker-events-table th:nth-child(3),
-.worker-events-table td:nth-child(3),
+.worker-events-table td:nth-child(3) {
+  width: 180px;
+}
 .worker-events-table th:nth-child(4),
-.worker-events-table td:nth-child(4),
+.worker-events-table td:nth-child(4) {
+  width: 170px;
+}
 .worker-events-table th:nth-child(5),
-.worker-events-table td:nth-child(5),
-.worker-events-table th:nth-child(8),
-.worker-events-table td:nth-child(8) {
-  width: 110px;
+.worker-events-table td:nth-child(5) {
+  width: 95px;
 }
 .worker-events-table th:nth-child(6),
 .worker-events-table td:nth-child(6) {
-  width: 280px;
+  width: 120px;
 }
 .worker-events-table th:nth-child(7),
 .worker-events-table td:nth-child(7) {
-  width: 230px;
+  width: 240px;
+}
+.worker-events-table th:nth-child(8),
+.worker-events-table td:nth-child(8) {
+  width: 200px;
+}
+.worker-events-table th:nth-child(9),
+.worker-events-table td:nth-child(9) {
+  width: 110px;
 }
 .worker-events-wrap {
   max-height: min(42vh, 460px);

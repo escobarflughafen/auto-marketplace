@@ -229,6 +229,7 @@ export function createListingsViewer() {
     resolveProcessId: '',
     resolvePollTimer: null,
     resolvePollInFlight: false,
+    resolveControlsSignature: '',
     table: null,
   };
 
@@ -410,6 +411,33 @@ export function createListingsViewer() {
       + ' · window: ' + offset + '-' + (offset + state.rows.length);
   }
 
+  function renderSkeletonRows(rowCount, columnCount) {
+    return Array.from({ length: rowCount }, () => (
+      '<tr>'
+        + Array.from({ length: columnCount }, () => '<td><div class="skeleton-block skeleton-line"></div></td>').join('')
+      + '</tr>'
+    )).join('');
+  }
+
+  function renderInitialShell() {
+    if (els.resultsMeta) {
+      els.resultsMeta.textContent = 'Preparing listings...';
+    }
+    if (els.queryFieldSelect && els.queryFieldSelect.options.length === 0) {
+      els.queryFieldSelect.innerHTML = '<option value="">Field</option>';
+    }
+    if (els.queryOperatorSelect && els.queryOperatorSelect.options.length === 0) {
+      els.queryOperatorSelect.innerHTML = '<option value="contains">contains</option>';
+    }
+    if (els.backlogMeta) {
+      els.backlogMeta.textContent = 'Preparing backlog...';
+    }
+    if (els.backlogTableBody && !state.backlogRows.length) {
+      els.backlogTableBody.innerHTML = renderSkeletonRows(6, 13);
+    }
+    renderResolveControls('Resolve queue is ready.');
+  }
+
   function selectedRowForPov(data) {
     const selectedIds = new Set(data.map((row) => row.listing_id).filter(Boolean));
     state.selectedPovOrderIds = state.selectedPovOrderIds.filter((id) => selectedIds.has(id));
@@ -557,6 +585,23 @@ export function createListingsViewer() {
     const queuedCount = state.resolveQueueItems.filter((item) => item.status === 'queued').length;
     const clearableCount = state.resolveQueueItems.filter((item) => item.status === 'queued' || item.status === 'failed').length;
     const activeQueueCount = state.resolveQueueItems.length;
+    const signature = JSON.stringify({
+      message: state.resolveMessage,
+      count,
+      queuedCount,
+      clearableCount,
+      activeQueueCount,
+      resolving: state.resolving,
+      available: state.resolveQueueAvailable,
+      hideQueued: state.hideQueuedResolve,
+      selectedBacklogQueueIds: state.selectedBacklogQueueIds,
+      queueItems: state.resolveQueueItems.map((item) => [item.listing_id, item.status, item.workflow_run_id]),
+      queueEvents: state.resolveQueueEvents.map((event) => [event.event_id, event.event_type, event.status]),
+    });
+    if (signature === state.resolveControlsSignature) {
+      return;
+    }
+    state.resolveControlsSignature = signature;
     els.queueSelectedButton.disabled = !state.resolveQueueAvailable || state.resolving || count === 0;
     els.resolveQueuedButton.disabled = !state.resolveQueueAvailable || state.resolving || queuedCount === 0;
     els.clearResolveQueueButton.disabled = !state.resolveQueueAvailable || state.resolving || clearableCount === 0;
@@ -781,12 +826,15 @@ export function createListingsViewer() {
     }
     state.resolvePollInFlight = false;
     state.resolveProcessId = '';
+    state.resolveControlsSignature = '';
   }
 
   async function pollResolveProcess() {
-    if (!state.resolveProcessId) return;
+    const processId = state.resolveProcessId;
+    if (!processId) return;
     const payload = await fetchJson('/api/workflows?reconcile=0&stats=0');
-    const proc = (payload.processes || []).find((item) => item.id === state.resolveProcessId);
+    if (state.resolveProcessId !== processId) return;
+    const proc = (payload.processes || []).find((item) => item.id === processId);
     if (!proc) return;
 
     if (proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping') {
@@ -806,7 +854,11 @@ export function createListingsViewer() {
     await loadRows();
   }
 
-  function scheduleResolvePoll(delay = 2000) {
+  function resolvePollDelayMs() {
+    return document.hidden ? 8000 : 2000;
+  }
+
+  function scheduleResolvePoll(delay = resolvePollDelayMs()) {
     if (state.resolvePollTimer) {
       clearTimeout(state.resolvePollTimer);
     }
@@ -1254,6 +1306,7 @@ export function createListingsViewer() {
   return {
     bindEvents,
     renderHead,
+    renderInitialShell,
     loadQueryFields,
     loadResolveQueue,
     loadBacklogQueue,

@@ -53,7 +53,9 @@ const {
   listWorkflowRuns,
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
+  listWorkerAuditEvents,
   getWorkerListingEventStats,
+  getWorkerAuditEventStats,
   getDatabaseMaintenanceReport,
   runDatabaseMaintenance,
 } = require('../scripts/marketplace-homepage-db');
@@ -157,6 +159,7 @@ test('worker event helpers group audit events by category', () => {
       workflowRunId: 'workflow-run-1',
       listingId: 'worker-event-1',
       eventType: 'detail_capture_started',
+      eventAt: '2026-05-08T00:00:00.000Z',
       workerId: 'run-worker-1',
       status: 'processing',
       content: { detail: { title: 'Worker event row' } },
@@ -165,6 +168,7 @@ test('worker event helpers group audit events by category', () => {
       workflowRunId: 'workflow-run-1',
       listingId: 'worker-event-1',
       eventType: 'detail_capture_succeeded',
+      eventAt: '2026-05-08T00:01:00.000Z',
       workerId: 'run-worker-1',
       status: 'done',
       content: { detail: { title: 'Worker event row', price: 'CA$ 100' } },
@@ -174,9 +178,17 @@ test('worker event helpers group audit events by category', () => {
       workflowRunId: 'workflow-run-1',
       listingId: 'worker-event-1',
       eventType: 'detail_capture_bypassed',
+      eventAt: '2026-05-08T00:02:00.000Z',
       workerId: 'run-worker-1',
       status: 'sold',
       content: { detail: { availabilityReason: 'sold_signal' } },
+    });
+    appendWorkflowEvent(db, {
+      workflowRunId: 'workflow-run-1',
+      eventType: 'collector_cycle_started',
+      eventAt: '2026-05-09T00:00:00.000Z',
+      status: 'running',
+      content: { query: 'pentax' },
     });
 
     const stats = getWorkerListingEventStats(db, 'run-worker-1');
@@ -191,6 +203,20 @@ test('worker event helpers group audit events by category', () => {
 
     const runStats = getWorkerListingEventStats(db, 'workflow-run-1');
     assert.equal(runStats.total, 3);
+
+    const auditStats = getWorkerAuditEventStats(db, 'workflow-run-1');
+    assert.equal(auditStats.listingTotal, 3);
+    assert.equal(auditStats.workflow, 1);
+    assert.equal(auditStats.total, 4);
+    assert.equal(auditStats.latestEvent.event_type, 'collector_cycle_started');
+
+    const allEvents = listWorkerAuditEvents(db, 'workflow-run-1', { category: 'all' });
+    assert.equal(allEvents.length, 4);
+    assert.equal(allEvents[0].event_scope, 'workflow');
+
+    const workflowEvents = listWorkerAuditEvents(db, 'workflow-run-1', { category: 'workflow' });
+    assert.equal(workflowEvents.length, 1);
+    assert.equal(workflowEvents[0].content.query, 'pentax');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

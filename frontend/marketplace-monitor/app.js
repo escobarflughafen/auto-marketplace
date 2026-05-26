@@ -8,6 +8,8 @@ const WORKFLOW_SELECTION_STORAGE_KEY = 'marketplace-monitor-selected-workflow';
 const WORKFLOW_ACTIVE_POLL_MS = 5000;
 const WORKFLOW_IDLE_POLL_MS = 15000;
 const WORKFLOW_HIDDEN_POLL_MS = 30000;
+const SUMMARY_ACTIVE_POLL_MS = 10000;
+const SUMMARY_HIDDEN_POLL_MS = 30000;
 const DEFAULT_ROUTE = '/listings';
 const ROUTES = {
   '/listings': { panel: 'listingsPanel', listingView: 'queryResultsView' },
@@ -35,7 +37,8 @@ const store = {
   processes: [],
   selectedProcessId: '',
   workerDetailProcess: null,
-  workerDetailCategory: 'done',
+  workerDetailCategory: 'all',
+  workerDetailEventType: 'all',
   workerDetailEvents: [],
   workerDetailStats: null,
   credentials: null,
@@ -49,13 +52,22 @@ const store = {
   historySoldRange: localStorage.getItem('marketplace-monitor-history-sold-range') || 'all',
   editingPurchaseHistoryRecordId: '',
   eventRegistry: [],
+  purchaseHistoryLoaded: false,
+  eventRegistryLoaded: false,
+  workflowsLoaded: false,
   historySort: { key: 'title', direction: 'asc' },
   eventRegistrySort: { key: 'time', direction: 'desc' },
+  summarySignature: '',
   workflowSignature: '',
   processSignature: '',
   workerDetailSignature: '',
+  summaryPollTimer: null,
+  summaryPollInFlight: false,
   workflowPollTimer: null,
   workflowPollInFlight: false,
+  summaryRequestSeq: 0,
+  workflowRequestSeq: 0,
+  workerDetailRequestSeq: 0,
   historyTable: null,
 };
 
@@ -339,6 +351,17 @@ function renderHistoryStats() {
     els.historyInventoryStatsRow.innerHTML = '';
     return;
   }
+  if (!store.purchaseHistoryLoaded && store.purchaseHistory.length === 0) {
+    const labels = ['Items', 'Active cost', 'Listed value', 'Sold revenue', 'Realized profit'];
+    els.historyInventoryStatsRow.innerHTML = labels.map((label) => (
+      '<div class="inventory-stat">'
+        + `<div class="inventory-stat-label">${html(label)}</div>`
+        + '<div class="skeleton-block skeleton-value"></div>'
+        + '<div class="skeleton-block skeleton-line skeleton-meta-line"></div>'
+      + '</div>'
+    )).join('');
+    return;
+  }
 
   const rows = store.purchaseHistory || [];
   const byStatus = { hold: [], listed: [], sold: [] };
@@ -592,6 +615,7 @@ function renderHistoryTable(rows) {
   const data = historyTableData(rows);
   const columns = historyTableColumns();
   if (!store.historyTable) {
+    els.historyTable.innerHTML = '';
     store.historyTable = new Tabulator(els.historyTable, {
       data,
       height: 'min(68vh, 760px)',
@@ -660,6 +684,12 @@ function renderPurchaseHistory() {
     return;
   }
   renderPurchaseHistoryDocuments();
+  if (!store.purchaseHistoryLoaded && store.purchaseHistory.length === 0) {
+    els.historyMeta.textContent = 'Preparing history...';
+    renderHistoryStats();
+    renderHistoryTableSkeleton();
+    return;
+  }
   const rows = sortRows(store.purchaseHistory, store.historySort, historySortValue);
   const selectedDocument = store.purchaseHistoryDocuments.find((document) => document.document_id === selectedHistoryDocumentId());
   els.historyMeta.textContent = `${store.purchaseHistory.length} rows${selectedDocument ? ` in ${selectedDocument.name}` : ''}`;
@@ -737,6 +767,7 @@ async function loadPurchaseHistory() {
   store.purchaseHistoryFields = payload.fields || [];
   store.purchaseHistoryCanWrite = Boolean(payload.auth?.capabilities?.canWrite);
   store.purchaseHistoryCsvPath = payload.csvPath || '';
+  store.purchaseHistoryLoaded = true;
   renderPurchaseHistory();
   const saveButton = document.getElementById('historySaveButton');
   if (saveButton) {
@@ -999,6 +1030,12 @@ function renderEventRegistry() {
   if (!els.eventRegistryTableBody || !els.eventRegistryMeta) {
     return;
   }
+  if (!store.eventRegistryLoaded && store.eventRegistry.length === 0) {
+    els.eventRegistryMeta.textContent = 'Preparing events...';
+    els.eventRegistryTableBody.innerHTML = renderSkeletonRows(5, 6);
+    updateSortButtons('[data-event-sort]', store.eventRegistrySort.key, store.eventRegistrySort.direction);
+    return;
+  }
   els.eventRegistryMeta.textContent = `${store.eventRegistry.length} recent events`;
   if (!store.eventRegistry.length) {
     els.eventRegistryTableBody.innerHTML = '<tr><td colspan="6" class="empty-state">Events appear here.</td></tr>';
@@ -1026,6 +1063,7 @@ async function loadEventRegistry() {
   const source = els.eventRegistrySourceSelect?.value || 'all';
   const payload = await fetchJson(`/api/events?source=${encodeURIComponent(source)}&limit=200`);
   store.eventRegistry = payload.events || [];
+  store.eventRegistryLoaded = true;
   renderEventRegistry();
 }
 
@@ -1079,6 +1117,10 @@ function isPanelActive(panelId) {
 function workflowsPollDelayMs() {
   if (document.hidden) return WORKFLOW_HIDDEN_POLL_MS;
   return isPanelActive('opsPanel') ? WORKFLOW_ACTIVE_POLL_MS : WORKFLOW_IDLE_POLL_MS;
+}
+
+function summaryPollDelayMs() {
+  return document.hidden ? SUMMARY_HIDDEN_POLL_MS : SUMMARY_ACTIVE_POLL_MS;
 }
 
 function workerTypeLabel(value) {
@@ -1172,6 +1214,94 @@ function renderSummary() {
   els.summary.innerHTML = cards.map(([label, value]) => (
     `<div class="card"><div class="label">${html(label)}</div><div class="value">${html(value)}</div></div>`
   )).join('');
+}
+
+function renderSummarySkeleton() {
+  const labels = ['Total', 'Pending', 'Processing', 'Done', 'Needs review', 'Sold', 'Pending sale'];
+  els.summary.innerHTML = labels.map((label) => (
+    '<div class="card pre-render-card">'
+      + `<div class="label">${html(label)}</div>`
+      + '<div class="skeleton-block skeleton-value"></div>'
+    + '</div>'
+  )).join('');
+}
+
+function renderSkeletonRows(rowCount, columnCount) {
+  return Array.from({ length: rowCount }, () => (
+    '<tr>'
+      + Array.from({ length: columnCount }, () => '<td><div class="skeleton-block skeleton-line"></div></td>').join('')
+    + '</tr>'
+  )).join('');
+}
+
+function renderHistoryTableSkeleton() {
+  if (!els.historyTable || store.historyTable) return;
+  els.historyTable.innerHTML = '<div class="tablewrap prerender-tablewrap">'
+    + '<table class="history-table"><thead><tr><th>Item</th><th>Kind</th><th>Cost</th><th>Price</th><th>Status</th><th>Profit</th><th>ROI</th><th>Result</th><th>Dates</th><th></th></tr></thead><tbody>'
+    + renderSkeletonRows(7, 10)
+    + '</tbody></table></div>';
+}
+
+function renderWorkerControlSkeleton() {
+  if (!els.workerControl) return;
+  const rows = [
+    ['Mode', '<div class="skeleton-block skeleton-input"></div>'],
+    ['Credential', '<div class="skeleton-block skeleton-input"></div>'],
+    ['Runtime', '<div class="skeleton-block skeleton-input"></div>'],
+    ['Limits', '<div class="skeleton-block skeleton-input"></div>'],
+  ].map(([label, content]) => `<tr><th>${html(label)}</th><td>${content}</td></tr>`).join('');
+  els.workerControl.innerHTML = '<div class="worker-control-title">'
+    + '<div><div class="label">Worker Setup</div><div class="process-meta">Preparing worker modes.</div></div>'
+    + '<div class="segmented worker-type-tabs"><button type="button" class="secondary active" disabled>Collector</button><button type="button" class="secondary" disabled>Resolver</button></div>'
+    + '</div>'
+    + '<div class="worker-control-columns">'
+    + '<section class="worker-control-column worker-control-left">'
+    + '<div class="worker-control-section-title">Mode</div>'
+    + '<div class="tablewrap worker-control-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
+    + rows
+    + '</tbody></table></div>'
+    + '</section>'
+    + '<section class="worker-control-column worker-control-right">'
+    + '<div class="worker-control-section-title">Command</div>'
+    + '<div class="tablewrap worker-control-tablewrap worker-command-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
+    + '<tr><th>Command</th><td><div class="skeleton-block skeleton-command"></div></td></tr>'
+    + '<tr><th>Actions</th><td><div class="worker-control-actions"><button type="button" disabled>Start</button><button type="button" class="secondary" disabled>Reset Params</button><button type="button" class="secondary" disabled>Refresh</button></div></td></tr>'
+    + '</tbody></table></div>'
+    + '</section>'
+    + '</div>';
+}
+
+function renderProcessListSkeleton() {
+  if (!els.processList) return;
+  els.processList.innerHTML = '<div class="card">'
+    + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Preparing worker status.</div></div></div>'
+    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Work</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
+    + renderSkeletonRows(4, 11)
+    + '</tbody></table></div>'
+    + '</div>';
+}
+
+function renderInitialShell() {
+  renderSummarySkeleton();
+  listingsViewer.renderInitialShell?.();
+  renderPurchaseHistory();
+  renderEventRegistry();
+  renderSettings();
+  renderWorkerControlSkeleton();
+  renderProcessListSkeleton();
+}
+
+function summaryRenderSignature(summary = store.summary) {
+  const counts = summary?.queueCounts || {};
+  return JSON.stringify({
+    totalRows: summary?.totalRows || 0,
+    pending: counts.pending || 0,
+    processing: counts.processing || 0,
+    done: counts.done || 0,
+    error: counts.error || 0,
+    sold: counts.sold || 0,
+    pending_sale: counts.pending_sale || 0,
+  });
 }
 
 function renderWorkflowOptions() {
@@ -1399,6 +1529,9 @@ function handleWorkflowFieldChange(event) {
 function renderWorkerControl() {
   const workflow = selectedWorkflow();
   if (!workflow || !els.workerControl) {
+    if (!store.workflowsLoaded) {
+      renderWorkerControlSkeleton();
+    }
     return;
   }
 
@@ -1568,9 +1701,13 @@ function activeProcess() {
 function eventTitle(event) {
   return event?.content?.detail?.title
     || event?.content?.card?.title
+    || event?.content?.query
+    || event?.content?.mode
+    || event?.content?.reason
     || event?.listing?.detail_title
     || event?.listing?.card_title
     || event?.listing_id
+    || event?.workflow_run_id
     || '';
 }
 
@@ -1582,8 +1719,19 @@ function eventReason(event) {
   return event?.error
     || event?.content?.detail?.availabilityReason
     || event?.content?.runtime?.stopReason
+    || event?.content?.reason
+    || event?.content?.signal
+    || event?.content?.stopError
     || event?.status
     || '';
+}
+
+function eventScope(event) {
+  return event?.event_scope || (event?.listing_id ? 'listing' : 'workflow');
+}
+
+function eventSubject(event) {
+  return event?.listing_id || event?.workflow_run_id || event?.worker_id || '';
 }
 
 function latestWorkerAction(proc) {
@@ -1634,35 +1782,54 @@ function processRenderSignature(processes = store.processes) {
 }
 
 function captureProcessScrollState() {
-  const tableWrap = els.processList.querySelector('.worker-table-wrap');
-  const detailWrap = els.processList.querySelector('.worker-detail-tablewrap');
+  const selectors = [
+    '.worker-table-wrap',
+    '.worker-inspector-body',
+    '.worker-detail-tablewrap',
+    '.worker-detail-section-tablewrap',
+    '.worker-preview-frame',
+    '.worker-live-screen-frame',
+    '.worker-shot-strip',
+    '.worker-log-wrap',
+  ];
   return {
     windowX: window.scrollX,
     windowY: window.scrollY,
-    tableLeft: tableWrap?.scrollLeft || 0,
-    tableTop: tableWrap?.scrollTop || 0,
-    detailLeft: detailWrap?.scrollLeft || 0,
-    detailTop: detailWrap?.scrollTop || 0,
+    scrollables: selectors.flatMap((selector) => (
+      [...els.processList.querySelectorAll(selector)].map((node, index) => ({
+        selector,
+        index,
+        left: node.scrollLeft || 0,
+        top: node.scrollTop || 0,
+      }))
+    )),
   };
 }
 
 function restoreProcessScrollState(state) {
   if (!state) return;
-  const tableWrap = els.processList.querySelector('.worker-table-wrap');
-  const detailWrap = els.processList.querySelector('.worker-detail-tablewrap');
-  if (tableWrap) {
-    tableWrap.scrollLeft = state.tableLeft;
-    tableWrap.scrollTop = state.tableTop;
+  const apply = () => {
+    for (const item of state.scrollables || []) {
+      const node = els.processList.querySelectorAll(item.selector)[item.index];
+      if (!node) continue;
+      node.scrollLeft = item.left;
+      node.scrollTop = item.top;
+    }
+    window.scrollTo(state.windowX, state.windowY);
+  };
+  apply();
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(apply);
   }
-  if (detailWrap) {
-    detailWrap.scrollLeft = state.detailLeft;
-    detailWrap.scrollTop = state.detailTop;
-  }
-  window.scrollTo(state.windowX, state.windowY);
 }
 
 function renderProcesses(options = {}) {
   const scrollState = options.preserveScroll ? captureProcessScrollState() : null;
+  if (!store.workflowsLoaded) {
+    renderProcessListSkeleton();
+    restoreProcessScrollState(scrollState);
+    return;
+  }
   if (!store.processes.length) {
     els.processList.innerHTML = '<div class="card"><div class="label">Workers</div><div>Managed workers appear here after they start.</div></div>';
     restoreProcessScrollState(scrollState);
@@ -1673,6 +1840,7 @@ function renderProcesses(options = {}) {
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
+    store.workerDetailEventType = 'all';
     store.workerDetailSignature = '';
   }
   const rows = store.processes.map((proc) => {
@@ -1725,6 +1893,7 @@ function renderProcesses(options = {}) {
       store.workerDetailProcess = null;
       store.workerDetailStats = null;
       store.workerDetailEvents = [];
+      store.workerDetailEventType = 'all';
       store.workerDetailSignature = '';
       renderProcesses();
     });
@@ -1736,6 +1905,7 @@ function renderProcesses(options = {}) {
       store.workerDetailProcess = null;
       store.workerDetailStats = null;
       store.workerDetailEvents = [];
+      store.workerDetailEventType = 'all';
       store.workerDetailSignature = '';
       renderProcesses();
     });
@@ -1743,9 +1913,14 @@ function renderProcesses(options = {}) {
   for (const button of document.querySelectorAll('.worker-category-button')) {
     button.addEventListener('click', async () => {
       store.workerDetailCategory = button.dataset.category;
+      store.workerDetailEventType = 'all';
       await loadWorkerDetail();
     });
   }
+  document.getElementById('workerEventTypeSelect')?.addEventListener('change', async (event) => {
+    store.workerDetailEventType = event.target.value || 'all';
+    await loadWorkerDetail();
+  });
   for (const button of document.querySelectorAll('.stop-button')) {
     button.addEventListener('click', async () => {
       button.disabled = true;
@@ -1823,6 +1998,9 @@ function workerDetailRenderSignature(process, stats, events) {
     eventStats: process?.eventStats || null,
     stats: stats ? {
       total: stats.total || 0,
+      listingTotal: stats.listingTotal || 0,
+      workflow: stats.workflow || 0,
+      eventTypes: stats.eventTypes || [],
       done: stats.done || 0,
       skipped: stats.skipped || 0,
       error: stats.error || 0,
@@ -1830,7 +2008,8 @@ function workerDetailRenderSignature(process, stats, events) {
       latestEventId: stats.latestEvent?.id || stats.latestEvent?.event_at || '',
       latestPreviewEventId: stats.latestPreviewEvent?.id || stats.latestPreviewEvent?.event_at || '',
     } : null,
-    events: (events || []).map((event) => `${event.id || event.event_at}:${event.event_type}:${event.status}`),
+    selectedEventType: store.workerDetailEventType,
+    events: (events || []).map((event) => `${event.id || event.event_at}:${eventScope(event)}:${event.event_type}:${event.status}`),
     latestScreenshot: screenshots[0]?.name || screenshots[0]?.url || '',
     screenshotCount: screenshots.length,
   });
@@ -1869,21 +2048,55 @@ function renderWorkerScreenshotHistory(selectedProcess) {
     + '</div>';
 }
 
+function workerEventTypeOptions(detailStats = {}) {
+  return (detailStats.eventTypes || [])
+    .map((item) => ({
+      eventType: item.eventType || item.event_type || '',
+      eventScope: item.eventScope || item.event_scope || '',
+      count: item.count || 0,
+    }))
+    .filter((item) => item.eventType);
+}
+
+function workerEventTypeLabel(item) {
+  const scope = item.eventScope ? `${item.eventScope} / ` : '';
+  return `${scope}${item.eventType} (${item.count})`;
+}
+
+function workerPreviewSource(event) {
+  if (!event) return '';
+  if (event.screenshot_path || event.snapshot_path) return 'event capture';
+  if (event.screenshotUrl || event.snapshotUrl) return 'stored listing artifact';
+  return eventScope(event) === 'workflow' ? 'workflow event' : 'listing event';
+}
+
 function renderWorkerDetail(selectedProcess) {
   const stats = workerStats(selectedProcess);
   const logs = (selectedProcess?.logs || []).slice(-120);
   const detailStats = store.workerDetailStats || selectedProcess?.eventStats || {};
+  const eventTypeOptions = workerEventTypeOptions(detailStats);
+  if (store.workerDetailEventType !== 'all' && !eventTypeOptions.some((item) => item.eventType === store.workerDetailEventType)) {
+    store.workerDetailEventType = 'all';
+  }
   const latestEvent = detailStats.latestEvent || null;
   const previewEvent = detailStats.latestPreviewEvent || latestEvent;
   const categoryButtons = [
+    ['all', 'All', detailStats.total || 0],
+    ['workflow', 'Workflow', detailStats.workflow || 0],
     ['done', 'Done', detailStats.done || 0],
     ['skipped', 'Skipped', detailStats.skipped || 0],
     ['error', 'Review', detailStats.error || 0],
     ['started', 'Started', detailStats.started || 0],
-    ['all', 'All', detailStats.total || 0],
   ].map(([category, label, count]) => (
     `<button type="button" class="secondary worker-category-button ${store.workerDetailCategory === category ? 'active' : ''}" data-category="${html(category)}">${html(label)} ${html(count)}</button>`
   )).join('');
+  const eventTypeSelect = '<label class="inline-control worker-event-type-filter">Event'
+    + '<select id="workerEventTypeSelect">'
+    + '<option value="all">All event types</option>'
+    + eventTypeOptions.map((item) => (
+      `<option value="${html(item.eventType)}"${store.workerDetailEventType === item.eventType ? ' selected' : ''}>${html(workerEventTypeLabel(item))}</option>`
+    )).join('')
+    + '</select></label>';
   const statusRows = tableRows([
     ['Worker', selectedProcess?.label || ''],
     ['Run ID', selectedProcess?.id || ''],
@@ -1903,6 +2116,8 @@ function renderWorkerDetail(selectedProcess) {
     ['Review', stats.errors],
     ['Sleeps', stats.sleeps],
     ['Audit events', detailStats.total || 0],
+    ['Workflow events', detailStats.workflow || 0],
+    ['Listing events', detailStats.listingTotal ?? detailStats.total ?? 0],
     ['Audit done', detailStats.done || 0],
     ['Audit skipped', detailStats.skipped || 0],
     ['Audit review', detailStats.error || 0],
@@ -1918,7 +2133,9 @@ function renderWorkerDetail(selectedProcess) {
   if (previewEvent) {
     const previewRows = tableRows([
       ['Time', formatDate(previewEvent.event_at)],
-      ['Listing', previewEvent.listing_id || ''],
+      ['Scope', eventScope(previewEvent)],
+      ['Source', workerPreviewSource(previewEvent)],
+      ['Subject', eventSubject(previewEvent)],
       ['Worker ID', previewEvent.worker_id || ''],
       ['Event', previewEvent.event_type || ''],
       ['Status', previewEvent.status || ''],
@@ -1942,7 +2159,8 @@ function renderWorkerDetail(selectedProcess) {
     ? store.workerDetailEvents.map((event) => (
       '<tr>'
         + `<td>${html(new Date(event.event_at).toLocaleString())}</td>`
-        + `<td><code>${html(event.listing_id)}</code></td>`
+        + `<td>${html(eventScope(event))}</td>`
+        + `<td><code>${html(eventSubject(event))}</code></td>`
         + `<td>${html(event.event_type)}</td>`
         + `<td><span class="status ${html(event.status)}">${html(event.status)}</span></td>`
         + `<td>${html(eventPrice(event))}</td>`
@@ -1951,12 +2169,12 @@ function renderWorkerDetail(selectedProcess) {
         + '<td><div class="row-actions">' + workerEventLinks(event) + '</div></td>'
       + '</tr>'
     )).join('')
-    : '<tr><td colspan="8" class="empty-state">Events for this category appear here.</td></tr>';
+    : '<tr><td colspan="9" class="empty-state">Events for this category appear here.</td></tr>';
   detailRows.push(workerDetailSectionRow('Audit Events', '<div class="worker-panel-toolbar worker-detail-section-toolbar">'
     + '<div class="worker-panel-title">Audit Events</div>'
-    + `<div class="segmented worker-categories">${categoryButtons}</div>`
+    + `<div class="worker-event-filter-row"><div class="segmented worker-categories">${categoryButtons}</div>${eventTypeSelect}</div>`
     + '</div>'
-    + '<div class="worker-detail-section-tablewrap"><table class="worker-events-table"><thead><tr><th>Time</th><th>Listing</th><th>Event</th><th>Status</th><th>Price</th><th>Title</th><th>Reason</th><th>Links</th></tr></thead><tbody>'
+    + '<div class="worker-detail-section-tablewrap"><table class="worker-events-table"><thead><tr><th>Time</th><th>Scope</th><th>Subject</th><th>Event</th><th>Status</th><th>Price</th><th>Title</th><th>Reason</th><th>Links</th></tr></thead><tbody>'
     + eventRows
     + '</tbody></table></div>'));
 
@@ -2002,6 +2220,7 @@ async function loadWorkerDetail(options = {}) {
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
+    store.workerDetailEventType = 'all';
     store.workerDetailSignature = '';
     if (render) {
       renderProcesses({ preserveScroll: options.preserveScroll });
@@ -2009,12 +2228,30 @@ async function loadWorkerDetail(options = {}) {
     return;
   }
 
-  const workerId = encodeURIComponent(selectedProcess.id);
-  const [detailPayload, statsPayload, eventsPayload] = await Promise.all([
+  const selectedProcessId = selectedProcess.id;
+  const selectedCategory = store.workerDetailCategory;
+  let selectedEventType = store.workerDetailEventType;
+  const requestSeq = ++store.workerDetailRequestSeq;
+  const workerId = encodeURIComponent(selectedProcessId);
+  const [detailPayload, statsPayload] = await Promise.all([
     fetchJson(`/api/workflows/${workerId}`),
     fetchJson(`/api/workflows/${workerId}/stats`),
-    fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(store.workerDetailCategory)}&limit=50`),
   ]);
+  const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
+  if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
+    selectedEventType = 'all';
+    store.workerDetailEventType = 'all';
+  }
+  const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
+  const eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`);
+  if (
+    requestSeq !== store.workerDetailRequestSeq
+    || store.selectedProcessId !== selectedProcessId
+    || store.workerDetailCategory !== selectedCategory
+    || store.workerDetailEventType !== selectedEventType
+  ) {
+    return;
+  }
   store.workerDetailProcess = detailPayload.process || selectedProcess;
   store.workerDetailStats = statsPayload.stats || null;
   store.workerDetailEvents = eventsPayload.events || [];
@@ -2031,14 +2268,23 @@ async function loadWorkerDetail(options = {}) {
 }
 
 async function loadSummary() {
-  store.summary = await fetchJson('/api/summary');
-  renderSummary();
+  const requestSeq = ++store.summaryRequestSeq;
+  const summary = await fetchJson('/api/summary');
+  if (requestSeq !== store.summaryRequestSeq) return;
+  const nextSignature = summaryRenderSignature(summary);
+  store.summary = summary;
+  if (nextSignature !== store.summarySignature) {
+    store.summarySignature = nextSignature;
+    renderSummary();
+  }
 }
 
 async function loadWorkflows(options = {}) {
   const background = options.background === true;
   const light = options.light === true;
+  const requestSeq = ++store.workflowRequestSeq;
   const payload = await fetchJson(light ? '/api/workflows?reconcile=0&stats=0' : '/api/workflows');
+  if (requestSeq !== store.workflowRequestSeq) return;
   const nextWorkflows = payload.workflows || [];
   const nextWorkflowSignature = JSON.stringify(nextWorkflows.map((workflow) => ({
     id: workflow.id,
@@ -2051,6 +2297,7 @@ async function loadWorkflows(options = {}) {
   const nextProcessSignature = processRenderSignature(payload.processes || []);
   const processDefinitionsChanged = nextProcessSignature !== store.processSignature;
   store.workflows = nextWorkflows;
+  store.workflowsLoaded = true;
   store.workflowSignature = nextWorkflowSignature;
   store.processes = payload.processes || [];
   store.processSignature = nextProcessSignature;
@@ -2077,6 +2324,29 @@ function scheduleWorkflowSync(delay = workflowsPollDelayMs()) {
     clearTimeout(store.workflowPollTimer);
   }
   store.workflowPollTimer = setTimeout(syncWorkflowsInBackground, delay);
+}
+
+function scheduleSummarySync(delay = summaryPollDelayMs()) {
+  if (store.summaryPollTimer) {
+    clearTimeout(store.summaryPollTimer);
+  }
+  store.summaryPollTimer = setTimeout(syncSummaryInBackground, delay);
+}
+
+async function syncSummaryInBackground() {
+  if (store.summaryPollInFlight) {
+    scheduleSummarySync();
+    return;
+  }
+  store.summaryPollInFlight = true;
+  try {
+    await loadSummary();
+  } catch (error) {
+    console.warn('Background summary sync failed:', error.message || error);
+  } finally {
+    store.summaryPollInFlight = false;
+    scheduleSummarySync();
+  }
 }
 
 async function syncWorkflowsInBackground() {
@@ -2169,6 +2439,7 @@ function bindEvents() {
     store.workerDetailProcess = null;
     store.workerDetailStats = null;
     store.workerDetailEvents = [];
+    store.workerDetailEventType = 'all';
     store.workerDetailSignature = '';
     renderProcesses();
   });
@@ -2190,6 +2461,11 @@ function bindEvents() {
     navigateToRoute(normalizeRoute(window.location.hash), { replace: true }).catch((error) => {
       alert(error.message || 'Route could not be loaded.');
     });
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!hasApiToken()) return;
+    scheduleSummarySync(0);
+    scheduleWorkflowSync(0);
   });
   els.historyForm?.addEventListener('submit', savePurchaseHistoryRow);
   document.getElementById('historyResetButton')?.addEventListener('click', () => {
@@ -2331,6 +2607,7 @@ function bindEvents() {
 bindEvents();
 listingsViewer.bindEvents();
 listingsViewer.renderHead();
+renderInitialShell();
 renderTokenWarning();
 if (hasApiToken()) {
   await loadSummary();
@@ -2342,7 +2619,7 @@ if (hasApiToken()) {
   renderSettings();
   await loadWorkflows();
   applyRouteFromLocation({ replace: !window.location.hash });
-  setInterval(loadSummary, 10000);
+  scheduleSummarySync();
   scheduleWorkflowSync();
 } else {
   els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Token needed</div></div>';

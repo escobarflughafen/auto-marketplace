@@ -2302,6 +2302,7 @@ function normalizeListingEventRow(row) {
   }
 
   return {
+    event_scope: row.event_scope || 'listing',
     event_id: row.event_id,
     workflow_run_id: row.workflow_run_id || '',
     listing_id: row.listing_id,
@@ -2335,13 +2336,31 @@ function normalizeWorkflowEventRow(row) {
   }
 
   return {
+    event_scope: row.event_scope || 'workflow',
     event_id: row.event_id,
     workflow_run_id: row.workflow_run_id,
+    listing_id: row.listing_id || '',
     event_type: row.event_type,
     event_at: row.event_at,
+    worker_id: row.worker_id || row.workflow_run_id || '',
+    source_url: row.source_url || '',
+    attempt: Number.isFinite(row.attempt) ? row.attempt : 0,
     status: row.status,
     content: parseJsonObject(row.content_json),
+    content_hash: row.content_hash || '',
+    screenshot_path: row.screenshot_path || '',
+    snapshot_path: row.snapshot_path || '',
     error: row.error,
+    listing: row.listing || {
+      detail_status: '',
+      card_title: '',
+      detail_title: '',
+      detail_price: '',
+      detail_location: '',
+      detail_seller_name: '',
+      screenshot_path: '',
+      snapshot_path: '',
+    },
   };
 }
 
@@ -2399,13 +2418,42 @@ function getWorkflowEvent(db, eventId) {
 
 function listWorkflowEvents(db, workflowRunId, options = {}) {
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
+  const eventType = String(options.eventType || '').trim();
+  const params = [String(workflowRunId)];
+  const eventTypeSql = eventType ? 'AND event_type = ?' : '';
+  if (eventType) {
+    params.push(eventType);
+  }
+  params.push(limit);
   return db.prepare(`
     SELECT *
     FROM workflow_events
     WHERE workflow_run_id = ?
+      ${eventTypeSql}
     ORDER BY event_at DESC
     LIMIT ?
-  `).all(String(workflowRunId), limit).map(normalizeWorkflowEventRow);
+  `).all(...params).map(normalizeWorkflowEventRow);
+}
+
+function listWorkerWorkflowEvents(db, workflowRunId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
+  const eventType = String(options.eventType || '').trim();
+  const params = [String(workflowRunId)];
+  const eventTypeSql = eventType ? 'AND event_type = ?' : '';
+  if (eventType) {
+    params.push(eventType);
+  }
+  params.push(limit);
+  return db.prepare(`
+    SELECT
+      'workflow' AS event_scope,
+      *
+    FROM workflow_events
+    WHERE workflow_run_id = ?
+      ${eventTypeSql}
+    ORDER BY event_at DESC
+    LIMIT ?
+  `).all(...params).map(normalizeWorkflowEventRow);
 }
 
 function eventTypesForCategory(category) {
@@ -2509,12 +2557,16 @@ function workerRunWhereSql(workerId, workerIds, params, alias = 'e') {
 function listWorkerListingEvents(db, workerId, options = {}) {
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
   const eventTypes = eventTypesForCategory(options.category);
+  const eventType = String(options.eventType || '').trim();
   const workerIds = options.workerIds || [workerId];
   const params = [];
   const workerSql = workerRunWhereSql(workerId, workerIds, params, 'e');
   let eventTypeSql = '';
 
-  if (eventTypes.length > 0) {
+  if (eventType) {
+    eventTypeSql = 'AND e.event_type = ?';
+    params.push(eventType);
+  } else if (eventTypes.length > 0) {
     eventTypeSql = `AND e.event_type IN (${eventTypes.map(() => '?').join(', ')})`;
     params.push(...eventTypes);
   }
@@ -2523,6 +2575,7 @@ function listWorkerListingEvents(db, workerId, options = {}) {
 
   return db.prepare(`
     SELECT
+      'listing' AS event_scope,
       e.*,
       h.detail_status,
       h.card_title,
@@ -2540,6 +2593,41 @@ function listWorkerListingEvents(db, workerId, options = {}) {
     ORDER BY e.event_at DESC
     LIMIT ?
   `).all(...params).map(normalizeListingEventRow);
+}
+
+function listWorkerAuditEvents(db, workerId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
+  const category = normalizeKeyword(options.category || 'all').toLowerCase();
+
+  if (category === 'workflow' || category === 'lifecycle') {
+    return listWorkerWorkflowEvents(db, workerId, { ...options, limit });
+  }
+
+  if (category === 'listing') {
+    return listWorkerListingEvents(db, workerId, {
+      ...options,
+      category: 'all',
+      limit,
+    });
+  }
+
+  if (category !== 'all') {
+    return listWorkerListingEvents(db, workerId, {
+      ...options,
+      category,
+      limit,
+    });
+  }
+
+  const listingEvents = listWorkerListingEvents(db, workerId, {
+    ...options,
+    category: 'all',
+    limit,
+  });
+  const workflowEvents = listWorkerWorkflowEvents(db, workerId, { ...options, limit });
+  return [...listingEvents, ...workflowEvents]
+    .sort((left, right) => String(right.event_at || '').localeCompare(String(left.event_at || '')))
+    .slice(0, limit);
 }
 
 function getWorkerListingEventStats(db, workerId, options = {}) {
@@ -2560,6 +2648,11 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
     error: 0,
     started: 0,
     workerIds,
+    eventTypes: rows.map((row) => ({
+      eventType: row.event_type,
+      eventScope: 'listing',
+      count: row.count,
+    })),
   };
 
   for (const row of rows) {
@@ -2625,6 +2718,45 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
     ...stats,
     latestEvent: normalizeListingEventRow(latest),
     latestPreviewEvent: normalizeListingEventRow(latestPreview),
+  };
+}
+
+function getWorkerAuditEventStats(db, workerId, options = {}) {
+  const listingStats = getWorkerListingEventStats(db, workerId, options);
+  const workflowRows = db.prepare(`
+    SELECT event_type, COUNT(*) AS count
+    FROM workflow_events
+    WHERE workflow_run_id = ?
+    GROUP BY event_type
+  `).all(String(workerId));
+  const workflowCount = workflowRows.reduce((sum, row) => sum + row.count, 0);
+  const latestWorkflow = listWorkerWorkflowEvents(db, workerId, { limit: 1 })[0] || null;
+  const latestCandidates = [listingStats.latestEvent, latestWorkflow].filter(Boolean);
+  const latestEvent = latestCandidates
+    .sort((left, right) => String(right.event_at || '').localeCompare(String(left.event_at || '')))[0] || null;
+  const eventTypesByKey = new Map();
+  for (const item of listingStats.eventTypes || []) {
+    eventTypesByKey.set(`${item.eventScope}:${item.eventType}`, item);
+  }
+  for (const row of workflowRows) {
+    const key = `workflow:${row.event_type}`;
+    const current = eventTypesByKey.get(key);
+    eventTypesByKey.set(key, {
+      eventType: row.event_type,
+      eventScope: 'workflow',
+      count: (current?.count || 0) + row.count,
+    });
+  }
+
+  return {
+    ...listingStats,
+    listingTotal: listingStats.total,
+    workflow: workflowCount,
+    total: listingStats.total + workflowCount,
+    eventTypes: [...eventTypesByKey.values()]
+      .sort((left, right) => right.count - left.count || String(left.eventType).localeCompare(String(right.eventType))),
+    latestEvent,
+    latestPreviewEvent: listingStats.latestPreviewEvent,
   };
 }
 
@@ -2845,6 +2977,7 @@ module.exports = {
   appendResolveQueueEvent,
   getWorkflowEvent,
   listWorkflowEvents,
+  listWorkerWorkflowEvents,
   getListingEvent,
   getListingEvents,
   getLatestListingEvent,
@@ -2866,7 +2999,9 @@ module.exports = {
   listWorkflowRuns,
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
+  listWorkerAuditEvents,
   getWorkerListingEventStats,
+  getWorkerAuditEventStats,
   getDatabaseMaintenanceReport,
   runDatabaseMaintenance,
 };

@@ -29,8 +29,8 @@ const {
   getWorkflowRun,
   listWorkflowRuns,
   resolveWorkerEventIdsForRun,
-  listWorkerListingEvents,
-  getWorkerListingEventStats,
+  listWorkerAuditEvents,
+  getWorkerAuditEventStats,
   listBacklogCandidates,
   addResolveQueueItems,
   clearResolveQueueItems,
@@ -624,11 +624,13 @@ function publicWorkflowRunRecord(run, options = {}) {
 function publicWorkflowRunRecordWithStats(db, run, options = {}) {
   const record = publicWorkflowRunRecord(run, options);
   const workerIds = resolveWorkerEventIdsForRun(db, run.run_id);
-  const eventStats = getWorkerListingEventStats(db, run.run_id, { workerIds });
+  const eventStats = getWorkerAuditEventStats(db, run.run_id, { workerIds });
   record.eventStats = options.includeLatestEvents
     ? eventStats
     : {
       total: eventStats.total,
+      listingTotal: eventStats.listingTotal,
+      workflow: eventStats.workflow,
       done: eventStats.done,
       skipped: eventStats.skipped,
       error: eventStats.error,
@@ -2602,7 +2604,7 @@ function createServer(options) {
     if (workerStatsMatch && request.method === 'GET') {
       const workerId = decodeURIComponent(workerStatsMatch[1]);
       const workerIds = resolveWorkerEventIdsForRun(db, workerId);
-      const stats = getWorkerListingEventStats(db, workerId, { workerIds });
+      const stats = getWorkerAuditEventStats(db, workerId, { workerIds });
       writeJson(response, 200, {
         workerId,
         stats: {
@@ -2618,13 +2620,15 @@ function createServer(options) {
     if (workerEventsMatch && request.method === 'GET') {
       const workerId = decodeURIComponent(workerEventsMatch[1]);
       const category = requestUrl.searchParams.get('category') || 'all';
+      const eventType = requestUrl.searchParams.get('eventType') || '';
       const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '50', 10);
       const workerIds = resolveWorkerEventIdsForRun(db, workerId);
       writeJson(response, 200, {
         workerId,
         category,
+        eventType,
         workerIds,
-        events: listWorkerListingEvents(db, workerId, { category, limit, workerIds }).map(enrichEventPaths),
+        events: listWorkerAuditEvents(db, workerId, { category, eventType, limit, workerIds }).map(enrichEventPaths),
       });
       return;
     }
