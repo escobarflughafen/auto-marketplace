@@ -21,6 +21,7 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   upsertHomepageListingWithStatus,
+  scanPurchaseHistoryMatchesForListings,
   getHomepageListingCounts,
   upsertListingSearchKeyword,
   upsertSearchTitleBagKeyword,
@@ -703,6 +704,10 @@ async function runRound(page, db, options, state, lifecycle = null) {
       outcome: result.outcome,
     });
   }
+  scanPurchaseHistoryMatchesForListings(db, storedResults.map((result) => result.row.listing_id), {
+    actor: 'search-explorer',
+    matchedAt: seenAt,
+  });
 
   const bagKeywords = filterBagKeywordsFromItems(items, options);
   if (options.includeSeedInBag) {

@@ -26,6 +26,9 @@ const {
   listPurchaseHistoryRows,
   upsertPurchaseHistoryListingLink,
   listPurchaseHistoryListingLinks,
+  scanPurchaseHistoryMatchesForListings,
+  scanPurchaseHistoryListingMatches,
+  listPurchaseHistoryMatchQueue,
   listPurchaseHistoryEvents,
   mergePurchaseHistoryDocuments,
   runTransaction,
@@ -217,6 +220,77 @@ test('worker event helpers group audit events by category', () => {
     const workflowEvents = listWorkerAuditEvents(db, 'workflow-run-1', { category: 'workflow' });
     assert.equal(workflowEvents.length, 1);
     assert.equal(workflowEvents[0].content.query, 'pentax');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('collector worker stats use listing outcomes for shared columns', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    for (const [listingId, title] of [
+      ['collector-event-1', 'New collector listing'],
+      ['collector-event-2', 'Updated collector listing'],
+      ['collector-event-3', 'Same collector listing'],
+    ]) {
+      upsertHomepageListing(db, {
+        listingId,
+        href: `https://www.facebook.com/marketplace/item/${listingId}/`,
+        title,
+        text: `CA$ 100 | ${title}`,
+        rank: 1,
+      });
+    }
+
+    appendListingEvent(db, {
+      workflowRunId: 'collector-run-1',
+      workerId: 'collector-run-1',
+      listingId: 'collector-event-1',
+      eventType: 'listing_observed',
+      eventAt: '2026-05-08T01:00:00.000Z',
+      status: 'new',
+    });
+    appendListingEvent(db, {
+      workflowRunId: 'collector-run-1',
+      workerId: 'collector-run-1',
+      listingId: 'collector-event-2',
+      eventType: 'listing_observed',
+      eventAt: '2026-05-08T01:01:00.000Z',
+      status: 'existing_updated',
+    });
+    appendListingEvent(db, {
+      workflowRunId: 'collector-run-1',
+      workerId: 'collector-run-1',
+      listingId: 'collector-event-3',
+      eventType: 'listing_observed',
+      eventAt: '2026-05-08T01:02:00.000Z',
+      status: 'existing_same',
+    });
+    appendWorkflowEvent(db, {
+      workflowRunId: 'collector-run-1',
+      eventType: 'worker_failed',
+      eventAt: '2026-05-08T01:03:00.000Z',
+      status: 'error',
+      error: 'browser closed',
+    });
+
+    const stats = getWorkerAuditEventStats(db, 'collector-run-1');
+    assert.equal(stats.started, 3);
+    assert.equal(stats.done, 2);
+    assert.equal(stats.skipped, 1);
+    assert.equal(stats.error, 1);
+    assert.equal(stats.workflowReview, 1);
+
+    assert.equal(listWorkerAuditEvents(db, 'collector-run-1', { category: 'started' }).length, 3);
+    assert.equal(listWorkerAuditEvents(db, 'collector-run-1', { category: 'done' }).length, 2);
+    assert.equal(listWorkerAuditEvents(db, 'collector-run-1', { category: 'skipped' }).length, 1);
+
+    const reviewEvents = listWorkerAuditEvents(db, 'collector-run-1', { category: 'error' });
+    assert.equal(reviewEvents.length, 1);
+    assert.equal(reviewEvents[0].event_scope, 'workflow');
+    assert.equal(reviewEvents[0].event_type, 'worker_failed');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
@@ -476,6 +550,102 @@ test('purchase history records can link same listing and same model Marketplace 
         .length,
       2,
     );
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('purchase history match queue captures below-threshold matching listings incrementally', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const document = createPurchaseHistoryDocument(db, {
+      name: 'Watch History',
+    });
+    upsertPurchaseHistoryRows(db, document.document_id, [{
+      record_id: 'watch-001',
+      category: 'camera_gear',
+      subcategory: 'camera_body',
+      brand: 'nikon',
+      model: 'fm2',
+      title: 'Nikon FM2',
+      description: 'black 35mm film camera',
+      purchase_price_cad: '200',
+      inventory_status: 'hold',
+      outcome: 'pending',
+    }]);
+    upsertPurchaseHistoryRows(db, document.document_id, [{
+      record_id: 'watch-002',
+      category: 'camera_gear',
+      subcategory: 'lens',
+      brand: 'nikon',
+      model: 'AF-S NIKKOR 28-70 1:2.8D',
+      title: 'AF-S NIKKOR 28-70 1:2.8D',
+      purchase_price_cad: '600',
+      inventory_status: 'hold',
+      outcome: 'pending',
+    }]);
+    upsertHomepageListing(db, {
+      listingId: 'watch-listing-1',
+      href: 'https://www.facebook.com/marketplace/item/8001/',
+      title: 'Nikon FM2 body',
+      text: 'CA$ 210 | Nikon FM2 black body',
+      rank: 1,
+    }, {
+      seenAt: '2026-05-25T00:00:00.000Z',
+    });
+    upsertHomepageListing(db, {
+      listingId: 'watch-listing-2',
+      href: 'https://www.facebook.com/marketplace/item/8002/',
+      title: 'Nikon FM2 body',
+      text: 'CA$ 260 | Nikon FM2 black body',
+      rank: 2,
+    }, {
+      seenAt: '2026-05-25T00:01:00.000Z',
+    });
+    upsertHomepageListing(db, {
+      listingId: 'watch-listing-numeric',
+      href: 'https://www.facebook.com/marketplace/item/8004/',
+      title: '78 and 12 magnetic levels',
+      text: 'CA$ 55 | 78 and 12 magnetic levels',
+      rank: 4,
+    }, {
+      seenAt: '2026-05-25T00:01:30.000Z',
+    });
+
+    const direct = scanPurchaseHistoryMatchesForListings(db, ['watch-listing-1', 'watch-listing-2', 'watch-listing-numeric'], {
+      actor: 'test-history-watch',
+      matchedAt: '2026-05-25T00:02:00.000Z',
+    });
+    assert.equal(direct.scanned, 3);
+    assert.equal(direct.matched, 1);
+    assert.equal(direct.queued, 1);
+
+    const matches = listPurchaseHistoryMatchQueue(db);
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0].listing_id, 'watch-listing-1');
+    assert.equal(matches[0].record_id, 'watch-001');
+    assert.ok(matches[0].matched_terms.includes('fm2'));
+    assert.equal(listResolveQueueItems(db).some((item) => item.listing_id === 'watch-listing-1'), true);
+
+    upsertHomepageListing(db, {
+      listingId: 'watch-listing-3',
+      href: 'https://www.facebook.com/marketplace/item/8003/',
+      title: 'Film gear',
+      text: 'CA$ 199 | Nikon FM2 kit',
+      rank: 3,
+    }, {
+      seenAt: '2026-05-25T00:03:00.000Z',
+    });
+    const scheduled = scanPurchaseHistoryListingMatches(db, {
+      limit: 1,
+      now: '2026-05-25T00:04:00.000Z',
+      initialLookbackMs: 2 * 60 * 1000,
+    });
+    assert.equal(scheduled.scanned, 1);
+    assert.equal(scheduled.matched, 1);
+    assert.equal(listPurchaseHistoryMatchQueue(db).some((item) => item.listing_id === 'watch-listing-3'), true);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

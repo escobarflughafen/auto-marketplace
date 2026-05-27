@@ -20,6 +20,7 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   upsertHomepageListingWithStatus,
+  scanPurchaseHistoryMatchesForListings,
   getHomepageListingCounts,
 } = require('./marketplace-homepage-db');
 const {
@@ -526,6 +527,10 @@ async function runCycle(page, db, options, lifecycle = null) {
   const { items, stats: collectionStats } = collection;
   const seenAt = new Date().toISOString();
   const storedResults = items.map((item) => upsertHomepageListingWithStatus(db, item, { seenAt }));
+  scanPurchaseHistoryMatchesForListings(db, storedResults.map((result) => result.row.listing_id), {
+    actor: 'homepage-collector',
+    matchedAt: seenAt,
+  });
   for (const result of storedResults) {
     appendCollectorListingEvent(db, options, result.row, {
       status: result.outcome,

@@ -267,6 +267,7 @@ export function createListingsViewer() {
     manualListingDialogAddButton: document.getElementById('manualListingDialogAddButton'),
     listingResolveMeta: document.getElementById('listingResolveMeta'),
     resolveQueuePanel: document.getElementById('resolveQueuePanel'),
+    resolveQueueAuditPanel: document.getElementById('resolveQueueAuditPanel'),
     backlogMeta: document.getElementById('backlogMeta'),
     backlogTableBody: document.getElementById('backlogTableBody'),
     backlogStatusFilter: document.getElementById('backlogStatusFilter'),
@@ -522,15 +523,12 @@ export function createListingsViewer() {
 
   function renderResolveQueuePanel() {
     const items = state.resolveQueueItems;
-    const events = state.resolveQueueEvents.slice(0, 5);
+    const events = state.resolveQueueEvents;
     const counts = state.resolveQueueCounts || {};
-    if (!items.length && !events.length) {
+    if (!items.length) {
       els.resolveQueuePanel.innerHTML = '';
-      return;
-    }
-
-    const itemRows = items.length
-      ? items.map((item) => (
+    } else {
+      const itemRows = items.map((item) => (
         '<tr>'
           + `<td><span class="status ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span></td>`
           + `<td><code>${escapeHtml(item.listing_id)}</code></td>`
@@ -545,8 +543,18 @@ export function createListingsViewer() {
           + (item.href ? `<a class="button-link compact" href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
           + '</div></td>'
         + '</tr>'
-      )).join('')
-      : '<tr><td colspan="7" class="empty-state">Resolve queue rows appear here.</td></tr>';
+      )).join('');
+
+      els.resolveQueuePanel.innerHTML = '<section class="card resolve-queue-card">'
+        + '<div class="resolve-queue-header">'
+        + '<div><div class="label">Resolve Queue</div>'
+        + `<div class="process-meta">${escapeHtml(counts.queued || 0)} queued · ${escapeHtml(counts.dispatched || 0)} dispatched · ${escapeHtml(counts.failed || 0)} review · ${escapeHtml(counts.completed || 0)} completed</div></div>`
+        + '</div>'
+        + '<div class="tablewrap resolve-queue-tablewrap"><table class="resolve-queue-table"><thead><tr><th>Status</th><th>ID</th><th>Title</th><th>Row</th><th>Queued</th><th>Run</th><th></th></tr></thead><tbody>'
+        + itemRows
+        + '</tbody></table></div>'
+        + '</section>';
+    }
 
     const eventRows = events.length
       ? events.map((event) => (
@@ -560,21 +568,17 @@ export function createListingsViewer() {
       )).join('')
       : '<tr><td colspan="5" class="empty-state">Resolve queue events appear here.</td></tr>';
 
-    els.resolveQueuePanel.innerHTML = '<section class="card resolve-queue-card">'
+    if (els.resolveQueueAuditPanel) {
+      els.resolveQueueAuditPanel.innerHTML = '<section class="card resolve-queue-card">'
       + '<div class="resolve-queue-header">'
-      + '<div><div class="label">Resolve Queue</div>'
-      + `<div class="process-meta">${escapeHtml(counts.queued || 0)} queued · ${escapeHtml(counts.dispatched || 0)} dispatched · ${escapeHtml(counts.failed || 0)} review · ${escapeHtml(counts.completed || 0)} completed</div></div>`
+      + '<div><div class="label">Queue Audit</div>'
+      + `<div class="process-meta">${escapeHtml(events.length)} recent queue events</div></div>`
       + '</div>'
-      + '<div class="tablewrap resolve-queue-tablewrap"><table class="resolve-queue-table"><thead><tr><th>Status</th><th>ID</th><th>Title</th><th>Row</th><th>Queued</th><th>Run</th><th></th></tr></thead><tbody>'
-      + itemRows
-      + '</tbody></table></div>'
-      + '<div class="resolve-queue-audit">'
-      + '<div class="label">Queue Audit</div>'
       + '<div class="tablewrap compact-tablewrap"><table class="compact-kv-table resolve-queue-events"><thead><tr><th>Time</th><th>ID</th><th>Event</th><th>Status</th><th>Run</th></tr></thead><tbody>'
       + eventRows
       + '</tbody></table></div>'
-      + '</div>'
       + '</section>';
+    }
   }
 
   function renderResolveControls(message = '') {
@@ -1094,7 +1098,8 @@ export function createListingsViewer() {
   }
 
   async function setListingView(viewId, options = {}) {
-    const nextViewId = viewId === 'backlogQueueView' ? 'backlogQueueView' : 'queryResultsView';
+    const allowedViews = new Set(['queryResultsView', 'resolveQueueView', 'resolveQueueAuditView', 'backlogQueueView']);
+    const nextViewId = allowedViews.has(viewId) ? viewId : 'queryResultsView';
     const tab = document.querySelector(`.listing-subtabs .subtab[data-listing-view="${nextViewId}"]`);
     const view = document.getElementById(nextViewId);
     if (!tab || !view) return;
@@ -1104,6 +1109,8 @@ export function createListingsViewer() {
     view.classList.add('active');
     if (nextViewId === 'backlogQueueView' && state.backlogRows.length === 0 && options.load !== false) {
       await loadBacklogQueue();
+    } else if ((nextViewId === 'resolveQueueView' || nextViewId === 'resolveQueueAuditView') && options.load !== false) {
+      await loadResolveQueue();
     }
     if (options.notify) {
       document.dispatchEvent(new CustomEvent('marketplace-listing-view-change', {

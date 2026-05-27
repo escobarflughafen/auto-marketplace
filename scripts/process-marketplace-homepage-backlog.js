@@ -33,6 +33,7 @@ const {
   appendListingEvent,
   appendWorkflowEvent,
   getLatestListingEvent,
+  scanPurchaseHistoryMatchesForListings,
 } = require('./marketplace-homepage-db');
 const {
   DEFAULT_CREDENTIALS_PATH,
@@ -790,6 +791,9 @@ async function processBatch(page, db, options, state = {}) {
           options.logFile,
           `job_bypassed listing_id=${listing.listing_id} availability=${inactiveStatus} reason=${capture.detailRecord.listingContent?.availabilityReason || inactiveStatus} screenshot=${capture.detailRecord.screenshotPath}`,
         );
+        scanPurchaseHistoryMatchesForListings(db, [listing.listing_id], {
+          actor: 'detail-resolver',
+        });
         lifecycle.activeListing = null;
         continue;
       }
@@ -839,6 +843,9 @@ async function processBatch(page, db, options, state = {}) {
         options.logFile,
         `job_done listing_id=${listing.listing_id} title="${capture.detailRecord.title}" screenshot=${capture.detailRecord.screenshotPath}`,
       );
+      scanPurchaseHistoryMatchesForListings(db, [listing.listing_id], {
+        actor: 'detail-resolver',
+      });
       lifecycle.activeListing = null;
       processedCount += 1;
     } catch (error) {

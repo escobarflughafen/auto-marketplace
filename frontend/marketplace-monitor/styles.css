@@ -462,10 +462,12 @@ button:not(:disabled):hover,
   background: var(--button-bg);
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
-.listing-view {
+.listing-view,
+.history-view {
   display: none;
 }
-.listing-view.active {
+.listing-view.active,
+.history-view.active {
   display: block;
 }
 .query-tools {
@@ -839,6 +841,87 @@ button:not(:disabled):hover,
 .history-item-title {
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+.recommendation-price-stack {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+.recommendation-card-pane {
+  margin: 12px 0;
+}
+.recommendation-swipe-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.1fr);
+  gap: 16px;
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 12px;
+}
+.recommendation-swipe-media {
+  position: relative;
+  min-height: 320px;
+  background: var(--soft);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.recommendation-status-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.recommendation-swipe-media img {
+  width: 100%;
+  height: 100%;
+  max-height: 520px;
+  object-fit: contain;
+}
+.recommendation-swipe-body {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.recommendation-swipe-body h3 {
+  margin: 0;
+  font-size: 22px;
+}
+.snapshot-text {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  font-size: 12px;
+}
+.snapshot-text p,
+.snapshot-text ul,
+.snapshot-text pre,
+.snapshot-text h3,
+.snapshot-text h4,
+.snapshot-text h5,
+.snapshot-text h6 {
+  margin: 0 0 8px;
+}
+.snapshot-text ul {
+  padding-left: 18px;
+}
+.snapshot-text pre {
+  padding: 8px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
 }
 .history-edit-button {
   padding: 4px 7px;
@@ -2019,7 +2102,10 @@ textarea {
   :root[data-theme="classic"] .theme-field {
     padding: 0 0 2px;
   }
-  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-live-screen-grid, .worker-control-columns, .credential-grid, .settings-grid, .history-form, .history-form-section, .history-tool-grid { grid-template-columns: 1fr; }
+  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-live-screen-grid, .worker-control-columns, .credential-grid, .settings-grid, .history-form, .history-form-section, .history-tool-grid, .recommendation-swipe-card { grid-template-columns: 1fr; }
+  .recommendation-swipe-media {
+    min-height: 260px;
+  }
   .backlog-toolbar,
   .backlog-advanced {
     align-items: stretch;

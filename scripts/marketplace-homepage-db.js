@@ -408,6 +408,69 @@ function ensureSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_purchase_history_listing_links_listing
     ON purchase_history_listing_links (listing_id, linked_at DESC);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_match_queue (
+      document_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      listing_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      listing_price_cad REAL,
+      purchase_price_cad REAL,
+      threshold_price_cad REAL,
+      matched_terms_json TEXT NOT NULL DEFAULT '[]',
+      listing_seen_at TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      source_keyword TEXT NOT NULL DEFAULT '',
+      first_matched_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      queued_at TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (document_id, record_id, listing_id),
+      FOREIGN KEY (document_id, record_id) REFERENCES purchase_history_rows(document_id, record_id) ON DELETE CASCADE,
+      FOREIGN KEY (listing_id) REFERENCES homepage_listings(listing_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_match_queue_status_updated
+    ON purchase_history_match_queue (status, updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_match_queue_listing
+    ON purchase_history_match_queue (listing_id, updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_match_scan_state (
+      state_key TEXT PRIMARY KEY,
+      cursor_at TEXT NOT NULL DEFAULT '',
+      cursor_id TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_history_match_events (
+      event_id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      listing_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      actor TEXT NOT NULL DEFAULT 'viewer',
+      reason TEXT NOT NULL DEFAULT '',
+      content_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (document_id, record_id, listing_id)
+        REFERENCES purchase_history_match_queue(document_id, record_id, listing_id) ON DELETE CASCADE
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_match_events_time
+    ON purchase_history_match_events (event_at DESC);
+  `);
 }
 
 function ensureColumn(db, tableName, columnName, definitionSql) {
@@ -1551,6 +1614,604 @@ function listPurchaseHistoryListingLinks(db, options = {}) {
   `).all(...params, limit).map(normalizePurchaseHistoryListingLinkRow);
 }
 
+function parseCadMoney(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return null;
+  }
+  if (/^free$/i.test(text)) {
+    return 0;
+  }
+  const match = text.match(/(?:CA\$|\$)?\s*([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)/i);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseFloat(match[1].replace(/[,\s]/g, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeMatchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function uniqueMatchTerms(values) {
+  const stopWords = new Set([
+    'and', 'the', 'with', 'for', 'from', 'body', 'camera', 'lens', 'kit',
+    'used', 'new', 'mint', 'good', 'excellent', 'condition', 'black', 'silver',
+    'mount', 'adapter', 'adaptor', 'lenses', 'card', 'audio', 'dongle',
+  ]);
+  const terms = [];
+  for (const value of values) {
+    const normalized = normalizeMatchText(value);
+    if (!normalized) {
+      continue;
+    }
+    if (
+      normalized.length >= 4
+      && !stopWords.has(normalized)
+      && !terms.includes(normalized)
+    ) {
+      terms.push(normalized);
+    }
+    for (const token of normalized.split(' ')) {
+      if (
+        (token.length >= 4 || (token.length >= 3 && /[a-z]/.test(token) && /\d/.test(token)))
+        && /[a-z]/.test(token)
+        && !stopWords.has(token)
+        && !terms.includes(token)
+      ) {
+        terms.push(token);
+      }
+    }
+  }
+  return terms.slice(0, 40);
+}
+
+function uniqueMatchPhrases(values) {
+  const phrases = [];
+  for (const value of values) {
+    const normalized = normalizeMatchText(value);
+    if (
+      normalized.length >= 6
+      && normalized.includes(' ')
+      && !phrases.includes(normalized)
+    ) {
+      phrases.push(normalized);
+    }
+  }
+  return phrases.slice(0, 20);
+}
+
+function purchaseHistoryMatchTerms(row) {
+  const data = parseJsonObject(row.data_json);
+  return [
+    ...uniqueMatchTerms([
+      row.model,
+      data.model,
+      row.canonical_key,
+    ]),
+    ...uniqueMatchPhrases([
+      row.title,
+      data.title,
+      data.description,
+      data.product_description,
+      data.notes,
+      data.variant,
+    ]),
+  ];
+}
+
+function listingMatchHaystack(listing) {
+  const detail = parseJsonObject(listing.detail_json);
+  return normalizeMatchText([
+    listing.card_title,
+    listing.card_text,
+    listing.detail_title,
+    listing.detail_condition,
+    listing.detail_seller_name,
+    detail.title,
+    detail.description,
+    detail.text,
+    detail.listingContent?.title,
+    detail.listingContent?.description,
+    detail.listingContent?.text,
+  ].filter(Boolean).join(' '));
+}
+
+function listingPriceCad(listing) {
+  return parseCadMoney(listing.detail_price)
+    ?? parseCadMoney(listing.card_text)
+    ?? parseCadMoney(listing.card_title)
+    ?? parseCadMoney(listing.detail_json);
+}
+
+function purchaseHistoryPriceCad(row) {
+  const data = parseJsonObject(row.data_json);
+  return parseCadMoney(data.purchase_price_cad)
+    ?? parseCadMoney(data.net_cost_cad)
+    ?? parseCadMoney(data.price_cad);
+}
+
+function listPurchaseHistoryRowsForMatching(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 5000;
+  return db.prepare(`
+    SELECT *
+    FROM purchase_history_rows
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+function matchPurchaseHistoryListing(historyRow, listing, options = {}) {
+  const listingPrice = listingPriceCad(listing);
+  const purchasePrice = purchaseHistoryPriceCad(historyRow);
+  const margin = Number.isFinite(options.margin) ? options.margin : 0.08;
+  if (listingPrice === null || purchasePrice === null || purchasePrice <= 0) {
+    return null;
+  }
+  const threshold = purchasePrice * (1 + margin);
+  if (listingPrice > threshold) {
+    return null;
+  }
+  const haystack = listingMatchHaystack(listing);
+  if (!haystack) {
+    return null;
+  }
+  const terms = purchaseHistoryMatchTerms(historyRow);
+  const matchedTerms = terms.filter((term) => haystack.includes(term));
+  const hasPhraseMatch = matchedTerms.some((term) => term.includes(' '));
+  const hasCompactModelCode = matchedTerms.some((term) => (
+    /[a-z]/.test(term)
+    && /\d/.test(term)
+    && /^[a-z0-9]{3,8}$/.test(term)
+    && !/^\d+mm$/.test(term)
+  ));
+  if (!matchedTerms.length || (!hasPhraseMatch && matchedTerms.length < 2 && !hasCompactModelCode)) {
+    return null;
+  }
+  return {
+    documentId: historyRow.document_id,
+    recordId: historyRow.record_id,
+    listingId: listing.listing_id,
+    listingPriceCad: listingPrice,
+    purchasePriceCad: purchasePrice,
+    thresholdPriceCad: threshold,
+    matchedTerms: matchedTerms.slice(0, 12),
+  };
+}
+
+function upsertPurchaseHistoryMatchQueueItem(db, match, options = {}) {
+  const now = options.matchedAt || new Date().toISOString();
+  const listing = getHomepageListing(db, match.listingId) || {};
+  db.prepare(`
+    INSERT INTO purchase_history_match_queue (
+      document_id,
+      record_id,
+      listing_id,
+      status,
+      listing_price_cad,
+      purchase_price_cad,
+      threshold_price_cad,
+      matched_terms_json,
+      listing_seen_at,
+      source,
+      source_keyword,
+      first_matched_at,
+      updated_at,
+      queued_at,
+      note
+    ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(document_id, record_id, listing_id) DO UPDATE SET
+      status = CASE
+        WHEN purchase_history_match_queue.status IN ('cleared', 'ignored', 'saved', 'dismissed')
+          THEN purchase_history_match_queue.status
+        ELSE 'queued'
+      END,
+      listing_price_cad = excluded.listing_price_cad,
+      purchase_price_cad = excluded.purchase_price_cad,
+      threshold_price_cad = excluded.threshold_price_cad,
+      matched_terms_json = excluded.matched_terms_json,
+      listing_seen_at = excluded.listing_seen_at,
+      source = excluded.source,
+      source_keyword = excluded.source_keyword,
+      updated_at = excluded.updated_at,
+      note = excluded.note
+  `).run(
+    match.documentId,
+    match.recordId,
+    match.listingId,
+    match.listingPriceCad,
+    match.purchasePriceCad,
+    match.thresholdPriceCad,
+    serializeJson(match.matchedTerms || []),
+    listing.last_seen_at || '',
+    listing.source || '',
+    listing.source_keyword || '',
+    now,
+    now,
+    now,
+    `price <= purchase + ${Math.round(((options.margin ?? 0.08) * 100))}%`,
+  );
+}
+
+function normalizePurchaseHistoryMatchQueueRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    document_id: row.document_id,
+    record_id: row.record_id,
+    listing_id: row.listing_id,
+    status: row.status,
+    listing_price_cad: Number.isFinite(row.listing_price_cad) ? row.listing_price_cad : Number(row.listing_price_cad || 0),
+    purchase_price_cad: Number.isFinite(row.purchase_price_cad) ? row.purchase_price_cad : Number(row.purchase_price_cad || 0),
+    threshold_price_cad: Number.isFinite(row.threshold_price_cad) ? row.threshold_price_cad : Number(row.threshold_price_cad || 0),
+    matched_terms: parseJsonArray(row.matched_terms_json),
+    listing_seen_at: row.listing_seen_at || '',
+    source: row.source || '',
+    source_keyword: row.source_keyword || '',
+    first_matched_at: row.first_matched_at,
+    updated_at: row.updated_at,
+    queued_at: row.queued_at,
+    note: row.note || '',
+    title: row.detail_title || row.card_title || row.history_title || row.listing_id,
+    href: row.href || '',
+    card_title: row.card_title || '',
+    card_text: row.card_text || '',
+    detail_title: row.detail_title || '',
+    detail_price: row.detail_price || '',
+    detail_location: row.detail_location || '',
+    detail_condition: row.detail_condition || '',
+    detail_seller_name: row.detail_seller_name || '',
+    detail_last_error: row.detail_last_error || '',
+    first_seen_at: row.first_seen_at || '',
+    last_seen_at: row.last_seen_at || '',
+    detail_completed_at: row.detail_completed_at || '',
+    screenshot_path: row.screenshot_path || '',
+    snapshot_path: row.snapshot_path || '',
+    detail_status: row.detail_status || '',
+    history_title: row.history_title || '',
+    history_category: row.history_category || '',
+    history_subcategory: row.history_subcategory || '',
+    history_brand: row.history_brand || '',
+    history_model: row.history_model || '',
+    history_mount: row.history_mount || '',
+    history_purchase_at: row.history_purchase_at || '',
+    history_sold_at: row.history_sold_at || '',
+    history_outcome: row.history_outcome || '',
+    history_data: parseJsonObject(row.history_data_json),
+  };
+}
+
+function listPurchaseHistoryMatchQueue(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 200;
+  const offset = Number.isFinite(options.offset) ? Math.max(0, options.offset) : 0;
+  const status = String(options.status || 'queued').trim();
+  const params = [];
+  let statusSql = '';
+  if (status && status !== 'all') {
+    statusSql = 'WHERE q.status = ?';
+    params.push(status);
+  }
+  params.push(limit, offset);
+  return db.prepare(`
+    SELECT
+      q.*,
+      h.title AS history_title,
+      h.category AS history_category,
+      h.subcategory AS history_subcategory,
+      h.brand AS history_brand,
+      h.model AS history_model,
+      h.mount AS history_mount,
+      h.purchase_at AS history_purchase_at,
+      h.sold_at AS history_sold_at,
+      h.outcome AS history_outcome,
+      h.data_json AS history_data_json,
+      l.href,
+      l.card_title,
+      l.card_text,
+      l.detail_title,
+      l.detail_price,
+      l.detail_location,
+      l.detail_condition,
+      l.detail_seller_name,
+      l.detail_last_error,
+      l.first_seen_at,
+      l.last_seen_at,
+      l.detail_completed_at,
+      l.screenshot_path,
+      l.snapshot_path,
+      l.detail_status
+    FROM purchase_history_match_queue q
+    LEFT JOIN purchase_history_rows h
+      ON h.document_id = q.document_id AND h.record_id = q.record_id
+    LEFT JOIN homepage_listings l
+      ON l.listing_id = q.listing_id
+    ${statusSql}
+    ORDER BY q.updated_at DESC
+    LIMIT ?
+    OFFSET ?
+  `).all(...params).map(normalizePurchaseHistoryMatchQueueRow);
+}
+
+function countPurchaseHistoryMatchQueue(db, options = {}) {
+  const status = String(options.status || 'queued').trim();
+  const params = [];
+  let statusSql = '';
+  if (status && status !== 'all') {
+    statusSql = 'WHERE status = ?';
+    params.push(status);
+  }
+  return db.prepare(`
+    SELECT COUNT(*) AS total
+    FROM purchase_history_match_queue
+    ${statusSql}
+  `).get(...params).total || 0;
+}
+
+function buildPurchaseHistoryMatchEventId(eventAt, documentId, recordId, listingId, eventType) {
+  const entropy = crypto.randomBytes(8).toString('hex');
+  return [
+    String(eventAt || new Date().toISOString()).replace(/[^0-9A-Za-z]/g, ''),
+    String(documentId || 'document'),
+    String(recordId || 'record'),
+    String(listingId || 'listing'),
+    String(eventType || 'event'),
+    entropy,
+  ].join('-');
+}
+
+function appendPurchaseHistoryMatchEvent(db, event) {
+  const eventAt = event.eventAt || event.event_at || new Date().toISOString();
+  const documentId = String(event.documentId || event.document_id || '').trim();
+  const recordId = String(event.recordId || event.record_id || '').trim();
+  const listingId = String(event.listingId || event.listing_id || '').trim();
+  const eventType = normalizeKeyword(event.eventType || event.event_type || 'recommendation_event');
+  if (!documentId || !recordId || !listingId) {
+    throw new Error('recommendation event requires documentId, recordId, and listingId');
+  }
+  const eventId = String(
+    event.eventId
+    || event.event_id
+    || buildPurchaseHistoryMatchEventId(eventAt, documentId, recordId, listingId, eventType),
+  );
+  db.prepare(`
+    INSERT INTO purchase_history_match_events (
+      event_id,
+      document_id,
+      record_id,
+      listing_id,
+      event_type,
+      event_at,
+      actor,
+      reason,
+      content_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    eventId,
+    documentId,
+    recordId,
+    listingId,
+    eventType,
+    eventAt,
+    String(event.actor || 'viewer').trim(),
+    String(event.reason || '').trim(),
+    serializeJson(event.content || {}),
+  );
+  return eventId;
+}
+
+function updatePurchaseHistoryMatchQueueStatus(db, match, options = {}) {
+  const documentId = String(match.documentId || match.document_id || '').trim();
+  const recordId = String(match.recordId || match.record_id || '').trim();
+  const listingId = String(match.listingId || match.listing_id || '').trim();
+  const status = normalizeKeyword(match.status || '').toLowerCase();
+  if (!documentId || !recordId || !listingId) {
+    throw new Error('recommendation action requires documentId, recordId, and listingId');
+  }
+  if (!['saved', 'dismissed', 'queued'].includes(status)) {
+    throw new Error(`Unsupported recommendation status: ${status}`);
+  }
+  const now = options.updatedAt || new Date().toISOString();
+  const reason = String(options.reason || '').trim();
+  const eventType = status === 'saved'
+    ? 'recommendation_saved'
+    : status === 'dismissed'
+      ? 'recommendation_dismissed'
+      : 'recommendation_requeued';
+  return runTransaction(db, () => {
+    const result = db.prepare(`
+      UPDATE purchase_history_match_queue
+      SET status = ?,
+          updated_at = ?,
+          note = CASE WHEN ? = '' THEN note ELSE ? END
+      WHERE document_id = ?
+        AND record_id = ?
+        AND listing_id = ?
+    `).run(status, now, reason, reason, documentId, recordId, listingId);
+    if (result.changes === 0) {
+      throw new Error(`Unknown recommendation: ${listingId}`);
+    }
+    appendPurchaseHistoryMatchEvent(db, {
+      documentId,
+      recordId,
+      listingId,
+      eventType,
+      eventAt: now,
+      actor: options.actor || 'viewer',
+      reason,
+      content: {
+        status,
+        reason,
+        customReason: options.customReason || '',
+      },
+    });
+    return { changes: result.changes };
+  });
+}
+
+function scanPurchaseHistoryMatchesForListings(db, listingIds, options = {}) {
+  const ids = uniqueStrings(listingIds);
+  if (!ids.length) {
+    return { scanned: 0, matched: 0, queued: 0, listingIds: [] };
+  }
+  const listings = db.prepare(`
+    SELECT *
+    FROM homepage_listings
+    WHERE listing_id IN (${ids.map(() => '?').join(', ')})
+  `).all(...ids);
+  if (!listings.length) {
+    return { scanned: 0, matched: 0, queued: 0, listingIds: [] };
+  }
+  const historyRows = listPurchaseHistoryRowsForMatching(db, {
+    limit: options.historyLimit,
+  });
+  const matchedListingIds = new Set();
+  let matched = 0;
+  const matchedAt = options.matchedAt || new Date().toISOString();
+  const margin = Number.isFinite(options.margin) ? options.margin : 0.08;
+  for (const listing of listings) {
+    for (const historyRow of historyRows) {
+      const match = matchPurchaseHistoryListing(historyRow, listing, { margin });
+      if (!match) {
+        continue;
+      }
+      upsertPurchaseHistoryMatchQueueItem(db, match, { matchedAt, margin });
+      matched += 1;
+      matchedListingIds.add(listing.listing_id);
+    }
+  }
+  let queued = 0;
+  if (matchedListingIds.size > 0 && options.enqueueResolve !== false) {
+    const result = addResolveQueueItems(db, [...matchedListingIds], {
+      actor: options.actor || 'history-watch',
+      queuedAt: matchedAt,
+    });
+    queued = result.addedCount || 0;
+  }
+  return {
+    scanned: listings.length,
+    matched,
+    queued,
+    listingIds: [...matchedListingIds],
+  };
+}
+
+function getPurchaseHistoryMatchScanState(db, stateKey, options = {}) {
+  const key = String(stateKey || '').trim();
+  const existing = db.prepare(`
+    SELECT *
+    FROM purchase_history_match_scan_state
+    WHERE state_key = ?
+  `).get(key);
+  if (existing) {
+    return existing;
+  }
+  const now = options.now || new Date().toISOString();
+  const lookbackMs = Number.isFinite(options.initialLookbackMs)
+    ? Math.max(0, options.initialLookbackMs)
+    : 24 * 60 * 60 * 1000;
+  const cursorAt = new Date(Date.parse(now) - lookbackMs).toISOString();
+  db.prepare(`
+    INSERT INTO purchase_history_match_scan_state (
+      state_key,
+      cursor_at,
+      cursor_id,
+      updated_at
+    ) VALUES (?, ?, '', ?)
+  `).run(key, cursorAt, now);
+  return {
+    state_key: key,
+    cursor_at: cursorAt,
+    cursor_id: '',
+    updated_at: now,
+  };
+}
+
+function updatePurchaseHistoryMatchScanState(db, stateKey, cursorAt, cursorId, options = {}) {
+  const now = options.now || new Date().toISOString();
+  db.prepare(`
+    INSERT INTO purchase_history_match_scan_state (
+      state_key,
+      cursor_at,
+      cursor_id,
+      updated_at
+    ) VALUES (?, ?, ?, ?)
+    ON CONFLICT(state_key) DO UPDATE SET
+      cursor_at = excluded.cursor_at,
+      cursor_id = excluded.cursor_id,
+      updated_at = excluded.updated_at
+  `).run(String(stateKey || '').trim(), String(cursorAt || ''), String(cursorId || ''), now);
+}
+
+function listListingsForPurchaseHistoryMatchScan(db, stateKey, columnName, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 250;
+  const state = getPurchaseHistoryMatchScanState(db, stateKey, options);
+  return {
+    state,
+    rows: db.prepare(`
+      SELECT *
+      FROM homepage_listings
+      WHERE COALESCE(${columnName}, '') != ''
+        AND (
+          ${columnName} > ?
+          OR (${columnName} = ? AND listing_id > ?)
+        )
+      ORDER BY ${columnName} ASC, listing_id ASC
+      LIMIT ?
+    `).all(state.cursor_at, state.cursor_at, state.cursor_id || '', limit),
+  };
+}
+
+function scanPurchaseHistoryListingMatches(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 250;
+  const actor = options.actor || 'history-watch';
+  const scans = [
+    ['seen', 'last_seen_at'],
+    ['detail', 'detail_completed_at'],
+  ];
+  const result = {
+    scanned: 0,
+    matched: 0,
+    queued: 0,
+    listingIds: [],
+    cursors: {},
+  };
+  for (const [stateKey, columnName] of scans) {
+    const { rows } = listListingsForPurchaseHistoryMatchScan(db, stateKey, columnName, {
+      ...options,
+      limit,
+    });
+    const listingIds = rows.map((row) => row.listing_id);
+    const scanResult = scanPurchaseHistoryMatchesForListings(db, listingIds, {
+      ...options,
+      actor,
+    });
+    result.scanned += scanResult.scanned;
+    result.matched += scanResult.matched;
+    result.queued += scanResult.queued;
+    result.listingIds.push(...scanResult.listingIds);
+    if (rows.length > 0) {
+      const last = rows[rows.length - 1];
+      updatePurchaseHistoryMatchScanState(db, stateKey, last[columnName], last.listing_id, options);
+      result.cursors[stateKey] = {
+        cursorAt: last[columnName],
+        cursorId: last.listing_id,
+      };
+    }
+  }
+  result.listingIds = uniqueStrings(result.listingIds);
+  return result;
+}
+
 function upsertPurchaseHistoryListingLink(db, link, options = {}) {
   const documentId = String(link.documentId || link.document_id || '').trim();
   const recordId = String(link.recordId || link.record_id || '').trim();
@@ -1674,7 +2335,8 @@ function normalizeEventRegistryRow(row) {
 
 function listEventRegistry(db, options = {}) {
   const source = String(options.source || 'all').trim().toLowerCase();
-  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 200;
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 200;
+  const offset = Number.isFinite(options.offset) ? Math.max(0, options.offset) : 0;
   const rows = db.prepare(`
     SELECT *
     FROM (
@@ -1685,7 +2347,7 @@ function listEventRegistry(db, options = {}) {
         events.event_at,
         COALESCE(rows.outcome, '') AS status,
         events.record_id AS subject_id,
-        COALESCE(rows.title, events.record_id) AS title,
+        COALESCE(NULLIF(rows.title, ''), events.record_id) AS title,
         events.data_json
       FROM purchase_history_events events
       LEFT JOIN purchase_history_rows rows
@@ -1699,9 +2361,52 @@ function listEventRegistry(db, options = {}) {
         events.event_at,
         events.status,
         events.listing_id AS subject_id,
-        COALESCE(listings.detail_title, listings.card_title, events.listing_id) AS title,
+        COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), events.listing_id) AS title,
         events.content_json AS data_json
       FROM listing_events events
+      LEFT JOIN homepage_listings listings
+        ON listings.listing_id = events.listing_id
+      UNION ALL
+      SELECT
+        'resolve' AS source,
+        events.event_id,
+        events.event_type,
+        events.event_at,
+        events.status,
+        events.listing_id AS subject_id,
+        COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), events.listing_id) AS title,
+        json_patch(events.content_json, json_object(
+          'workflow_run_id', events.workflow_run_id,
+          'actor', events.actor,
+          'error', events.error
+        )) AS data_json
+      FROM resolve_queue_events events
+      LEFT JOIN homepage_listings listings
+        ON listings.listing_id = events.listing_id
+      UNION ALL
+      SELECT
+        'recommendation' AS source,
+        events.event_id,
+        events.event_type,
+        events.event_at,
+        queue.status,
+        events.listing_id AS subject_id,
+        COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), rows.title, events.listing_id) AS title,
+        json_patch(events.content_json, json_object(
+          'document_id', events.document_id,
+          'record_id', events.record_id,
+          'listing_id', events.listing_id,
+          'actor', events.actor,
+          'reason', events.reason
+        )) AS data_json
+      FROM purchase_history_match_events events
+      LEFT JOIN purchase_history_match_queue queue
+        ON queue.document_id = events.document_id
+        AND queue.record_id = events.record_id
+        AND queue.listing_id = events.listing_id
+      LEFT JOIN purchase_history_rows rows
+        ON rows.document_id = events.document_id
+        AND rows.record_id = events.record_id
       LEFT JOIN homepage_listings listings
         ON listings.listing_id = events.listing_id
       UNION ALL
@@ -1712,7 +2417,7 @@ function listEventRegistry(db, options = {}) {
         events.event_at,
         events.status,
         events.workflow_run_id AS subject_id,
-        COALESCE(runs.label, events.workflow_run_id) AS title,
+        COALESCE(NULLIF(runs.label, ''), events.workflow_run_id) AS title,
         events.content_json AS data_json
       FROM workflow_events events
       LEFT JOIN workflow_runs runs
@@ -1721,8 +2426,29 @@ function listEventRegistry(db, options = {}) {
     WHERE (? = 'all' OR source = ?)
     ORDER BY event_at DESC
     LIMIT ?
-  `).all(source, source, limit);
+    OFFSET ?
+  `).all(source, source, limit, offset);
   return rows.map(normalizeEventRegistryRow);
+}
+
+function countEventRegistry(db, options = {}) {
+  const source = String(options.source || 'all').trim().toLowerCase();
+  const row = db.prepare(`
+    SELECT COUNT(*) AS total
+    FROM (
+      SELECT 'inventory' AS source FROM purchase_history_events
+      UNION ALL
+      SELECT 'listing' AS source FROM listing_events
+      UNION ALL
+      SELECT 'resolve' AS source FROM resolve_queue_events
+      UNION ALL
+      SELECT 'recommendation' AS source FROM purchase_history_match_events
+      UNION ALL
+      SELECT 'workflow' AS source FROM workflow_events
+    )
+    WHERE (? = 'all' OR source = ?)
+  `).get(source, source);
+  return row?.total || 0;
 }
 
 function mergePurchaseHistoryDocuments(db, options = {}) {
@@ -2475,6 +3201,86 @@ function eventTypesForCategory(category) {
   }
 }
 
+const COLLECTOR_OBSERVED_EVENT_TYPE = 'listing_observed';
+const COLLECTOR_DONE_STATUSES = ['new', 'existing_updated', 'updated', 'match_queued', 'queued'];
+const COLLECTOR_SKIPPED_STATUSES = ['existing_same', 'duplicate', 'filtered', 'ignored', 'already_seen'];
+const COLLECTOR_ERROR_STATUSES = ['error', 'failed', 'malformed', 'interrupted'];
+
+function listingCategorySql(category, alias = 'e') {
+  const normalized = normalizeKeyword(category || 'all').toLowerCase();
+  const detailTypes = eventTypesForCategory(normalized);
+  const collectorStatusSql = (statuses) => (
+    `${alias}.event_type = ? AND ${alias}.status IN (${statuses.map(() => '?').join(', ')})`
+  );
+
+  switch (normalized) {
+    case 'done':
+      return {
+        sql: `AND (${alias}.event_type IN (${detailTypes.map(() => '?').join(', ')})
+          OR (${collectorStatusSql(COLLECTOR_DONE_STATUSES)}))`,
+        params: [...detailTypes, COLLECTOR_OBSERVED_EVENT_TYPE, ...COLLECTOR_DONE_STATUSES],
+      };
+    case 'skipped':
+    case 'skip':
+      return {
+        sql: `AND (${alias}.event_type IN (${detailTypes.map(() => '?').join(', ')})
+          OR (${collectorStatusSql(COLLECTOR_SKIPPED_STATUSES)}))`,
+        params: [...detailTypes, COLLECTOR_OBSERVED_EVENT_TYPE, ...COLLECTOR_SKIPPED_STATUSES],
+      };
+    case 'error':
+    case 'errors':
+      return {
+        sql: `AND (${alias}.event_type IN (${detailTypes.map(() => '?').join(', ')})
+          OR (${collectorStatusSql(COLLECTOR_ERROR_STATUSES)}))`,
+        params: [...detailTypes, COLLECTOR_OBSERVED_EVENT_TYPE, ...COLLECTOR_ERROR_STATUSES],
+      };
+    case 'started':
+    case 'active':
+      return {
+        sql: `AND (${alias}.event_type IN (${detailTypes.map(() => '?').join(', ')})
+          OR ${alias}.event_type = ?)`,
+        params: [...detailTypes, COLLECTOR_OBSERVED_EVENT_TYPE],
+      };
+    case 'all':
+    default:
+      return { sql: '', params: [] };
+  }
+}
+
+function workflowReviewSql(alias = 'workflow_events') {
+  return `(${alias}.event_type LIKE '%failed%'
+    OR ${alias}.event_type LIKE '%interrupted%'
+    OR ${alias}.status IN ('error', 'failed', 'interrupted')
+    OR COALESCE(${alias}.error, '') != '')`;
+}
+
+function listingEventSemanticBuckets(eventType, status) {
+  const buckets = [];
+  if (eventTypesForCategory('started').includes(eventType)) {
+    buckets.push('started');
+  }
+  if (eventTypesForCategory('done').includes(eventType)) {
+    buckets.push('done');
+  }
+  if (eventTypesForCategory('skipped').includes(eventType)) {
+    buckets.push('skipped');
+  }
+  if (eventTypesForCategory('error').includes(eventType)) {
+    buckets.push('error');
+  }
+  if (eventType === COLLECTOR_OBSERVED_EVENT_TYPE) {
+    buckets.push('started');
+    if (COLLECTOR_DONE_STATUSES.includes(status)) {
+      buckets.push('done');
+    } else if (COLLECTOR_SKIPPED_STATUSES.includes(status)) {
+      buckets.push('skipped');
+    } else if (COLLECTOR_ERROR_STATUSES.includes(status)) {
+      buckets.push('error');
+    }
+  }
+  return buckets;
+}
+
 function uniqueStrings(values) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
@@ -2556,7 +3362,6 @@ function workerRunWhereSql(workerId, workerIds, params, alias = 'e') {
 
 function listWorkerListingEvents(db, workerId, options = {}) {
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 50;
-  const eventTypes = eventTypesForCategory(options.category);
   const eventType = String(options.eventType || '').trim();
   const workerIds = options.workerIds || [workerId];
   const params = [];
@@ -2566,9 +3371,10 @@ function listWorkerListingEvents(db, workerId, options = {}) {
   if (eventType) {
     eventTypeSql = 'AND e.event_type = ?';
     params.push(eventType);
-  } else if (eventTypes.length > 0) {
-    eventTypeSql = `AND e.event_type IN (${eventTypes.map(() => '?').join(', ')})`;
-    params.push(...eventTypes);
+  } else {
+    const categoryFilter = listingCategorySql(options.category, 'e');
+    eventTypeSql = categoryFilter.sql;
+    params.push(...categoryFilter.params);
   }
 
   params.push(limit);
@@ -2612,6 +3418,22 @@ function listWorkerAuditEvents(db, workerId, options = {}) {
   }
 
   if (category !== 'all') {
+    if (['error', 'errors', 'review'].includes(category)) {
+      const listingEvents = listWorkerListingEvents(db, workerId, {
+        ...options,
+        category: 'error',
+        limit,
+      });
+      const workflowEvents = listWorkerWorkflowEvents(db, workerId, { ...options, limit })
+        .filter((event) => (
+          /failed|interrupted/.test(event.event_type || '')
+          || ['error', 'failed', 'interrupted'].includes(event.status || '')
+          || Boolean(event.error)
+        ));
+      return [...listingEvents, ...workflowEvents]
+        .sort((left, right) => String(right.event_at || '').localeCompare(String(left.event_at || '')))
+        .slice(0, limit);
+    }
     return listWorkerListingEvents(db, workerId, {
       ...options,
       category,
@@ -2635,11 +3457,12 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
   const statsParams = [];
   const statsWorkerSql = workerRunWhereSql(workerId, workerIds, statsParams, 'listing_events');
   const rows = db.prepare(`
-    SELECT event_type, COUNT(*) AS count
+    SELECT event_type, status, COUNT(*) AS count
     FROM listing_events
     WHERE ${statsWorkerSql}
-    GROUP BY event_type
+    GROUP BY event_type, status
   `).all(...statsParams);
+  const eventTypeCounts = new Map();
 
   const stats = {
     total: 0,
@@ -2648,25 +3471,30 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
     error: 0,
     started: 0,
     workerIds,
-    eventTypes: rows.map((row) => ({
+    eventTypes: [],
+    statusTypes: rows.map((row) => ({
       eventType: row.event_type,
       eventScope: 'listing',
+      status: row.status || '',
       count: row.count,
     })),
   };
 
   for (const row of rows) {
     stats.total += row.count;
-    if (eventTypesForCategory('done').includes(row.event_type)) {
-      stats.done += row.count;
-    } else if (eventTypesForCategory('skipped').includes(row.event_type)) {
-      stats.skipped += row.count;
-    } else if (eventTypesForCategory('error').includes(row.event_type)) {
-      stats.error += row.count;
-    } else if (eventTypesForCategory('started').includes(row.event_type)) {
-      stats.started += row.count;
+    eventTypeCounts.set(row.event_type, (eventTypeCounts.get(row.event_type) || 0) + row.count);
+    for (const bucket of listingEventSemanticBuckets(row.event_type, row.status || '')) {
+      if (bucket === 'done') stats.done += row.count;
+      if (bucket === 'skipped') stats.skipped += row.count;
+      if (bucket === 'error') stats.error += row.count;
+      if (bucket === 'started') stats.started += row.count;
     }
   }
+  stats.eventTypes = [...eventTypeCounts.entries()].map(([eventType, count]) => ({
+    eventType,
+    eventScope: 'listing',
+    count,
+  }));
 
   const latestParams = [];
   const latestWorkerSql = workerRunWhereSql(workerId, workerIds, latestParams, 'e');
@@ -2730,6 +3558,12 @@ function getWorkerAuditEventStats(db, workerId, options = {}) {
     GROUP BY event_type
   `).all(String(workerId));
   const workflowCount = workflowRows.reduce((sum, row) => sum + row.count, 0);
+  const workflowReview = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM workflow_events
+    WHERE workflow_run_id = ?
+      AND ${workflowReviewSql('workflow_events')}
+  `).get(String(workerId)).count || 0;
   const latestWorkflow = listWorkerWorkflowEvents(db, workerId, { limit: 1 })[0] || null;
   const latestCandidates = [listingStats.latestEvent, latestWorkflow].filter(Boolean);
   const latestEvent = latestCandidates
@@ -2752,6 +3586,8 @@ function getWorkerAuditEventStats(db, workerId, options = {}) {
     ...listingStats,
     listingTotal: listingStats.total,
     workflow: workflowCount,
+    workflowReview,
+    error: listingStats.error + workflowReview,
     total: listingStats.total + workflowCount,
     eventTypes: [...eventTypesByKey.values()]
       .sort((left, right) => right.count - left.count || String(left.eventType).localeCompare(String(right.eventType))),
@@ -2966,10 +3802,16 @@ module.exports = {
   listPurchaseHistoryRows,
   upsertPurchaseHistoryListingLink,
   listPurchaseHistoryListingLinks,
+  scanPurchaseHistoryMatchesForListings,
+  scanPurchaseHistoryListingMatches,
+  listPurchaseHistoryMatchQueue,
+  countPurchaseHistoryMatchQueue,
+  updatePurchaseHistoryMatchQueueStatus,
   mergePurchaseHistoryDocuments,
   appendPurchaseHistoryEvent,
   listPurchaseHistoryEvents,
   listEventRegistry,
+  countEventRegistry,
   hashContent,
   runTransaction,
   appendListingEvent,

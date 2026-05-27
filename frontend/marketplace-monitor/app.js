@@ -13,8 +13,11 @@ const SUMMARY_HIDDEN_POLL_MS = 30000;
 const DEFAULT_ROUTE = '/listings';
 const ROUTES = {
   '/listings': { panel: 'listingsPanel', listingView: 'queryResultsView' },
+  '/listings/resolve-queue': { panel: 'listingsPanel', listingView: 'resolveQueueView' },
+  '/listings/queue-audit': { panel: 'listingsPanel', listingView: 'resolveQueueAuditView' },
   '/listings/backlog': { panel: 'listingsPanel', listingView: 'backlogQueueView' },
-  '/history': { panel: 'historyPanel' },
+  '/history': { panel: 'historyPanel', historyView: 'purchaseHistoryView' },
+  '/history/recommendations': { panel: 'historyPanel', historyView: 'recommendationsView' },
   '/review': { panel: 'reviewPanel' },
   '/workers': { panel: 'opsPanel' },
   '/settings': { panel: 'settingsPanel' },
@@ -51,12 +54,16 @@ const store = {
   historyStatsHidden: localStorage.getItem('marketplace-monitor-history-stats-hidden') === 'true',
   historySoldRange: localStorage.getItem('marketplace-monitor-history-sold-range') || 'all',
   editingPurchaseHistoryRecordId: '',
+  recommendations: [],
+  recommendationsLoaded: false,
+  recommendationsTotal: 0,
+  recommendationCardIndex: 0,
+  pendingRecommendationAction: null,
   eventRegistry: [],
   purchaseHistoryLoaded: false,
   eventRegistryLoaded: false,
   workflowsLoaded: false,
   historySort: { key: 'title', direction: 'asc' },
-  eventRegistrySort: { key: 'time', direction: 'desc' },
   summarySignature: '',
   workflowSignature: '',
   processSignature: '',
@@ -69,6 +76,8 @@ const store = {
   workflowRequestSeq: 0,
   workerDetailRequestSeq: 0,
   historyTable: null,
+  recommendationsTable: null,
+  eventRegistryTable: null,
 };
 
 const els = {
@@ -100,9 +109,37 @@ const els = {
   historyLinkRelationship: document.getElementById('historyLinkRelationship'),
   historyLinkFetchNow: document.getElementById('historyLinkFetchNow'),
   historyLinkAddButton: document.getElementById('historyLinkAddButton'),
-  eventRegistryTableBody: document.getElementById('eventRegistryTableBody'),
+  recommendationsTable: document.getElementById('recommendationsTable'),
+  recommendationsMeta: document.getElementById('recommendationsMeta'),
+  recommendationsStatusSelect: document.getElementById('recommendationsStatusSelect'),
+  recommendationsViewModeSelect: document.getElementById('recommendationsViewModeSelect'),
+  recommendationCardPane: document.getElementById('recommendationCardPane'),
+  recommendationDetailDialog: document.getElementById('recommendationDetailDialog'),
+  recommendationDetailTitle: document.getElementById('recommendationDetailTitle'),
+  recommendationDetailMeta: document.getElementById('recommendationDetailMeta'),
+  recommendationDetailImage: document.getElementById('recommendationDetailImage'),
+  recommendationDetailList: document.getElementById('recommendationDetailList'),
+  recommendationDetailLinks: document.getElementById('recommendationDetailLinks'),
+  recommendationSnapshotSection: document.getElementById('recommendationSnapshotSection'),
+  recommendationSnapshotText: document.getElementById('recommendationSnapshotText'),
+  recommendationActionDialog: document.getElementById('recommendationActionDialog'),
+  recommendationActionForm: document.getElementById('recommendationActionForm'),
+  recommendationActionTitle: document.getElementById('recommendationActionTitle'),
+  recommendationActionMeta: document.getElementById('recommendationActionMeta'),
+  recommendationActionReasonLabel: document.getElementById('recommendationActionReasonLabel'),
+  recommendationActionReason: document.getElementById('recommendationActionReason'),
+  recommendationActionCustomReasonLabel: document.getElementById('recommendationActionCustomReasonLabel'),
+  recommendationActionCustomReason: document.getElementById('recommendationActionCustomReason'),
+  recommendationActionSubmitButton: document.getElementById('recommendationActionSubmitButton'),
+  eventRegistryTable: document.getElementById('eventRegistryTable'),
   eventRegistryMeta: document.getElementById('eventRegistryMeta'),
   eventRegistrySourceSelect: document.getElementById('eventRegistrySourceSelect'),
+  eventRegistryLimitSelect: document.getElementById('eventRegistryLimitSelect'),
+  auditDetailDialog: document.getElementById('auditDetailDialog'),
+  auditDetailMeta: document.getElementById('auditDetailMeta'),
+  auditSyslogOutput: document.getElementById('auditSyslogOutput'),
+  auditDetailTableBody: document.getElementById('auditDetailTableBody'),
+  auditPayloadOutput: document.getElementById('auditPayloadOutput'),
 };
 
 const CAPTURE_SETTINGS_STORAGE_KEY = 'marketplace-monitor-capture-settings';
@@ -633,6 +670,179 @@ function renderHistoryTable(rows) {
   store.historyTable.setData(data);
 }
 
+function recommendationTableData(items) {
+  return items.map((item) => ({
+    ...item,
+    _historyItem: item.history_title || item.record_id || '',
+    _listingTitle: item.title || item.listing_id || '',
+    _listingPrice: parseMoney(item.listing_price_cad),
+    _purchasePrice: parseMoney(item.purchase_price_cad),
+    _thresholdPrice: parseMoney(item.threshold_price_cad),
+    _matchedTerms: Array.isArray(item.matched_terms) ? item.matched_terms.join(', ') : '',
+    _source: [item.source, item.source_keyword].filter(Boolean).join(' / '),
+    _seenAt: item.listing_seen_at || item.updated_at || item.queued_at || '',
+  }));
+}
+
+function recommendationHistoryFormatter(cell) {
+  const item = cell.getData();
+  return `<div class="history-item-title">${html(item._historyItem)}</div>`
+    + `<div class="process-meta">${html(item.record_id || '')}</div>`;
+}
+
+function recommendationListingFormatter(cell) {
+  const item = cell.getData();
+  return `<div class="history-item-title">${html(item._listingTitle)}</div>`
+    + `<div class="process-meta">${html(item.listing_id || '')}</div>`;
+}
+
+function recommendationPriceFormatter(cell) {
+  const item = cell.getData();
+  return '<div class="recommendation-price-stack">'
+    + `<div>Listing ${html(formatMoney(item._listingPrice) || '-')}</div>`
+    + `<div>Purchase ${html(formatMoney(item._purchasePrice) || '-')}</div>`
+    + `<div>Limit ${html(formatMoney(item._thresholdPrice) || '-')}</div>`
+    + '</div>';
+}
+
+function recommendationOpenFormatter(cell) {
+  const item = cell.getData();
+  const href = item.href || '';
+  return '<div class="row-actions">'
+    + `<button type="button" class="secondary recommendation-view-button" data-listing-id="${html(item.listing_id || '')}">View</button>`
+    + `<button type="button" class="secondary recommendation-save-button" data-listing-id="${html(item.listing_id || '')}">Save</button>`
+    + `<button type="button" class="secondary recommendation-dismiss-button" data-listing-id="${html(item.listing_id || '')}">Dismiss</button>`
+    + (href ? `<a class="button-link compact" href="${html(href)}" target="_blank" rel="noreferrer">FB</a>` : '')
+    + '</div>';
+}
+
+function recommendationTableColumns() {
+  return [
+    {
+      title: 'History Item',
+      field: '_historyItem',
+      minWidth: 220,
+      widthGrow: 2,
+      responsive: 0,
+      formatter: recommendationHistoryFormatter,
+    },
+    {
+      title: 'Listing',
+      field: '_listingTitle',
+      minWidth: 260,
+      widthGrow: 3,
+      responsive: 0,
+      formatter: recommendationListingFormatter,
+    },
+    {
+      title: 'Prices',
+      field: '_listingPrice',
+      width: 170,
+      responsive: 1,
+      formatter: recommendationPriceFormatter,
+    },
+    {
+      title: 'Matched Terms',
+      field: '_matchedTerms',
+      minWidth: 180,
+      widthGrow: 2,
+      responsive: 2,
+    },
+    {
+      title: 'Source',
+      field: '_source',
+      minWidth: 180,
+      widthGrow: 2,
+      responsive: 4,
+    },
+    {
+      title: 'Seen',
+      field: '_seenAt',
+      width: 170,
+      responsive: 3,
+      formatter: (cell) => formatDate(cell.getValue()),
+    },
+    {
+      title: '',
+      field: '_actions',
+      width: 78,
+      responsive: 0,
+      headerSort: false,
+      formatter: recommendationOpenFormatter,
+      cellClick: (event, cell) => {
+        if (event.target.closest('a')) return;
+        if (event.target.closest('.recommendation-save-button')) {
+          openRecommendationAction(cell.getData(), 'saved');
+          return;
+        }
+        if (event.target.closest('.recommendation-dismiss-button')) {
+          openRecommendationAction(cell.getData(), 'dismissed');
+          return;
+        }
+        openRecommendationDetail(cell.getData());
+      },
+    },
+  ];
+}
+
+async function requestRecommendations(_url, _config, params = {}) {
+  const size = Math.max(1, Number.parseInt(params.size, 10) || 25);
+  const page = Math.max(1, Number.parseInt(params.page, 10) || 1);
+  const offset = (page - 1) * size;
+  const status = els.recommendationsStatusSelect?.value || 'queued';
+  const payload = await fetchJson(`/api/purchase-history-match-queue?status=${encodeURIComponent(status)}&limit=${size}&offset=${offset}`);
+  store.recommendations = payload.items || [];
+  store.recommendationsTotal = payload.total || store.recommendations.length;
+  store.recommendationsLoaded = true;
+  renderRecommendationCardPane();
+  if (els.recommendationsMeta) {
+    els.recommendationsMeta.textContent = `${store.recommendationsTotal} ${status === 'all' ? '' : status} recommendations`;
+  }
+  return {
+    data: recommendationTableData(store.recommendations),
+    last_page: Math.max(1, Math.ceil((payload.total || 0) / size)),
+  };
+}
+
+function renderRecommendationsTable(items) {
+  if (!els.recommendationsTable) return;
+  const data = recommendationTableData(items);
+  const columns = recommendationTableColumns();
+  if (!store.recommendationsTable) {
+    els.recommendationsTable.innerHTML = '';
+    store.recommendationsTable = new Tabulator(els.recommendationsTable, {
+      data: [],
+      height: 'min(68vh, 760px)',
+      layout: 'fitColumns',
+      responsiveLayout: 'hide',
+      placeholder: 'Recommendations appear here.',
+      columnHeaderSortMulti: false,
+      movableColumns: true,
+      resizableColumnFit: true,
+      pagination: true,
+      paginationMode: 'remote',
+      paginationSize: 25,
+      paginationSizeSelector: [10, 25, 50, 100],
+      ajaxURL: '/api/purchase-history-match-queue',
+      ajaxRequestFunc: requestRecommendations,
+      columns,
+      rowFormatter: (row) => {
+        const element = row.getElement();
+        if (element.dataset.recommendationRowClickBound === '1') return;
+        element.dataset.recommendationRowClickBound = '1';
+        element.addEventListener('click', (event) => {
+          if (event.target.closest('button,a')) return;
+          openRecommendationDetail(row.getData());
+        });
+      },
+    });
+    setTimeout(() => store.recommendationsTable?.setData('/api/purchase-history-match-queue'), 0);
+    return;
+  }
+  store.recommendationsTable.setColumns(columns);
+  store.recommendationsTable.setData('/api/purchase-history-match-queue');
+}
+
 function eventSortValue(event, key) {
   switch (key) {
     case 'time':
@@ -1015,6 +1225,300 @@ async function mergeHistoryDocument() {
   }
 }
 
+function recommendationDisplayTitle(item) {
+  return item.detail_title || item.title || item.card_title || item.listing_id || 'Listing detail';
+}
+
+function markdownInline(text) {
+  return html(text).replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_match, label, href) => (
+    `<a href="${html(href)}" target="_blank" rel="noreferrer">${label}</a>`
+  ));
+}
+
+function renderMarkdownText(markdown) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let paragraph = [];
+  let list = [];
+  let code = [];
+  let inCode = false;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${markdownInline(paragraph.join(' '))}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!list.length) return;
+    blocks.push(`<ul>${list.map((item) => `<li>${markdownInline(item)}</li>`).join('')}</ul>`);
+    list = [];
+  };
+  const flushCode = () => {
+    blocks.push(`<pre><code>${html(code.join('\n'))}</code></pre>`);
+    code = [];
+  };
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushParagraph();
+        flushList();
+        inCode = true;
+      }
+      return;
+    }
+    if (inCode) {
+      code.push(line);
+      return;
+    }
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length + 2;
+      blocks.push(`<h${level}>${markdownInline(heading[2])}</h${level}>`);
+      return;
+    }
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      list.push(bullet[1]);
+      return;
+    }
+    flushList();
+    paragraph.push(trimmed);
+  });
+  if (inCode) flushCode();
+  flushParagraph();
+  flushList();
+  return blocks.join('') || '<div class="empty-state">No resolved Markdown content.</div>';
+}
+
+async function renderRecommendationSnapshotText(item) {
+  if (!els.recommendationSnapshotSection || !els.recommendationSnapshotText) return;
+  const snapshotUrl = item?.snapshotUrl ? apiUrl(item.snapshotUrl) : '';
+  if (!snapshotUrl) {
+    els.recommendationSnapshotSection.hidden = true;
+    els.recommendationSnapshotText.innerHTML = '';
+    return;
+  }
+  els.recommendationSnapshotSection.hidden = false;
+  els.recommendationSnapshotText.textContent = 'Loading resolved Markdown...';
+  try {
+    const response = await fetch(snapshotUrl);
+    if (response.ok) {
+      els.recommendationSnapshotText.innerHTML = renderMarkdownText(await response.text());
+    } else {
+      els.recommendationSnapshotText.textContent = `Snapshot could not be loaded: ${response.statusText}`;
+    }
+  } catch (error) {
+    els.recommendationSnapshotText.textContent = `Snapshot could not be loaded: ${error.message || error}`;
+  }
+}
+
+function openRecommendationDetail(item) {
+  if (!item || !els.recommendationDetailDialog) return;
+  const screenshotUrl = item.screenshotUrl ? apiUrl(item.screenshotUrl) : '';
+  const snapshotUrl = item.snapshotUrl ? apiUrl(item.snapshotUrl) : '';
+  els.recommendationDetailTitle.textContent = recommendationDisplayTitle(item);
+  els.recommendationDetailMeta.textContent = `${item.listing_id || ''} / ${item.detail_status || 'pending'} / ${item.source || 'unknown source'}${item.source_keyword ? ' / ' + item.source_keyword : ''}`;
+  els.recommendationDetailImage.innerHTML = screenshotUrl
+    ? `<a href="${html(screenshotUrl)}" target="_blank" rel="noreferrer"><img class="snapshot-image" src="${html(screenshotUrl)}" alt="Worker screenshot for ${html(item.listing_id || '')}"></a>`
+    : '<div class="empty-state">Worker screenshot appears after detail capture. Current recommendation data is shown below.</div>';
+  const details = [
+    ['Document id', item.document_id],
+    ['Record id', item.record_id],
+    ['History item', item.history_title || item.record_id],
+    ['History category', item.history_category],
+    ['History subcategory', item.history_subcategory],
+    ['Brand', item.history_brand],
+    ['Model', item.history_model],
+    ['Mount', item.history_mount],
+    ['Purchased', item.history_purchase_at],
+    ['Sold', item.history_sold_at],
+    ['Outcome', item.history_outcome],
+    ['Matched terms', Array.isArray(item.matched_terms) ? item.matched_terms.join(', ') : ''],
+    ['Listing price', formatMoney(item.listing_price_cad)],
+    ['Purchase price', formatMoney(item.purchase_price_cad)],
+    ['Threshold', formatMoney(item.threshold_price_cad)],
+    ['Status', item.status],
+    ['Listing status', item.detail_status],
+    ['Title', recommendationDisplayTitle(item)],
+    ['Card title', item.card_title],
+    ['Card text', item.card_text],
+    ['Price', item.detail_price],
+    ['Location', item.detail_location],
+    ['Condition', item.detail_condition],
+    ['Seller', item.detail_seller_name],
+    ['Source', item.source],
+    ['Keyword', item.source_keyword],
+    ['First matched', formatDate(item.first_matched_at)],
+    ['Last seen', formatDate(item.listing_seen_at || item.last_seen_at)],
+    ['Completed', formatDate(item.detail_completed_at)],
+    ['Last error', item.detail_last_error],
+    ['Collected item JSON', item.history_data && Object.keys(item.history_data).length ? JSON.stringify(item.history_data, null, 2) : ''],
+  ].filter((entry) => entry[1] !== undefined && entry[1] !== null && entry[1] !== '');
+  els.recommendationDetailList.innerHTML = details.map(([label, value]) => (
+    `<dt>${html(label)}</dt><dd>${html(value)}</dd>`
+  )).join('');
+  els.recommendationDetailLinks.innerHTML = [
+    item.href ? `<a class="button-link" href="${html(item.href)}" target="_blank" rel="noreferrer">Facebook</a>` : '',
+    snapshotUrl ? `<a class="button-link" href="${html(snapshotUrl)}" target="_blank" rel="noreferrer">Snapshot</a>` : '',
+    screenshotUrl ? `<a class="button-link" href="${html(screenshotUrl)}" target="_blank" rel="noreferrer">Screenshot</a>` : '',
+  ].filter(Boolean).join('');
+  els.recommendationDetailDialog.showModal();
+  renderRecommendationSnapshotText(item);
+}
+
+function openRecommendationAction(item, status) {
+  if (!item || !els.recommendationActionDialog) return;
+  store.pendingRecommendationAction = { item, status };
+  const actionLabel = status === 'saved' ? 'Save' : 'Dismiss';
+  els.recommendationActionTitle.textContent = `${actionLabel} Recommendation`;
+  els.recommendationActionMeta.textContent = `${recommendationDisplayTitle(item)} / ${item.listing_id || ''}`;
+  const isDismissal = status === 'dismissed';
+  if (els.recommendationActionReasonLabel) els.recommendationActionReasonLabel.hidden = !isDismissal;
+  if (els.recommendationActionReason) els.recommendationActionReason.disabled = !isDismissal;
+  if (els.recommendationActionCustomReasonLabel) els.recommendationActionCustomReasonLabel.hidden = !isDismissal;
+  if (els.recommendationActionCustomReason) els.recommendationActionCustomReason.value = '';
+  if (els.recommendationActionSubmitButton) els.recommendationActionSubmitButton.textContent = actionLabel;
+  els.recommendationActionDialog.showModal();
+}
+
+async function submitRecommendationAction(event) {
+  event.preventDefault();
+  const pending = store.pendingRecommendationAction;
+  if (!pending?.item) return;
+  const item = pending.item;
+  if (els.recommendationActionSubmitButton) els.recommendationActionSubmitButton.disabled = true;
+  try {
+    const status = pending.status;
+    await fetchJson(`/api/purchase-history-match-queue/action?status=${encodeURIComponent(els.recommendationsStatusSelect?.value || 'queued')}&limit=25&offset=0`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        documentId: item.document_id,
+        recordId: item.record_id,
+        listingId: item.listing_id,
+        status,
+        reason: status === 'dismissed' ? els.recommendationActionReason?.value || '' : 'saved_by_user',
+        customReason: els.recommendationActionCustomReason?.value || '',
+      }),
+    });
+    els.recommendationActionDialog?.close();
+    store.pendingRecommendationAction = null;
+    await loadRecommendations({ refreshBacklog: false });
+    loadEventRegistry().catch(() => {});
+  } catch (error) {
+    alert(error.message || 'Recommendation feedback could not be saved.');
+  } finally {
+    if (els.recommendationActionSubmitButton) els.recommendationActionSubmitButton.disabled = false;
+  }
+}
+
+function renderRecommendationCardPane() {
+  if (!els.recommendationCardPane) return;
+  const cardsMode = els.recommendationsViewModeSelect?.value === 'cards';
+  els.recommendationCardPane.hidden = !cardsMode;
+  if (!cardsMode) return;
+  const items = store.recommendations || [];
+  if (!items.length) {
+    els.recommendationCardPane.innerHTML = '<div class="empty-state">No recommendations on this page.</div>';
+    return;
+  }
+  const index = Math.min(Math.max(store.recommendationCardIndex, 0), items.length - 1);
+  store.recommendationCardIndex = index;
+  const item = items[index];
+  const screenshotUrl = item.screenshotUrl ? apiUrl(item.screenshotUrl) : '';
+  const terms = Array.isArray(item.matched_terms) ? item.matched_terms.join(', ') : '';
+  els.recommendationCardPane.innerHTML = '<div class="recommendation-swipe-card">'
+    + '<div class="recommendation-swipe-media">'
+      + `<div class="recommendation-status-badge">${html(item.status || 'queued')}</div>`
+      + (screenshotUrl
+        ? `<img src="${html(screenshotUrl)}" alt="Listing screenshot for ${html(item.listing_id || '')}">`
+        : '<div class="empty-state">No captured image yet.</div>')
+    + '</div>'
+    + '<div class="recommendation-swipe-body">'
+      + `<div class="process-meta">${html(index + 1)} / ${html(items.length)} on this page</div>`
+      + `<h3>${html(recommendationDisplayTitle(item))}</h3>`
+      + `<div class="process-meta">${html(item.history_title || item.record_id)} / ${html(terms)}</div>`
+      + `<div class="recommendation-price-stack"><div>Listing ${html(formatMoney(item.listing_price_cad) || '-')}</div><div>Purchase ${html(formatMoney(item.purchase_price_cad) || '-')}</div><div>Limit ${html(formatMoney(item.threshold_price_cad) || '-')}</div></div>`
+      + '<div class="row-actions recommendation-card-actions">'
+        + '<button type="button" class="secondary" id="recommendationCardPrev">Prev</button>'
+        + '<button type="button" class="secondary" id="recommendationCardView">View</button>'
+        + '<button type="button" class="secondary" id="recommendationCardDismiss">Dismiss</button>'
+        + '<button type="button" id="recommendationCardSave">Save</button>'
+        + '<button type="button" class="secondary" id="recommendationCardNext">Next</button>'
+      + '</div>'
+    + '</div>'
+  + '</div>';
+  document.getElementById('recommendationCardPrev')?.addEventListener('click', () => {
+    store.recommendationCardIndex = Math.max(0, store.recommendationCardIndex - 1);
+    renderRecommendationCardPane();
+  });
+  document.getElementById('recommendationCardNext')?.addEventListener('click', () => {
+    store.recommendationCardIndex = Math.min(items.length - 1, store.recommendationCardIndex + 1);
+    renderRecommendationCardPane();
+  });
+  document.getElementById('recommendationCardView')?.addEventListener('click', () => openRecommendationDetail(item));
+  document.getElementById('recommendationCardSave')?.addEventListener('click', () => openRecommendationAction(item, 'saved'));
+  document.getElementById('recommendationCardDismiss')?.addEventListener('click', () => openRecommendationAction(item, 'dismissed'));
+}
+
+function renderRecommendations() {
+  if (!els.recommendationsTable || !els.recommendationsMeta) {
+    return;
+  }
+  if (!store.recommendationsLoaded && store.recommendations.length === 0) {
+    els.recommendationsMeta.textContent = 'Preparing recommendations...';
+    renderRecommendationsTable([]);
+    return;
+  }
+  const status = els.recommendationsStatusSelect?.value || 'queued';
+  els.recommendationsMeta.textContent = `${store.recommendationsTotal || store.recommendations.length} ${status === 'all' ? '' : status} recommendations`;
+  if (els.recommendationsTable) {
+    els.recommendationsTable.hidden = els.recommendationsViewModeSelect?.value === 'cards';
+  }
+  renderRecommendationsTable(store.recommendations);
+  renderRecommendationCardPane();
+}
+
+async function loadRecommendations(options = {}) {
+  if (!hasApiToken()) {
+    if (els.recommendationsMeta) els.recommendationsMeta.textContent = 'Token needed';
+    return;
+  }
+  store.recommendationsLoaded = true;
+  renderRecommendations();
+  if (options.refreshBacklog !== false) {
+    listingsViewer.loadBacklogQueue?.().catch(() => {});
+  }
+}
+
+async function scanRecommendations() {
+  const scanButton = document.getElementById('recommendationsScanButton');
+  if (scanButton) scanButton.disabled = true;
+  try {
+    const payload = await fetchJson('/api/purchase-history-match-queue/scan', { method: 'POST' });
+    store.recommendations = payload.items || [];
+    store.recommendationsTotal = payload.total || store.recommendations.length;
+    store.recommendationsLoaded = true;
+    renderRecommendations();
+    listingsViewer.loadBacklogQueue?.().catch(() => {});
+  } finally {
+    if (scanButton) scanButton.disabled = false;
+  }
+}
+
 function eventRegistryDetails(event) {
   const data = event.data || {};
   return [
@@ -1026,33 +1530,189 @@ function eventRegistryDetails(event) {
   ].filter(Boolean).join(' / ');
 }
 
+function eventSeverity(event) {
+  const text = `${event.status || ''} ${event.event_type || ''} ${eventRegistryDetails(event)}`.toLowerCase();
+  if (/fail|error|interrupted|review/.test(text)) return 3;
+  if (/bypass|skip|unavailable|ignored/.test(text)) return 5;
+  return 6;
+}
+
+function syslogTimestamp(value) {
+  const date = new Date(value || Date.now());
+  return Number.isNaN(date.getTime())
+    ? String(value || '')
+    : date.toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).replace(',', '');
+}
+
+function auditProgram(event) {
+  return `marketplace-${event.source || 'audit'}`;
+}
+
+function auditSyslogLine(event) {
+  const host = window.location.hostname || 'marketplace-monitor';
+  const program = auditProgram(event);
+  const message = [
+    event.event_type || 'event',
+    event.status ? `status=${event.status}` : '',
+    event.subject_id ? `subject=${event.subject_id}` : '',
+    event.title ? `title="${String(event.title).replace(/"/g, '\\"')}"` : '',
+    eventRegistryDetails(event),
+  ].filter(Boolean).join(' ');
+  const facilityUser = 1;
+  const priority = (facilityUser * 8) + eventSeverity(event);
+  return `<${priority}>${syslogTimestamp(event.event_at)} ${host} ${program}[${event.event_id || '-'}]: ${message}`;
+}
+
+function eventRegistryTableData(events) {
+  return events.map((event) => ({
+    ...event,
+    _time: Number.isFinite(Date.parse(event.event_at || '')) ? Date.parse(event.event_at || '') : 0,
+    _details: eventRegistryDetails(event),
+    _syslog: auditSyslogLine(event),
+  }));
+}
+
+async function requestAuditLogs(_url, _config, params = {}) {
+  const size = Math.max(1, Number.parseInt(params.size, 10) || Number.parseInt(els.eventRegistryLimitSelect?.value || '200', 10) || 200);
+  const page = Math.max(1, Number.parseInt(params.page, 10) || 1);
+  const offset = (page - 1) * size;
+  const source = els.eventRegistrySourceSelect?.value || 'all';
+  const payload = await fetchJson(`/api/events?source=${encodeURIComponent(source)}&limit=${size}&offset=${offset}`);
+  store.eventRegistry = payload.events || [];
+  store.eventRegistryLoaded = true;
+  const total = payload.total || store.eventRegistry.length;
+  if (els.eventRegistryMeta) {
+    els.eventRegistryMeta.textContent = `${total} ${source === 'all' ? '' : source} audit logs`;
+  }
+  return {
+    data: eventRegistryTableData(store.eventRegistry),
+    last_page: Math.max(1, Math.ceil(total / size)),
+  };
+}
+
+function eventRegistrySubjectFormatter(cell) {
+  const event = cell.getData();
+  return `<div class="history-item-title">${html(event.title || '')}</div>`
+    + `<div class="process-meta">${html(event.subject_id || '')}</div>`;
+}
+
+function eventRegistryColumns() {
+  return [
+    {
+      title: 'Time',
+      field: '_time',
+      width: 175,
+      responsive: 0,
+      sorter: 'number',
+      formatter: (cell) => formatDate(cell.getData().event_at),
+    },
+    {
+      title: 'Source',
+      field: 'source',
+      width: 110,
+      responsive: 0,
+      formatter: (cell) => `<span class="status ${html(cell.getValue())}">${html(cell.getValue())}</span>`,
+    },
+    {
+      title: 'Event',
+      field: 'event_type',
+      minWidth: 180,
+      widthGrow: 2,
+      responsive: 0,
+    },
+    {
+      title: 'Subject',
+      field: 'title',
+      minWidth: 240,
+      widthGrow: 2,
+      responsive: 1,
+      formatter: eventRegistrySubjectFormatter,
+    },
+    {
+      title: 'Status',
+      field: 'status',
+      width: 130,
+      responsive: 2,
+    },
+    {
+      title: 'Details',
+      field: '_details',
+      minWidth: 260,
+      widthGrow: 3,
+      responsive: 3,
+      formatter: (cell) => `<span class="cell-text">${html(cell.getValue())}</span>`,
+    },
+  ];
+}
+
+function openAuditDetail(event) {
+  if (!event || !els.auditDetailDialog) return;
+  els.auditDetailMeta.textContent = `${event.source || ''} / ${event.event_type || ''} / ${formatDate(event.event_at)}`;
+  els.auditSyslogOutput.value = event._syslog || auditSyslogLine(event);
+  const rows = [
+    ['Time', formatDate(event.event_at)],
+    ['Source', event.source],
+    ['Event', event.event_type],
+    ['Status', event.status],
+    ['Subject', event.subject_id],
+    ['Title', event.title],
+    ['Event ID', event.event_id],
+  ].filter((entry) => entry[1] !== undefined && entry[1] !== null && entry[1] !== '');
+  els.auditDetailTableBody.innerHTML = rows.map(([label, value]) => (
+    `<tr><th>${html(label)}</th><td>${html(value)}</td></tr>`
+  )).join('');
+  els.auditPayloadOutput.value = JSON.stringify(event.data || {}, null, 2);
+  els.auditDetailDialog.showModal();
+}
+
 function renderEventRegistry() {
-  if (!els.eventRegistryTableBody || !els.eventRegistryMeta) {
+  if (!els.eventRegistryTable || !els.eventRegistryMeta) {
     return;
   }
   if (!store.eventRegistryLoaded && store.eventRegistry.length === 0) {
-    els.eventRegistryMeta.textContent = 'Preparing events...';
-    els.eventRegistryTableBody.innerHTML = renderSkeletonRows(5, 6);
-    updateSortButtons('[data-event-sort]', store.eventRegistrySort.key, store.eventRegistrySort.direction);
+    els.eventRegistryMeta.textContent = 'Preparing audit logs...';
     return;
   }
-  els.eventRegistryMeta.textContent = `${store.eventRegistry.length} recent events`;
-  if (!store.eventRegistry.length) {
-    els.eventRegistryTableBody.innerHTML = '<tr><td colspan="6" class="empty-state">Events appear here.</td></tr>';
-    updateSortButtons('[data-event-sort]', store.eventRegistrySort.key, store.eventRegistrySort.direction);
+  const source = els.eventRegistrySourceSelect?.value || 'all';
+  els.eventRegistryMeta.textContent = `${store.eventRegistry.length} ${source === 'all' ? '' : source} audit logs`;
+  const data = eventRegistryTableData(store.eventRegistry);
+  if (!store.eventRegistryTable) {
+    store.eventRegistryTable = new Tabulator(els.eventRegistryTable, {
+      data,
+      height: 'min(68vh, 760px)',
+      layout: 'fitColumns',
+      responsiveLayout: 'hide',
+      placeholder: 'Audit logs appear here.',
+      columnHeaderSortMulti: false,
+      movableColumns: true,
+      resizableColumnFit: true,
+      initialSort: [{ column: '_time', dir: 'desc' }],
+      pagination: true,
+      paginationMode: 'remote',
+      paginationSize: Number.parseInt(els.eventRegistryLimitSelect?.value || '200', 10) || 200,
+      paginationSizeSelector: [50, 200, 1000, 10000],
+      ajaxURL: '/api/events',
+      ajaxRequestFunc: requestAuditLogs,
+      columns: eventRegistryColumns(),
+      rowFormatter: (row) => {
+        const element = row.getElement();
+        if (element.dataset.auditRowClickBound === '1') return;
+        element.dataset.auditRowClickBound = '1';
+        element.addEventListener('click', () => openAuditDetail(row.getData()));
+      },
+    });
+    setTimeout(() => store.eventRegistryTable?.setData('/api/events'), 0);
     return;
   }
-  updateSortButtons('[data-event-sort]', store.eventRegistrySort.key, store.eventRegistrySort.direction);
-  els.eventRegistryTableBody.innerHTML = sortRows(store.eventRegistry, store.eventRegistrySort, eventSortValue).map((event) => (
-    '<tr>'
-      + `<td>${html(formatDate(event.event_at))}</td>`
-      + `<td><span class="status ${html(event.source)}">${html(event.source)}</span></td>`
-      + `<td>${html(event.event_type || '')}</td>`
-      + `<td><div class="history-item-title">${html(event.title || '')}</div><div class="process-meta">${html(event.subject_id || '')}</div></td>`
-      + `<td>${html(event.status || '')}</td>`
-      + `<td class="cell-text">${html(eventRegistryDetails(event))}</td>`
-    + '</tr>'
-  )).join('');
+  store.eventRegistryTable.setColumns(eventRegistryColumns());
+  store.eventRegistryTable.setData('/api/events');
 }
 
 async function loadEventRegistry() {
@@ -1060,9 +1720,6 @@ async function loadEventRegistry() {
     if (els.eventRegistryMeta) els.eventRegistryMeta.textContent = 'Token needed';
     return;
   }
-  const source = els.eventRegistrySourceSelect?.value || 'all';
-  const payload = await fetchJson(`/api/events?source=${encodeURIComponent(source)}&limit=200`);
-  store.eventRegistry = payload.events || [];
   store.eventRegistryLoaded = true;
   renderEventRegistry();
 }
@@ -1285,6 +1942,7 @@ function renderInitialShell() {
   renderSummarySkeleton();
   listingsViewer.renderInitialShell?.();
   renderPurchaseHistory();
+  renderRecommendations();
   renderEventRegistry();
   renderSettings();
   renderWorkerControlSkeleton();
@@ -2086,7 +2744,7 @@ function renderWorkerDetail(selectedProcess) {
     ['done', 'Done', detailStats.done || 0],
     ['skipped', 'Skipped', detailStats.skipped || 0],
     ['error', 'Review', detailStats.error || 0],
-    ['started', 'Started', detailStats.started || 0],
+    ['started', 'Attempted', detailStats.started || 0],
   ].map(([category, label, count]) => (
     `<button type="button" class="secondary worker-category-button ${store.workerDetailCategory === category ? 'active' : ''}" data-category="${html(category)}">${html(label)} ${html(count)}</button>`
   )).join('');
@@ -2383,7 +3041,27 @@ function routeForPanel(panelId) {
 }
 
 function routeForListingView(listingView) {
+  if (listingView === 'resolveQueueView') return '/listings/resolve-queue';
+  if (listingView === 'resolveQueueAuditView') return '/listings/queue-audit';
   return listingView === 'backlogQueueView' ? '/listings/backlog' : '/listings';
+}
+
+function routeForHistoryView(historyView) {
+  return historyView === 'recommendationsView' ? '/history/recommendations' : '/history';
+}
+
+function setHistoryView(historyView = 'purchaseHistoryView') {
+  for (const item of document.querySelectorAll('[data-history-view]')) {
+    item.classList.toggle('active', item.dataset.historyView === historyView);
+  }
+  for (const view of document.querySelectorAll('.history-view')) {
+    view.classList.toggle('active', view.id === historyView);
+  }
+  if (historyView === 'purchaseHistoryView') {
+    setTimeout(() => store.historyTable?.redraw?.(true), 0);
+  } else if (historyView === 'recommendationsView') {
+    setTimeout(() => store.recommendationsTable?.redraw?.(true), 0);
+  }
 }
 
 function updateLocationRoute(routePath, options = {}) {
@@ -2404,8 +3082,17 @@ async function runRouteLoader(routePath) {
   } else if (route.listingView) {
     await listingsViewer.setListingView(route.listingView, { load: false, notify: false });
   }
+  if (route.historyView) {
+    setHistoryView(route.historyView);
+  }
   if (route.panel === 'reviewPanel') {
     await loadEventRegistry();
+  } else if (route.panel === 'historyPanel') {
+    if (route.historyView === 'recommendationsView') {
+      await loadRecommendations({ refreshBacklog: false });
+    } else if (!store.purchaseHistoryLoaded) {
+      await loadPurchaseHistory();
+    }
   } else if (route.panel === 'opsPanel') {
     await loadWorkflows();
     scheduleWorkflowSync();
@@ -2457,6 +3144,15 @@ function bindEvents() {
       alert(error.message || 'Listing route could not be loaded.');
     });
   });
+  for (const subtab of document.querySelectorAll('[data-history-view]')) {
+    subtab.addEventListener('click', async () => {
+      try {
+        await navigateToRoute(routeForHistoryView(subtab.dataset.historyView));
+      } catch (error) {
+        alert(error.message || 'History route could not be loaded.');
+      }
+    });
+  }
   window.addEventListener('hashchange', () => {
     navigateToRoute(normalizeRoute(window.location.hash), { replace: true }).catch((error) => {
       alert(error.message || 'Route could not be loaded.');
@@ -2521,6 +3217,36 @@ function bindEvents() {
     localStorage.setItem('marketplace-monitor-history-document', store.selectedPurchaseHistoryDocumentId);
     await loadPurchaseHistory();
   });
+  document.getElementById('recommendationsRefreshButton')?.addEventListener('click', async () => {
+    try {
+      await loadRecommendations();
+    } catch (error) {
+      alert(error.message || 'Recommendations could not be loaded.');
+    }
+  });
+  document.getElementById('recommendationsScanButton')?.addEventListener('click', async () => {
+    try {
+      await scanRecommendations();
+    } catch (error) {
+      alert(error.message || 'Recommendation scan could not be started.');
+    }
+  });
+  els.recommendationsStatusSelect?.addEventListener('change', async () => {
+    try {
+      store.recommendationCardIndex = 0;
+      await loadRecommendations({ refreshBacklog: false });
+    } catch (error) {
+      alert(error.message || 'Recommendations could not be loaded.');
+    }
+  });
+  els.recommendationsViewModeSelect?.addEventListener('change', () => {
+    const cardsMode = els.recommendationsViewModeSelect.value === 'cards';
+    if (els.recommendationsTable) els.recommendationsTable.hidden = cardsMode;
+    renderRecommendationCardPane();
+  });
+  els.recommendationActionForm?.addEventListener('submit', submitRecommendationAction);
+  document.getElementById('recommendationActionCloseButton')?.addEventListener('click', () => els.recommendationActionDialog?.close());
+  document.getElementById('recommendationActionCancelButton')?.addEventListener('click', () => els.recommendationActionDialog?.close());
   document.getElementById('historyCreateDocumentButton')?.addEventListener('click', async () => {
     try {
       await createHistoryDocument();
@@ -2556,26 +3282,25 @@ function bindEvents() {
     try {
       await loadEventRegistry();
     } catch (error) {
-      alert(error.message || 'Event registry could not be loaded.');
+      alert(error.message || 'Audit logs could not be loaded.');
     }
   });
   els.eventRegistrySourceSelect?.addEventListener('change', async () => {
     try {
       await loadEventRegistry();
     } catch (error) {
-      alert(error.message || 'Event registry could not be loaded.');
+      alert(error.message || 'Audit logs could not be loaded.');
     }
   });
-  document.querySelectorAll('[data-event-sort]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const key = button.dataset.eventSort;
-      store.eventRegistrySort = {
-        key,
-        direction: store.eventRegistrySort.key === key && store.eventRegistrySort.direction === 'asc' ? 'desc' : 'asc',
-      };
-      renderEventRegistry();
-    });
+  els.eventRegistryLimitSelect?.addEventListener('change', async () => {
+    try {
+      await loadEventRegistry();
+    } catch (error) {
+      alert(error.message || 'Audit logs could not be loaded.');
+    }
   });
+  document.getElementById('auditDetailCloseButton')?.addEventListener('click', () => els.auditDetailDialog?.close());
+  document.getElementById('recommendationDetailCloseButton')?.addEventListener('click', () => els.recommendationDetailDialog?.close());
   els.workflowSelect.addEventListener('change', () => {
     selectWorkflowId(els.workflowSelect.value);
     renderWorkflowForm();

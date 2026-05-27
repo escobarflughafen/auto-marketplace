@@ -23,6 +23,7 @@ const {
   mergePurchaseHistoryDocuments,
   listPurchaseHistoryEvents,
   listEventRegistry,
+  countEventRegistry,
   appendListingEvent,
   insertWorkflowRun,
   updateWorkflowRun,
@@ -39,6 +40,10 @@ const {
   listResolveQueueItems,
   listResolveQueueEvents,
   getResolveQueueCounts,
+  scanPurchaseHistoryListingMatches,
+  listPurchaseHistoryMatchQueue,
+  countPurchaseHistoryMatchQueue,
+  updatePurchaseHistoryMatchQueueStatus,
 } = require('./marketplace-homepage-db');
 const {
   buildListingsQuery,
@@ -65,6 +70,8 @@ const WORKER_SCREENSHOT_ROOT = path.join(process.cwd(), 'artifacts', 'marketplac
 const TRADING_HISTORY_SCHEMA_PATH = path.join(process.cwd(), 'schemas', 'trading-history.schema.csv');
 const PURCHASE_HISTORY_CSV_PATH = path.join(process.cwd(), 'output', 'trading-history.normalized.csv');
 const DEFAULT_PURCHASE_HISTORY_DOCUMENT_ID = 'inventory-import';
+const HISTORY_MATCH_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const HISTORY_MATCH_SCAN_BATCH_SIZE = 250;
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
 const MARKETPLACE_LOCATION_OPTIONS = getMarketplaceLocationOptions();
 const AUTH_MODE_FIELD = {
@@ -625,6 +632,7 @@ function publicWorkflowRunRecordWithStats(db, run, options = {}) {
   const record = publicWorkflowRunRecord(run, options);
   const workerIds = resolveWorkerEventIdsForRun(db, run.run_id);
   const eventStats = getWorkerAuditEventStats(db, run.run_id, { workerIds });
+  record.runtimeStats = runtimeStatsFromEventStats(eventStats, record.runtimeStats);
   record.eventStats = options.includeLatestEvents
     ? eventStats
     : {
@@ -704,6 +712,29 @@ function runtimeStatsFromLogs(logs = []) {
     }
   }
   return stats;
+}
+
+function runtimeStatsFromEventStats(eventStats, fallbackStats = {}) {
+  const hasAuditStats = Boolean(eventStats && (
+    eventStats.listingTotal > 0
+    || eventStats.workflow > 0
+    || eventStats.started > 0
+    || eventStats.done > 0
+    || eventStats.skipped > 0
+    || eventStats.error > 0
+  ));
+  if (!hasAuditStats) {
+    return fallbackStats || { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
+  }
+  return {
+    attempted: eventStats.started || 0,
+    done: eventStats.done || 0,
+    bypassed: eventStats.skipped || 0,
+    errors: eventStats.error || 0,
+    sleeps: fallbackStats.sleeps || 0,
+    currentListingId: fallbackStats.currentListingId || '',
+    source: 'events',
+  };
 }
 
 function publicWorkflowRunRecords(db, runs, options = {}) {
@@ -1992,6 +2023,19 @@ function enrichEventPaths(event) {
   };
 }
 
+function enrichMatchQueueItemPaths(item) {
+  if (!item) {
+    return item;
+  }
+  return {
+    ...item,
+    screenshotPath: item.screenshot_path || '',
+    snapshotPath: item.snapshot_path || '',
+    screenshotUrl: formatPathLink(item.screenshot_path),
+    snapshotUrl: formatPathLink(item.snapshot_path),
+  };
+}
+
 function safeWorkerPathSegment(workerId) {
   return String(workerId || 'worker')
     .replace(/[^a-z0-9_.-]+/gi, '-')
@@ -2027,8 +2071,61 @@ function listWorkerScreenshots(workerId, options = {}) {
     .slice(0, limit);
 }
 
+function startPurchaseHistoryMatchScanner(db, options = {}) {
+  const intervalMs = Number.isFinite(options.intervalMs)
+    ? Math.max(30_000, options.intervalMs)
+    : HISTORY_MATCH_SCAN_INTERVAL_MS;
+  let timer = null;
+  let stopped = false;
+  let inFlight = false;
+
+  const schedule = (delay = intervalMs) => {
+    if (stopped) return;
+    timer = setTimeout(tick, delay);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  };
+
+  const tick = () => {
+    if (stopped) return;
+    if (inFlight) {
+      schedule(intervalMs);
+      return;
+    }
+    inFlight = true;
+    try {
+      const result = scanPurchaseHistoryListingMatches(db, {
+        limit: HISTORY_MATCH_SCAN_BATCH_SIZE,
+        actor: 'history-watch-scheduler',
+      });
+      if (result.matched > 0 || result.queued > 0) {
+        process.stdout.write(
+          `[${new Date().toISOString()}] history_match_scan scanned=${result.scanned} matched=${result.matched} queued=${result.queued}\n`,
+        );
+      }
+    } catch (error) {
+      process.stderr.write(
+        `[${new Date().toISOString()}] history_match_scan_error ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    } finally {
+      inFlight = false;
+      schedule(intervalMs);
+    }
+  };
+
+  schedule(Math.min(15_000, intervalMs));
+  return () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+    }
+  };
+}
+
 function createServer(options) {
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
+  const stopPurchaseHistoryMatchScanner = startPurchaseHistoryMatchScanner(db);
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
@@ -2253,11 +2350,18 @@ function createServer(options) {
 
     if (requestUrl.pathname === '/api/events' && request.method === 'GET') {
       try {
+        const source = requestUrl.searchParams.get('source') || 'all';
+        const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10);
+        const offset = Number.parseInt(requestUrl.searchParams.get('offset') || '0', 10);
         writeJson(response, 200, {
           events: listEventRegistry(db, {
-            source: requestUrl.searchParams.get('source') || 'all',
-            limit: Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10),
+            source,
+            limit,
+            offset,
           }),
+          total: countEventRegistry(db, { source }),
+          limit,
+          offset,
           auth: authPayloadForAccess(access),
         });
       } catch (error) {
@@ -2504,6 +2608,80 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/purchase-history-match-queue' && request.method === 'GET') {
+      const status = requestUrl.searchParams.get('status') || 'queued';
+      const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10);
+      const offset = Number.parseInt(requestUrl.searchParams.get('offset') || '0', 10);
+      writeJson(response, 200, {
+        status,
+        total: countPurchaseHistoryMatchQueue(db, { status }),
+        limit,
+        offset,
+        items: listPurchaseHistoryMatchQueue(db, { status, limit, offset }).map(enrichMatchQueueItemPaths),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history-match-queue/action' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const status = String(body.action || body.status || '').trim().toLowerCase() === 'save'
+          ? 'saved'
+          : String(body.action || body.status || '').trim().toLowerCase() === 'reject'
+            ? 'dismissed'
+            : String(body.status || body.action || '').trim().toLowerCase();
+        const reason = [
+          body.reason,
+          body.customReason,
+        ].filter(Boolean).join(': ');
+        updatePurchaseHistoryMatchQueueStatus(db, {
+          documentId: body.documentId || body.document_id,
+          recordId: body.recordId || body.record_id,
+          listingId: body.listingId || body.listing_id,
+          status,
+        }, {
+          reason,
+          customReason: body.customReason || '',
+          actor: 'viewer',
+        });
+        const responseStatus = requestUrl.searchParams.get('status') || 'queued';
+        const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10);
+        const offset = Number.parseInt(requestUrl.searchParams.get('offset') || '0', 10);
+        writeJson(response, 200, {
+          ok: true,
+          status: responseStatus,
+          total: countPurchaseHistoryMatchQueue(db, { status: responseStatus }),
+          limit,
+          offset,
+          items: listPurchaseHistoryMatchQueue(db, { status: responseStatus, limit, offset }).map(enrichMatchQueueItemPaths),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history-match-queue/scan' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      const result = scanPurchaseHistoryListingMatches(db, {
+        limit: HISTORY_MATCH_SCAN_BATCH_SIZE,
+        actor: 'history-watch-manual',
+      });
+      writeJson(response, 200, {
+        ...result,
+        total: countPurchaseHistoryMatchQueue(db, { status: 'queued' }),
+        items: listPurchaseHistoryMatchQueue(db, { status: 'queued', limit: 200 }).map(enrichMatchQueueItemPaths),
+      });
+      return;
+    }
+
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
       const reconcile = requestUrl.searchParams.get('reconcile') !== '0';
       const includeStats = requestUrl.searchParams.get('stats') !== '0';
@@ -2690,6 +2868,7 @@ function createServer(options) {
   });
 
   server.on('close', () => {
+    stopPurchaseHistoryMatchScanner();
     closeMarketplaceHomepageDatabase(db);
   });
 
