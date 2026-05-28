@@ -1,4 +1,12 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
+import {
+  listingDisplayTitle,
+  listingHasFetchedDetail,
+  listingResolverStatusText,
+  listingResolveActionLabel,
+  listingResolveMode,
+  mergeResolverStatuses,
+} from './listing-components.js?v=resolver-status-20260528';
 
 const SORT_BY_FIELD = {
   listing_id: 'id',
@@ -16,8 +24,6 @@ const SORT_BY_FIELD = {
 };
 
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
-const RESOLVED_POV_STATUSES = new Set(['done', 'sold', 'pending_sale']);
-
 const COLUMNS = [
   {
     title: '',
@@ -48,7 +54,7 @@ const COLUMNS = [
   {
     title: 'Links',
     field: 'actions',
-    width: 172,
+    width: 216,
     responsive: 0,
     headerSort: false,
     formatter: actionsFormatter,
@@ -111,36 +117,8 @@ function textFormatter(cell) {
   return `<span class="cell-text">${escapeHtml(cell.getValue())}</span>`;
 }
 
-function isPriceLike(value) {
-  const text = String(value || '').trim();
-  return /^(?:CA\$|\$)\s*[\d,]+(?:\.\d{2})?$/.test(text)
-    || /^(?:CA\$|\$)?\s*[\d,]+\s*(?:-|to|–|—)\s*(?:CA\$|\$)?\s*[\d,]+$/i.test(text)
-    || /^(?:CA\$|\$)\s*[\d,]+(?:CA\$|\$)\s*[\d,]+$/i.test(text)
-    || /^free$/i.test(text);
-}
-
-function isFreshnessLike(value) {
-  return /^(?:just listed|new listing|today|yesterday|listed .* ago|刚刚上架|刚刚发布|剛剛上架|剛剛發布)$/i
-    .test(String(value || '').trim());
-}
-
 function displayTitleForRow(row) {
-  if (row.displayTitle) return row.displayTitle;
-  if (row.display_title) return row.display_title;
-  if (row.detail_title) return row.detail_title;
-
-  const candidates = String(row.card_text || '')
-    .split(/\s+\|\s+|\n/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  if (row.card_title) {
-    candidates.push(String(row.card_title).trim());
-  }
-
-  return candidates.find((line) => !isPriceLike(line) && !isFreshnessLike(line))
-    || row.card_title
-    || row.listing_id
-    || '';
+  return listingDisplayTitle(row);
 }
 
 function titleFormatter(cell) {
@@ -160,8 +138,12 @@ function dateFormatter(cell) {
 function actionsFormatter(cell) {
   const row = cell.getData();
   const actions = [];
-  if (isBacklogRow(row)) {
-    actions.push(`<button type="button" class="secondary row-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">Fetch</button>`);
+  const resolverStatus = listingResolverStatusText(row);
+  if (resolverStatus) {
+    actions.push(`<span class="resolver-live-status">${escapeHtml(resolverStatus)}</span>`);
+  }
+  if (row.listing_id) {
+    actions.push(`<button type="button" class="secondary row-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">${escapeHtml(listingResolveActionLabel(row))}</button>`);
   }
   actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">View</button>`);
   if (row.href) {
@@ -187,9 +169,7 @@ function operatorsForField(field) {
 }
 
 function isResolvedPovRow(row) {
-  if (!row) return false;
-  if (row.screenshotUrl || row.snapshotUrl || row.screenshotPath || row.snapshotPath) return true;
-  return RESOLVED_POV_STATUSES.has(String(row.detail_status || '').toLowerCase());
+  return listingHasFetchedDetail(row);
 }
 
 function isBacklogRow(row) {
@@ -325,7 +305,7 @@ export function createListingsViewer() {
     const size = Math.max(1, Number.parseInt(params?.size, 10) || state.limit);
     const payload = await fetchJson(buildListingsUrl(params));
     state.total = payload.total;
-    state.rows = payload.rows || [];
+    state.rows = await enrichRowsWithResolverStatus(payload.rows || []);
     renderMeta(payload);
     const selectedSnapshot = state.rows.find((row) => row.listing_id === state.selectedSnapshotListingId);
     if (selectedSnapshot) {
@@ -338,6 +318,19 @@ export function createListingsViewer() {
       last_page: Math.max(1, Math.ceil(state.total / size)),
       last_row: state.total,
     };
+  }
+
+  async function enrichRowsWithResolverStatus(rows) {
+    const ids = [...new Set((rows || []).map((row) => row.listing_id).filter(Boolean))];
+    if (!ids.length) return rows || [];
+    const params = new URLSearchParams();
+    ids.forEach((listingId) => params.append('listingId', listingId));
+    try {
+      const payload = await fetchJson(`/api/listings/resolver-status?${params.toString()}`);
+      return mergeResolverStatuses(rows, payload.items || []);
+    } catch (_error) {
+      return rows || [];
+    }
   }
 
   function renderHead() {
@@ -491,6 +484,9 @@ export function createListingsViewer() {
     const details = [
       resolved ? null : ['Detail capture', 'Available row data is shown until capture completes.'],
       ['Status', row.detail_status],
+      ['Resolver', listingResolverStatusText(row)],
+      ['Resolver started', formatDate(row.resolver_workflow_started_at)],
+      ['Resolver updated', formatDate(row.resolver_workflow_updated_at || row.resolver_updated_at)],
       ['Title', displayTitleForRow(row)],
       ['Card title', row.card_title],
       ['Card text', row.card_text],
@@ -511,6 +507,7 @@ export function createListingsViewer() {
       `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`
     )).join('');
     els.snapshotLinks.innerHTML = [
+      row.listing_id ? `<button type="button" class="secondary snapshot-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">${escapeHtml(listingResolveActionLabel(row))}</button>` : '',
       row.href ? `<a class="button-link" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">Facebook</a>` : '',
       snapshotUrl ? `<a class="button-link" href="${escapeHtml(snapshotUrl)}" target="_blank" rel="noreferrer">Snapshot</a>` : '',
       screenshotUrl ? `<a class="button-link" href="${escapeHtml(screenshotUrl)}" target="_blank" rel="noreferrer">Screenshot</a>` : '',
@@ -895,10 +892,10 @@ export function createListingsViewer() {
   }
 
   async function resolveListing(row) {
-    if (!row?.listing_id || !isBacklogRow(row)) return;
+    if (!row?.listing_id) return;
     try {
       await postResolveBatch({
-        mode: 'listing',
+        mode: listingResolveMode(row),
         listingId: row.listing_id,
       });
     } catch (error) {
@@ -1300,6 +1297,14 @@ export function createListingsViewer() {
     document.getElementById('closeSnapshotButton').addEventListener('click', () => {
       state.selectedSnapshotListingId = '';
       renderSnapshotPanel(null);
+    });
+    els.snapshotLinks.addEventListener('click', (event) => {
+      const button = event.target.closest('.snapshot-resolve-button');
+      if (!button) return;
+      const row = state.rows.find((item) => item.listing_id === button.dataset.listingId)
+        || state.backlogRows.find((item) => item.listing_id === button.dataset.listingId)
+        || state.resolveQueueItems.find((item) => item.listing_id === button.dataset.listingId);
+      resolveListing(row || { listing_id: button.dataset.listingId, detail_status: 'done' });
     });
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape' || els.snapshotPanel.hidden) return;

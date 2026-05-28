@@ -38,10 +38,12 @@ const {
   markResolveQueueDispatched,
   refreshResolveQueueRunStatuses,
   listResolveQueueItems,
+  listListingResolverAssignments,
   listResolveQueueEvents,
   getResolveQueueCounts,
   scanPurchaseHistoryListingMatches,
   listPurchaseHistoryMatchQueue,
+  listRandomPurchaseHistoryMatches,
   countPurchaseHistoryMatchQueue,
   updatePurchaseHistoryMatchQueueStatus,
 } = require('./marketplace-homepage-db');
@@ -1071,6 +1073,20 @@ function getBacklogListingIdsByIds(db, listingIds) {
   `).all(...ids).map((row) => row.listing_id);
 }
 
+function getListingIdsByIds(db, listingIds) {
+  const ids = normalizeListingIds(listingIds);
+  if (ids.length === 0) {
+    return [];
+  }
+
+  return db.prepare(`
+    SELECT listing_id
+    FROM homepage_listings
+    WHERE listing_id IN (${placeholdersFor(ids)})
+    ORDER BY last_seen_at DESC, first_seen_at ASC
+  `).all(...ids).map((row) => row.listing_id);
+}
+
 function getBacklogListingIdsByQuery(db, options = {}) {
   const query = buildListingIdsQuery({
     query: options.query || '',
@@ -1110,16 +1126,20 @@ function resolveListingsFromViewer(db, body = {}) {
 
   if (mode === 'listing' || mode === 'selected') {
     listingIds = getBacklogListingIdsByIds(db, requestedIds);
+  } else if (mode === 'update') {
+    listingIds = getListingIdsByIds(db, requestedIds);
   } else if (mode === 'query') {
     listingIds = getBacklogListingIdsByQuery(db, { query, sort, sortDirection, excludeListingIds });
   } else {
-    const error = new Error('Expected resolve mode to be listing, selected, or query');
+    const error = new Error('Expected resolve mode to be listing, selected, update, or query');
     error.statusCode = 400;
     throw error;
   }
 
   if (listingIds.length === 0) {
-    const error = new Error('No pending, error, or processing backlog rows matched the resolve request');
+    const error = new Error(mode === 'update'
+      ? 'No listing rows matched the update request'
+      : 'No pending, error, or processing backlog rows matched the resolve request');
     error.statusCode = 400;
     throw error;
   }
@@ -1142,7 +1162,7 @@ function resolveListingsFromViewer(db, body = {}) {
     ...normalizeScreenshotRuntimeArgs(body.runtimeArgs),
   ];
 
-  const started = startManagedWorkflow(db, mode === 'listing' ? 'backlog-resolve' : 'backlog-worker', args, {
+  const started = startManagedWorkflow(db, mode === 'listing' || mode === 'update' ? 'backlog-resolve' : 'backlog-worker', args, {
     allowInternalArgs: true,
   });
   return {
@@ -2541,6 +2561,20 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/listings/resolver-status' && request.method === 'GET') {
+      if (access.canWrite) {
+        refreshResolveQueueRunStatuses(db);
+      }
+      const listingIds = [
+        ...requestUrl.searchParams.getAll('listingId'),
+        ...String(requestUrl.searchParams.get('listingIds') || '').split(','),
+      ];
+      writeJson(response, 200, {
+        items: listListingResolverAssignments(db, normalizeListingIds(listingIds)),
+      });
+      return;
+    }
+
     if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'GET') {
       if (access.canWrite) {
         refreshResolveQueueRunStatuses(db);
@@ -2612,12 +2646,34 @@ function createServer(options) {
       const status = requestUrl.searchParams.get('status') || 'queued';
       const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10);
       const offset = Number.parseInt(requestUrl.searchParams.get('offset') || '0', 10);
+      const listingId = requestUrl.searchParams.get('listingId') || '';
+      const documentId = requestUrl.searchParams.get('documentId') || '';
+      const recordId = requestUrl.searchParams.get('recordId') || '';
+      const resolvedOnly = ['1', 'true', 'yes', 'resolved'].includes(String(requestUrl.searchParams.get('resolved') || '').toLowerCase());
+      const filters = { status, listingId, documentId, recordId, resolvedOnly };
       writeJson(response, 200, {
         status,
-        total: countPurchaseHistoryMatchQueue(db, { status }),
+        total: countPurchaseHistoryMatchQueue(db, filters),
         limit,
         offset,
-        items: listPurchaseHistoryMatchQueue(db, { status, limit, offset }).map(enrichMatchQueueItemPaths),
+        items: listPurchaseHistoryMatchQueue(db, { ...filters, limit, offset }).map(enrichMatchQueueItemPaths),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/purchase-history-match-queue/matches' && request.method === 'GET') {
+      const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '8', 10);
+      const statuses = (requestUrl.searchParams.get('statuses') || 'queued')
+        .split(',')
+        .map((status) => status.trim())
+        .filter(Boolean);
+      const resolvedOnly = ['1', 'true', 'yes', 'resolved'].includes(String(requestUrl.searchParams.get('resolved') || '').toLowerCase());
+      writeJson(response, 200, {
+        statuses,
+        resolvedOnly,
+        total: countPurchaseHistoryMatchQueue(db, { status: statuses.length === 1 ? statuses[0] : 'queued', resolvedOnly }),
+        limit,
+        items: listRandomPurchaseHistoryMatches(db, { statuses, limit, resolvedOnly }).map(enrichMatchQueueItemPaths),
       });
       return;
     }

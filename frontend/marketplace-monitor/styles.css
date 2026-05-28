@@ -835,6 +835,10 @@ button:not(:disabled):hover,
 .event-registry-table td {
   padding: 8px 10px;
 }
+.inline-control[hidden],
+.recommendation-card-pane[hidden] {
+  display: none !important;
+}
 .history-table td:nth-child(1) {
   min-width: 260px;
 }
@@ -846,6 +850,19 @@ button:not(:disabled):hover,
   display: grid;
   gap: 2px;
   font-size: 12px;
+}
+.resolver-live-status {
+  display: inline-block;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+.card-resolver-live-status {
+  width: fit-content;
 }
 .recommendation-card-pane {
   margin: 12px 0;
@@ -943,11 +960,20 @@ button:not(:disabled):hover,
 .history-edit-dialog::backdrop {
   background: rgba(15, 23, 42, 0.42);
 }
-.history-edit-form {
+.history-edit-form,
+.history-dialog-body {
   padding: 12px;
   max-height: calc(100vh - 24px);
   overflow: auto;
   overscroll-behavior: auto;
+}
+.history-dialog-body .history-notes-field {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
 }
 .history-edit-title {
   grid-column: 1 / -1;
@@ -1589,20 +1615,19 @@ textarea {
   overflow: auto;
   overscroll-behavior: auto;
   display: grid;
-  gap: 10px;
-  padding: 10px;
+  gap: 12px;
+  padding: 12px;
 }
 .worker-detail-table-body {
   display: block;
-  overflow: visible;
-  padding: 0;
+  overflow: auto;
 }
 .worker-detail-tablewrap {
   width: 100%;
   height: 100%;
   max-height: none;
-  border: 0;
-  border-radius: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
   background: #fff;
 }
 .worker-detail-table {

@@ -1895,11 +1895,26 @@ function listPurchaseHistoryMatchQueue(db, options = {}) {
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 200;
   const offset = Number.isFinite(options.offset) ? Math.max(0, options.offset) : 0;
   const status = String(options.status || 'queued').trim();
+  const filters = [];
   const params = [];
-  let statusSql = '';
   if (status && status !== 'all') {
-    statusSql = 'WHERE q.status = ?';
+    filters.push('q.status = ?');
     params.push(status);
+  }
+  if (options.listingId || options.listing_id) {
+    filters.push('q.listing_id = ?');
+    params.push(String(options.listingId || options.listing_id).trim());
+  }
+  if (options.documentId || options.document_id) {
+    filters.push('q.document_id = ?');
+    params.push(String(options.documentId || options.document_id).trim());
+  }
+  if (options.recordId || options.record_id) {
+    filters.push('q.record_id = ?');
+    params.push(String(options.recordId || options.record_id).trim());
+  }
+  if (options.resolvedOnly || options.resolved_only) {
+    filters.push("(l.detail_status = 'done' OR l.detail_completed_at IS NOT NULL OR NULLIF(l.snapshot_path, '') IS NOT NULL)");
   }
   params.push(limit, offset);
   return db.prepare(`
@@ -1935,25 +1950,94 @@ function listPurchaseHistoryMatchQueue(db, options = {}) {
       ON h.document_id = q.document_id AND h.record_id = q.record_id
     LEFT JOIN homepage_listings l
       ON l.listing_id = q.listing_id
-    ${statusSql}
+    ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
     ORDER BY q.updated_at DESC
     LIMIT ?
     OFFSET ?
   `).all(...params).map(normalizePurchaseHistoryMatchQueueRow);
 }
 
+function listRandomPurchaseHistoryMatches(db, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10)) : 8;
+  const statuses = Array.isArray(options.statuses) && options.statuses.length
+    ? options.statuses.map((status) => String(status || '').trim()).filter(Boolean)
+    : ['queued'];
+  const filters = [];
+  const params = [];
+  if (statuses.length) {
+    filters.push(`q.status IN (${statuses.map(() => '?').join(', ')})`);
+    params.push(...statuses);
+  }
+  if (options.resolvedOnly || options.resolved_only) {
+    filters.push("(l.detail_status = 'done' OR l.detail_completed_at IS NOT NULL OR NULLIF(l.snapshot_path, '') IS NOT NULL)");
+  }
+  return db.prepare(`
+    SELECT
+      q.*,
+      h.title AS history_title,
+      h.category AS history_category,
+      h.subcategory AS history_subcategory,
+      h.brand AS history_brand,
+      h.model AS history_model,
+      h.mount AS history_mount,
+      h.purchase_at AS history_purchase_at,
+      h.sold_at AS history_sold_at,
+      h.outcome AS history_outcome,
+      h.data_json AS history_data_json,
+      l.href,
+      l.card_title,
+      l.card_text,
+      l.detail_title,
+      l.detail_price,
+      l.detail_location,
+      l.detail_condition,
+      l.detail_seller_name,
+      l.detail_last_error,
+      l.first_seen_at,
+      l.last_seen_at,
+      l.detail_completed_at,
+      l.screenshot_path,
+      l.snapshot_path,
+      l.detail_status
+    FROM purchase_history_match_queue q
+    LEFT JOIN purchase_history_rows h
+      ON h.document_id = q.document_id AND h.record_id = q.record_id
+    LEFT JOIN homepage_listings l
+      ON l.listing_id = q.listing_id
+    ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+    ORDER BY RANDOM()
+    LIMIT ?
+  `).all(...params, limit).map(normalizePurchaseHistoryMatchQueueRow);
+}
+
 function countPurchaseHistoryMatchQueue(db, options = {}) {
   const status = String(options.status || 'queued').trim();
+  const filters = [];
   const params = [];
-  let statusSql = '';
   if (status && status !== 'all') {
-    statusSql = 'WHERE status = ?';
+    filters.push('q.status = ?');
     params.push(status);
+  }
+  if (options.listingId || options.listing_id) {
+    filters.push('q.listing_id = ?');
+    params.push(String(options.listingId || options.listing_id).trim());
+  }
+  if (options.documentId || options.document_id) {
+    filters.push('q.document_id = ?');
+    params.push(String(options.documentId || options.document_id).trim());
+  }
+  if (options.recordId || options.record_id) {
+    filters.push('q.record_id = ?');
+    params.push(String(options.recordId || options.record_id).trim());
+  }
+  if (options.resolvedOnly || options.resolved_only) {
+    filters.push("(l.detail_status = 'done' OR l.detail_completed_at IS NOT NULL OR NULLIF(l.snapshot_path, '') IS NOT NULL)");
   }
   return db.prepare(`
     SELECT COUNT(*) AS total
-    FROM purchase_history_match_queue
-    ${statusSql}
+    FROM purchase_history_match_queue q
+    ${options.resolvedOnly || options.resolved_only ? 'LEFT JOIN homepage_listings l ON l.listing_id = q.listing_id' : ''}
+    ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
   `).get(...params).total || 0;
 }
 
@@ -2519,6 +2603,11 @@ function normalizeResolveQueueItemRow(row) {
     updated_at: row.updated_at,
     queued_by: row.queued_by,
     workflow_run_id: row.workflow_run_id || '',
+    workflow_status: row.workflow_status || '',
+    workflow_label: row.workflow_label || '',
+    workflow_started_at: row.workflow_started_at || '',
+    workflow_updated_at: row.workflow_updated_at || '',
+    workflow_os_alive: row.workflow_os_alive === undefined ? null : Boolean(row.workflow_os_alive),
     note: row.note || '',
     href: row.href || '',
     detail_status: row.detail_status || '',
@@ -2594,9 +2683,15 @@ function listResolveQueueItems(db, options = {}) {
       h.source,
       h.source_keyword,
       h.last_seen_rank,
-      h.last_seen_at
+      h.last_seen_at,
+      w.status AS workflow_status,
+      w.label AS workflow_label,
+      w.started_at AS workflow_started_at,
+      w.updated_at AS workflow_updated_at,
+      w.os_alive AS workflow_os_alive
     FROM resolve_queue_items q
     LEFT JOIN homepage_listings h ON h.listing_id = q.listing_id
+    LEFT JOIN workflow_runs w ON w.run_id = q.workflow_run_id
     ${statusSql}
     ORDER BY
       CASE q.status
@@ -2608,6 +2703,44 @@ function listResolveQueueItems(db, options = {}) {
       q.queued_at ASC
     LIMIT ?
   `).all(...statuses, limit).map(normalizeResolveQueueItemRow);
+}
+
+function listListingResolverAssignments(db, listingIds = []) {
+  const ids = uniqueStrings(listingIds);
+  if (!ids.length) {
+    return [];
+  }
+  return db.prepare(`
+    SELECT
+      q.listing_id,
+      q.status,
+      q.queued_at,
+      q.updated_at,
+      q.queued_by,
+      q.workflow_run_id,
+      q.note,
+      w.status AS workflow_status,
+      w.label AS workflow_label,
+      w.started_at AS workflow_started_at,
+      w.updated_at AS workflow_updated_at,
+      w.os_alive AS workflow_os_alive
+    FROM resolve_queue_items q
+    LEFT JOIN workflow_runs w ON w.run_id = q.workflow_run_id
+    WHERE q.listing_id IN (${ids.map(() => '?').join(', ')})
+  `).all(...ids).map((row) => ({
+    listing_id: row.listing_id,
+    resolver_status: row.status || '',
+    resolver_queued_at: row.queued_at || '',
+    resolver_updated_at: row.updated_at || '',
+    resolver_queued_by: row.queued_by || '',
+    resolver_workflow_run_id: row.workflow_run_id || '',
+    resolver_note: row.note || '',
+    resolver_workflow_status: row.workflow_status || '',
+    resolver_workflow_label: row.workflow_label || '',
+    resolver_workflow_started_at: row.workflow_started_at || '',
+    resolver_workflow_updated_at: row.workflow_updated_at || '',
+    resolver_workflow_os_alive: row.workflow_os_alive === undefined ? null : Boolean(row.workflow_os_alive),
+  }));
 }
 
 function listResolveQueueEvents(db, options = {}) {
@@ -3805,6 +3938,7 @@ module.exports = {
   scanPurchaseHistoryMatchesForListings,
   scanPurchaseHistoryListingMatches,
   listPurchaseHistoryMatchQueue,
+  listRandomPurchaseHistoryMatches,
   countPurchaseHistoryMatchQueue,
   updatePurchaseHistoryMatchQueueStatus,
   mergePurchaseHistoryDocuments,
@@ -3828,6 +3962,7 @@ module.exports = {
   markResolveQueueDispatched,
   refreshResolveQueueRunStatuses,
   listResolveQueueItems,
+  listListingResolverAssignments,
   listResolveQueueEvents,
   getResolveQueueCounts,
   upsertListingSearchKeyword,

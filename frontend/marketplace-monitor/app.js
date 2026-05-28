@@ -1,5 +1,13 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js';
+import { createListingsViewer } from './listings-viewer.js?v=resolver-status-20260528';
+import {
+  listingDisplayTitle,
+  listingHasFetchedDetail,
+  listingResolverStatusText,
+  listingResolveActionLabel,
+  listingResolveMode,
+  mergeResolverStatuses,
+} from './listing-components.js?v=resolver-status-20260528';
 
 const listingsViewer = createListingsViewer();
 
@@ -10,6 +18,8 @@ const WORKFLOW_IDLE_POLL_MS = 15000;
 const WORKFLOW_HIDDEN_POLL_MS = 30000;
 const SUMMARY_ACTIVE_POLL_MS = 10000;
 const SUMMARY_HIDDEN_POLL_MS = 30000;
+const MATCH_MODE_PRELOAD_TARGET = 8;
+const MATCH_MODE_REFILL_AT = 4;
 const DEFAULT_ROUTE = '/listings';
 const ROUTES = {
   '/listings': { panel: 'listingsPanel', listingView: 'queryResultsView' },
@@ -44,6 +54,8 @@ const store = {
   workerDetailEventType: 'all',
   workerDetailEvents: [],
   workerDetailStats: null,
+  workerDetailLoading: false,
+  workerDetailError: '',
   credentials: null,
   purchaseHistoryDocuments: [],
   selectedPurchaseHistoryDocumentId: localStorage.getItem('marketplace-monitor-history-document') || '',
@@ -57,7 +69,13 @@ const store = {
   recommendations: [],
   recommendationsLoaded: false,
   recommendationsTotal: 0,
-  recommendationCardIndex: 0,
+  matchModeItems: [],
+  matchModeSeenKeys: new Set(),
+  matchModeLoading: false,
+  matchModeRefillPending: false,
+  matchModeRequestSeq: 0,
+  recommendationResolutionTimers: new Map(),
+  recommendationDetailItemKey: '',
   pendingRecommendationAction: null,
   eventRegistry: [],
   purchaseHistoryLoaded: false,
@@ -113,6 +131,10 @@ const els = {
   recommendationsMeta: document.getElementById('recommendationsMeta'),
   recommendationsStatusSelect: document.getElementById('recommendationsStatusSelect'),
   recommendationsViewModeSelect: document.getElementById('recommendationsViewModeSelect'),
+  matchDefaultDismissReasonWrap: document.getElementById('matchDefaultDismissReasonWrap'),
+  matchDefaultDismissReasonSelect: document.getElementById('matchDefaultDismissReasonSelect'),
+  matchResolvedFilterWrap: document.getElementById('matchResolvedFilterWrap'),
+  matchResolvedFilterSelect: document.getElementById('matchResolvedFilterSelect'),
   recommendationCardPane: document.getElementById('recommendationCardPane'),
   recommendationDetailDialog: document.getElementById('recommendationDetailDialog'),
   recommendationDetailTitle: document.getElementById('recommendationDetailTitle'),
@@ -620,7 +642,7 @@ function historyTableColumns() {
     {
       title: '',
       field: '_actions',
-      width: 78,
+      width: 236,
       responsive: 0,
       headerSort: false,
       formatter: historyEditFormatter,
@@ -680,6 +702,7 @@ function recommendationTableData(items) {
     _thresholdPrice: parseMoney(item.threshold_price_cad),
     _matchedTerms: Array.isArray(item.matched_terms) ? item.matched_terms.join(', ') : '',
     _source: [item.source, item.source_keyword].filter(Boolean).join(' / '),
+    _resolver: listingResolverStatusText(item),
     _seenAt: item.listing_seen_at || item.updated_at || item.queued_at || '',
   }));
 }
@@ -709,6 +732,8 @@ function recommendationOpenFormatter(cell) {
   const item = cell.getData();
   const href = item.href || '';
   return '<div class="row-actions">'
+    + (item._resolver ? `<span class="resolver-live-status">${html(item._resolver)}</span>` : '')
+    + `<button type="button" class="secondary recommendation-resolve-button" data-listing-id="${html(item.listing_id || '')}">${html(listingResolveActionLabel(item))}</button>`
     + `<button type="button" class="secondary recommendation-view-button" data-listing-id="${html(item.listing_id || '')}">View</button>`
     + `<button type="button" class="secondary recommendation-save-button" data-listing-id="${html(item.listing_id || '')}">Save</button>`
     + `<button type="button" class="secondary recommendation-dismiss-button" data-listing-id="${html(item.listing_id || '')}">Dismiss</button>`
@@ -771,6 +796,10 @@ function recommendationTableColumns() {
       formatter: recommendationOpenFormatter,
       cellClick: (event, cell) => {
         if (event.target.closest('a')) return;
+        if (event.target.closest('.recommendation-resolve-button')) {
+          resolveListingItem(cell.getData());
+          return;
+        }
         if (event.target.closest('.recommendation-save-button')) {
           openRecommendationAction(cell.getData(), 'saved');
           return;
@@ -791,11 +820,11 @@ async function requestRecommendations(_url, _config, params = {}) {
   const offset = (page - 1) * size;
   const status = els.recommendationsStatusSelect?.value || 'queued';
   const payload = await fetchJson(`/api/purchase-history-match-queue?status=${encodeURIComponent(status)}&limit=${size}&offset=${offset}`);
-  store.recommendations = payload.items || [];
+  store.recommendations = await enrichItemsWithResolverStatus(payload.items || []);
   store.recommendationsTotal = payload.total || store.recommendations.length;
   store.recommendationsLoaded = true;
-  renderRecommendationCardPane();
-  if (els.recommendationsMeta) {
+  if (!isMatchMode()) renderRecommendationCardPane();
+  if (els.recommendationsMeta && !isMatchMode()) {
     els.recommendationsMeta.textContent = `${store.recommendationsTotal} ${status === 'all' ? '' : status} recommendations`;
   }
   return {
@@ -1226,7 +1255,143 @@ async function mergeHistoryDocument() {
 }
 
 function recommendationDisplayTitle(item) {
-  return item.detail_title || item.title || item.card_title || item.listing_id || 'Listing detail';
+  return listingDisplayTitle(item) || 'Listing detail';
+}
+
+function isWorkflowTerminalStatus(status) {
+  return !['starting', 'running', 'stopping', 'stop_failed'].includes(String(status || '').toLowerCase());
+}
+
+async function resolveListingItem(item) {
+  if (!item?.listing_id) return;
+  try {
+    const mode = listingResolveMode(item);
+    const payload = await fetchJson('/api/listings/resolve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        mode,
+        listingId: item.listing_id,
+        runtimeArgs: window.marketplaceMonitorRuntimeArgs?.() || [],
+      }),
+    });
+    const label = listingResolveActionLabel(item).toLowerCase();
+    if (els.recommendationsMeta) {
+      els.recommendationsMeta.textContent = `${label} started for ${payload.listingCount || 1} listing(s)`;
+    }
+    const processId = payload.process?.id || payload.process?.run_id || '';
+    if (processId) {
+      const nextItem = {
+        ...item,
+        resolver_status: 'dispatched',
+        resolver_workflow_run_id: processId,
+        resolver_workflow_status: payload.process?.status || 'starting',
+        resolver_workflow_started_at: payload.process?.startedAt || payload.process?.started_at || new Date().toISOString(),
+      };
+      updateRecommendationItemInViews(nextItem);
+      watchRecommendationResolution(nextItem, processId);
+    }
+    loadEventRegistry().catch(() => {});
+  } catch (error) {
+    alert(error.message || 'Listing detail worker could not be started.');
+  }
+}
+
+function updateRecommendationItemInViews(item) {
+  const key = recommendationMatchKey(item);
+  if (!key) return;
+  let fullItem = item;
+  store.recommendations = (store.recommendations || []).map((candidate) => (
+    recommendationMatchKey(candidate) === key ? (fullItem = { ...candidate, ...item }) : candidate
+  ));
+  store.matchModeItems = (store.matchModeItems || []).map((candidate) => (
+    recommendationMatchKey(candidate) === key ? (fullItem = { ...candidate, ...item }) : candidate
+  ));
+  if (store.recommendationsTable && !isMatchMode()) {
+    store.recommendationsTable.updateData?.([recommendationTableData([{ ...item }])[0]]).catch?.(() => {});
+  }
+  renderRecommendationCardPane();
+  if (store.recommendationDetailItemKey === key && els.recommendationDetailDialog?.open) {
+    openRecommendationDetail(fullItem);
+  }
+}
+
+async function fetchRecommendationItem(item) {
+  const params = new URLSearchParams({
+    status: 'all',
+    limit: '10',
+    offset: '0',
+    listingId: item.listing_id || '',
+    documentId: item.document_id || '',
+    recordId: item.record_id || '',
+  });
+  const payload = await fetchJson(`/api/purchase-history-match-queue?${params.toString()}`);
+  const enriched = await enrichItemsWithResolverStatus(payload.items || []);
+  return enriched.find((candidate) => recommendationMatchKey(candidate) === recommendationMatchKey(item))
+    || enriched[0]
+    || null;
+}
+
+async function refreshRecommendationAfterResolution(item, process = null) {
+  const updated = await fetchRecommendationItem(item);
+  const nextItem = updated ? {
+    ...updated,
+    resolver_workflow_run_id: process?.id || process?.run_id || item.resolver_workflow_run_id || '',
+    resolver_workflow_status: process?.status || updated.resolver_workflow_status || '',
+    resolver_workflow_updated_at: process?.updatedAt || process?.updated_at || updated.resolver_workflow_updated_at || '',
+  } : item;
+  updateRecommendationItemInViews(nextItem);
+  if (!isMatchMode()) {
+    store.recommendationsTable?.replaceData?.('/api/purchase-history-match-queue').catch?.(() => {});
+  }
+}
+
+function watchRecommendationResolution(item, processId) {
+  const key = recommendationMatchKey(item);
+  if (!key || !processId) return;
+  const existing = store.recommendationResolutionTimers.get(key);
+  if (existing) clearTimeout(existing);
+  let attempts = 0;
+  const poll = async () => {
+    attempts += 1;
+    try {
+      const payload = await fetchJson(`/api/workflows/${encodeURIComponent(processId)}`);
+      const process = payload.process || {};
+      updateRecommendationItemInViews({
+        ...item,
+        resolver_workflow_run_id: processId,
+        resolver_workflow_status: process.status || '',
+        resolver_workflow_updated_at: process.updatedAt || process.updated_at || '',
+      });
+      if (isWorkflowTerminalStatus(process.status) || attempts >= 120) {
+        store.recommendationResolutionTimers.delete(key);
+        await refreshRecommendationAfterResolution(item, process);
+        return;
+      }
+    } catch (_error) {
+      if (attempts >= 120) {
+        store.recommendationResolutionTimers.delete(key);
+        return;
+      }
+    }
+    const timer = setTimeout(poll, 3000);
+    store.recommendationResolutionTimers.set(key, timer);
+  };
+  const timer = setTimeout(poll, 1500);
+  store.recommendationResolutionTimers.set(key, timer);
+}
+
+async function enrichItemsWithResolverStatus(items) {
+  const ids = [...new Set((items || []).map((item) => item.listing_id).filter(Boolean))];
+  if (!ids.length) return items || [];
+  const params = new URLSearchParams();
+  ids.forEach((listingId) => params.append('listingId', listingId));
+  try {
+    const payload = await fetchJson(`/api/listings/resolver-status?${params.toString()}`);
+    return mergeResolverStatuses(items, payload.items || []);
+  } catch (_error) {
+    return items || [];
+  }
 }
 
 function markdownInline(text) {
@@ -1327,6 +1492,7 @@ async function renderRecommendationSnapshotText(item) {
 
 function openRecommendationDetail(item) {
   if (!item || !els.recommendationDetailDialog) return;
+  store.recommendationDetailItemKey = recommendationMatchKey(item);
   const screenshotUrl = item.screenshotUrl ? apiUrl(item.screenshotUrl) : '';
   const snapshotUrl = item.snapshotUrl ? apiUrl(item.snapshotUrl) : '';
   els.recommendationDetailTitle.textContent = recommendationDisplayTitle(item);
@@ -1352,6 +1518,9 @@ function openRecommendationDetail(item) {
     ['Threshold', formatMoney(item.threshold_price_cad)],
     ['Status', item.status],
     ['Listing status', item.detail_status],
+    ['Resolver', listingResolverStatusText(item)],
+    ['Resolver started', formatDate(item.resolver_workflow_started_at)],
+    ['Resolver updated', formatDate(item.resolver_workflow_updated_at || item.resolver_updated_at)],
     ['Title', recommendationDisplayTitle(item)],
     ['Card title', item.card_title],
     ['Card text', item.card_text],
@@ -1371,11 +1540,15 @@ function openRecommendationDetail(item) {
     `<dt>${html(label)}</dt><dd>${html(value)}</dd>`
   )).join('');
   els.recommendationDetailLinks.innerHTML = [
+    item.listing_id ? `<button type="button" class="secondary recommendation-detail-resolve-button" data-listing-id="${html(item.listing_id)}">${html(listingResolveActionLabel(item))}</button>` : '',
     item.href ? `<a class="button-link" href="${html(item.href)}" target="_blank" rel="noreferrer">Facebook</a>` : '',
     snapshotUrl ? `<a class="button-link" href="${html(snapshotUrl)}" target="_blank" rel="noreferrer">Snapshot</a>` : '',
     screenshotUrl ? `<a class="button-link" href="${html(screenshotUrl)}" target="_blank" rel="noreferrer">Screenshot</a>` : '',
   ].filter(Boolean).join('');
-  els.recommendationDetailDialog.showModal();
+  els.recommendationDetailLinks.querySelector('.recommendation-detail-resolve-button')?.addEventListener('click', () => resolveListingItem(item));
+  if (!els.recommendationDetailDialog.open) {
+    els.recommendationDetailDialog.showModal();
+  }
   renderRecommendationSnapshotText(item);
 }
 
@@ -1402,22 +1575,14 @@ async function submitRecommendationAction(event) {
   if (els.recommendationActionSubmitButton) els.recommendationActionSubmitButton.disabled = true;
   try {
     const status = pending.status;
-    await fetchJson(`/api/purchase-history-match-queue/action?status=${encodeURIComponent(els.recommendationsStatusSelect?.value || 'queued')}&limit=25&offset=0`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        documentId: item.document_id,
-        recordId: item.record_id,
-        listingId: item.listing_id,
-        status,
-        reason: status === 'dismissed' ? els.recommendationActionReason?.value || '' : 'saved_by_user',
-        customReason: els.recommendationActionCustomReason?.value || '',
-      }),
+    await applyRecommendationAction(item, status, {
+      reason: status === 'dismissed' ? els.recommendationActionReason?.value || '' : 'saved_by_user',
+      customReason: els.recommendationActionCustomReason?.value || '',
+      removeFromMatchMode: isMatchMode(),
+      refreshTable: !isMatchMode(),
     });
     els.recommendationActionDialog?.close();
     store.pendingRecommendationAction = null;
-    await loadRecommendations({ refreshBacklog: false });
-    loadEventRegistry().catch(() => {});
   } catch (error) {
     alert(error.message || 'Recommendation feedback could not be saved.');
   } finally {
@@ -1425,21 +1590,136 @@ async function submitRecommendationAction(event) {
   }
 }
 
-function renderRecommendationCardPane() {
-  if (!els.recommendationCardPane) return;
-  const cardsMode = els.recommendationsViewModeSelect?.value === 'cards';
-  els.recommendationCardPane.hidden = !cardsMode;
-  if (!cardsMode) return;
-  const items = store.recommendations || [];
-  if (!items.length) {
-    els.recommendationCardPane.innerHTML = '<div class="empty-state">No recommendations on this page.</div>';
+function recommendationMatchKey(item) {
+  return [item?.document_id, item?.record_id, item?.listing_id].map((part) => String(part || '')).join('::');
+}
+
+function isMatchMode() {
+  return els.recommendationsViewModeSelect?.value === 'match';
+}
+
+function matchModeResolvedOnly() {
+  return els.matchResolvedFilterSelect?.value === 'resolved';
+}
+
+async function applyRecommendationAction(item, status, options = {}) {
+  await fetchJson(`/api/purchase-history-match-queue/action?status=${encodeURIComponent(els.recommendationsStatusSelect?.value || 'queued')}&limit=25&offset=0`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      documentId: item.document_id,
+      recordId: item.record_id,
+      listingId: item.listing_id,
+      status,
+      reason: options.reason || '',
+      customReason: options.customReason || '',
+    }),
+  });
+  if (options.removeFromMatchMode) {
+    const key = recommendationMatchKey(item);
+    store.matchModeItems = store.matchModeItems.filter((candidate) => recommendationMatchKey(candidate) !== key);
+    renderRecommendationCardPane();
+    loadMatchModeBuffer({ refillAfterDecision: true }).catch((error) => {
+      if (els.recommendationsMeta) els.recommendationsMeta.textContent = `Match Mode refill failed: ${error.message || error}`;
+    });
+  }
+  if (options.refreshTable) {
+    await loadRecommendations({ refreshBacklog: false });
+  }
+  loadEventRegistry().catch(() => {});
+}
+
+async function loadMatchModeBuffer(options = {}) {
+  if (!isMatchMode()) return;
+  if (store.matchModeLoading) {
+    store.matchModeRefillPending = true;
     return;
   }
-  const index = Math.min(Math.max(store.recommendationCardIndex, 0), items.length - 1);
-  store.recommendationCardIndex = index;
-  const item = items[index];
+  if (options.reset) {
+    store.matchModeItems = [];
+    store.matchModeSeenKeys.clear();
+  }
+  const needed = Math.min(10, Math.max(0, MATCH_MODE_PRELOAD_TARGET - store.matchModeItems.length));
+  if (needed <= 0) {
+    renderRecommendationCardPane();
+    return;
+  }
+  const requestSeq = ++store.matchModeRequestSeq;
+  store.matchModeLoading = true;
+  renderRecommendationCardPane();
+  try {
+    const fetchLimit = Math.min(10, Math.max(MATCH_MODE_PRELOAD_TARGET, needed * 4, options.refillAfterDecision ? 5 : 0));
+    const resolvedParam = matchModeResolvedOnly() ? '&resolved=1' : '';
+    const payload = await fetchJson(`/api/purchase-history-match-queue/matches?statuses=queued&limit=${fetchLimit}${resolvedParam}`);
+    if (requestSeq !== store.matchModeRequestSeq) return;
+    const itemsWithResolverStatus = await enrichItemsWithResolverStatus(payload.items || []);
+    const existingKeys = new Set(store.matchModeItems.map(recommendationMatchKey));
+    const additions = [];
+    for (const item of itemsWithResolverStatus) {
+      const key = recommendationMatchKey(item);
+      if (!key || existingKeys.has(key) || store.matchModeSeenKeys.has(key)) continue;
+      existingKeys.add(key);
+      store.matchModeSeenKeys.add(key);
+      additions.push(item);
+    }
+    if (!additions.length && store.matchModeItems.length === 0 && store.matchModeSeenKeys.size > 0) {
+      store.matchModeSeenKeys.clear();
+      const retry = await fetchJson(`/api/purchase-history-match-queue/matches?statuses=queued&limit=${fetchLimit}${resolvedParam}`);
+      const retryItems = await enrichItemsWithResolverStatus(retry.items || []);
+      for (const item of retryItems) {
+        const key = recommendationMatchKey(item);
+        if (!key || existingKeys.has(key)) continue;
+        existingKeys.add(key);
+        store.matchModeSeenKeys.add(key);
+        additions.push(item);
+      }
+    }
+    store.matchModeItems = [...store.matchModeItems, ...additions].slice(0, MATCH_MODE_PRELOAD_TARGET);
+    if (els.recommendationsMeta) {
+      const total = Number.isFinite(payload.total) ? payload.total : store.matchModeItems.length;
+      els.recommendationsMeta.textContent = `${total} available matches / ${store.matchModeItems.length} preloaded`;
+    }
+  } finally {
+    store.matchModeLoading = false;
+    renderRecommendationCardPane();
+    if (store.matchModeRefillPending) {
+      const shouldRefill = isMatchMode() && store.matchModeItems.length < MATCH_MODE_PRELOAD_TARGET;
+      store.matchModeRefillPending = false;
+      if (!shouldRefill) return;
+      loadMatchModeBuffer({ refillAfterDecision: true }).catch(() => {});
+    }
+  }
+}
+
+async function fastDismissRecommendation(item) {
+  const reason = els.matchDefaultDismissReasonSelect?.value || 'not_same_model';
+  await applyRecommendationAction(item, 'dismissed', {
+    reason,
+    customReason: '',
+    removeFromMatchMode: true,
+    refreshTable: false,
+  });
+}
+
+function renderRecommendationCardPane() {
+  if (!els.recommendationCardPane) return;
+  const matchMode = isMatchMode();
+  els.recommendationCardPane.hidden = !matchMode;
+  if (els.matchDefaultDismissReasonWrap) els.matchDefaultDismissReasonWrap.hidden = !matchMode;
+  if (!matchMode) return;
+  const items = store.matchModeItems || [];
+  if (!items.length) {
+    const emptyText = matchModeResolvedOnly()
+      ? 'No resolved available matches.'
+      : 'No available matches.';
+    els.recommendationCardPane.innerHTML = `<div class="empty-state">${store.matchModeLoading ? 'Loading matches...' : emptyText}</div>`;
+    return;
+  }
+  const item = items[0];
   const screenshotUrl = item.screenshotUrl ? apiUrl(item.screenshotUrl) : '';
   const terms = Array.isArray(item.matched_terms) ? item.matched_terms.join(', ') : '';
+  const resolverStatus = listingResolverStatusText(item);
+  const fetchedLabel = listingHasFetchedDetail(item) ? 'resolved' : 'not resolved';
   els.recommendationCardPane.innerHTML = '<div class="recommendation-swipe-card">'
     + '<div class="recommendation-swipe-media">'
       + `<div class="recommendation-status-badge">${html(item.status || 'queued')}</div>`
@@ -1448,30 +1728,44 @@ function renderRecommendationCardPane() {
         : '<div class="empty-state">No captured image yet.</div>')
     + '</div>'
     + '<div class="recommendation-swipe-body">'
-      + `<div class="process-meta">${html(index + 1)} / ${html(items.length)} on this page</div>`
+      + `<div class="process-meta">${html(items.length)} preloaded${matchModeResolvedOnly() ? ' / resolved only' : ''}${store.matchModeLoading ? ' / loading next matches' : ''}</div>`
       + `<h3>${html(recommendationDisplayTitle(item))}</h3>`
-      + `<div class="process-meta">${html(item.history_title || item.record_id)} / ${html(terms)}</div>`
+      + (resolverStatus ? `<div class="resolver-live-status card-resolver-live-status">${html(resolverStatus)}</div>` : '')
+      + `<div class="process-meta">${html(item.history_title || item.record_id)} / ${html(fetchedLabel)}${terms ? ' / ' + html(terms) : ''}</div>`
       + `<div class="recommendation-price-stack"><div>Listing ${html(formatMoney(item.listing_price_cad) || '-')}</div><div>Purchase ${html(formatMoney(item.purchase_price_cad) || '-')}</div><div>Limit ${html(formatMoney(item.threshold_price_cad) || '-')}</div></div>`
       + '<div class="row-actions recommendation-card-actions">'
-        + '<button type="button" class="secondary" id="recommendationCardPrev">Prev</button>'
         + '<button type="button" class="secondary" id="recommendationCardView">View</button>'
+        + `<button type="button" class="secondary" id="recommendationCardResolve">${html(listingResolveActionLabel(item))}</button>`
         + '<button type="button" class="secondary" id="recommendationCardDismiss">Dismiss</button>'
+        + '<button type="button" class="secondary" id="recommendationCardFastDismiss">Fast Dismiss</button>'
         + '<button type="button" id="recommendationCardSave">Save</button>'
-        + '<button type="button" class="secondary" id="recommendationCardNext">Next</button>'
       + '</div>'
     + '</div>'
   + '</div>';
-  document.getElementById('recommendationCardPrev')?.addEventListener('click', () => {
-    store.recommendationCardIndex = Math.max(0, store.recommendationCardIndex - 1);
-    renderRecommendationCardPane();
-  });
-  document.getElementById('recommendationCardNext')?.addEventListener('click', () => {
-    store.recommendationCardIndex = Math.min(items.length - 1, store.recommendationCardIndex + 1);
-    renderRecommendationCardPane();
-  });
   document.getElementById('recommendationCardView')?.addEventListener('click', () => openRecommendationDetail(item));
-  document.getElementById('recommendationCardSave')?.addEventListener('click', () => openRecommendationAction(item, 'saved'));
+  document.getElementById('recommendationCardResolve')?.addEventListener('click', () => resolveListingItem(item));
+  document.getElementById('recommendationCardSave')?.addEventListener('click', async () => {
+    try {
+      await applyRecommendationAction(item, 'saved', {
+        reason: 'saved_by_user',
+        removeFromMatchMode: true,
+        refreshTable: false,
+      });
+    } catch (error) {
+      alert(error.message || 'Recommendation could not be saved.');
+    }
+  });
   document.getElementById('recommendationCardDismiss')?.addEventListener('click', () => openRecommendationAction(item, 'dismissed'));
+  document.getElementById('recommendationCardFastDismiss')?.addEventListener('click', async () => {
+    try {
+      await fastDismissRecommendation(item);
+    } catch (error) {
+      alert(error.message || 'Recommendation could not be dismissed.');
+    }
+  });
+  if (items.length <= MATCH_MODE_REFILL_AT && !store.matchModeLoading) {
+    loadMatchModeBuffer().catch(() => {});
+  }
 }
 
 function renderRecommendations() {
@@ -1485,8 +1779,17 @@ function renderRecommendations() {
   }
   const status = els.recommendationsStatusSelect?.value || 'queued';
   els.recommendationsMeta.textContent = `${store.recommendationsTotal || store.recommendations.length} ${status === 'all' ? '' : status} recommendations`;
+  const matchMode = isMatchMode();
   if (els.recommendationsTable) {
-    els.recommendationsTable.hidden = els.recommendationsViewModeSelect?.value === 'cards';
+    els.recommendationsTable.hidden = matchMode;
+  }
+  if (els.matchDefaultDismissReasonWrap) els.matchDefaultDismissReasonWrap.hidden = !matchMode;
+  if (els.matchResolvedFilterWrap) els.matchResolvedFilterWrap.hidden = !matchMode;
+  if (els.matchResolvedFilterWrap) els.matchResolvedFilterWrap.hidden = !matchMode;
+  if (matchMode) {
+    renderRecommendationCardPane();
+    loadMatchModeBuffer().catch(() => {});
+    return;
   }
   renderRecommendationsTable(store.recommendations);
   renderRecommendationCardPane();
@@ -1509,7 +1812,7 @@ async function scanRecommendations() {
   if (scanButton) scanButton.disabled = true;
   try {
     const payload = await fetchJson('/api/purchase-history-match-queue/scan', { method: 'POST' });
-    store.recommendations = payload.items || [];
+    store.recommendations = await enrichItemsWithResolverStatus(payload.items || []);
     store.recommendationsTotal = payload.total || store.recommendations.length;
     store.recommendationsLoaded = true;
     renderRecommendations();
@@ -2481,6 +2784,41 @@ function restoreProcessScrollState(state) {
   }
 }
 
+function clearWorkerDetailState() {
+  store.selectedProcessId = '';
+  store.workerDetailProcess = null;
+  store.workerDetailStats = null;
+  store.workerDetailEvents = [];
+  store.workerDetailEventType = 'all';
+  store.workerDetailLoading = false;
+  store.workerDetailError = '';
+  store.workerDetailSignature = '';
+}
+
+function seedWorkerDetailState(processId) {
+  const process = store.processes.find((candidate) => candidate.id === processId) || null;
+  store.selectedProcessId = processId;
+  store.workerDetailProcess = process;
+  store.workerDetailStats = process?.eventStats || null;
+  store.workerDetailEvents = [];
+  store.workerDetailCategory = 'all';
+  store.workerDetailEventType = 'all';
+  store.workerDetailLoading = true;
+  store.workerDetailError = '';
+  store.workerDetailSignature = '';
+}
+
+function openWorkerDetail(processId) {
+  if (!processId) return;
+  seedWorkerDetailState(processId);
+  renderProcesses({ preserveScroll: true });
+  loadWorkerDetail({ preserveScroll: true }).catch((error) => {
+    store.workerDetailLoading = false;
+    store.workerDetailError = error.message || 'Worker detail could not be loaded.';
+    renderProcesses({ preserveScroll: true });
+  });
+}
+
 function renderProcesses(options = {}) {
   const scrollState = options.preserveScroll ? captureProcessScrollState() : null;
   if (!store.workflowsLoaded) {
@@ -2494,12 +2832,7 @@ function renderProcesses(options = {}) {
     return;
   }
   if (store.selectedProcessId && !store.processes.some((proc) => proc.id === store.selectedProcessId)) {
-    store.selectedProcessId = '';
-    store.workerDetailProcess = null;
-    store.workerDetailStats = null;
-    store.workerDetailEvents = [];
-    store.workerDetailEventType = 'all';
-    store.workerDetailSignature = '';
+    clearWorkerDetailState();
   }
   const rows = store.processes.map((proc) => {
     const running = proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping';
@@ -2534,50 +2867,40 @@ function renderProcesses(options = {}) {
     + '</div>'
     + (selectedProcess ? renderWorkerDetail(selectedProcess) : '');
   for (const button of document.querySelectorAll('.process-open-button')) {
-    button.addEventListener('click', async () => {
-      store.selectedProcessId = button.dataset.id;
-      await loadWorkerDetail();
-    });
+    button.addEventListener('click', () => openWorkerDetail(button.dataset.id));
   }
   for (const button of document.querySelectorAll('.process-select-button')) {
-    button.addEventListener('click', async () => {
-      store.selectedProcessId = button.dataset.id;
-      await loadWorkerDetail();
-    });
+    button.addEventListener('click', () => openWorkerDetail(button.dataset.id));
   }
   for (const button of document.querySelectorAll('.worker-detail-close-button')) {
     button.addEventListener('click', () => {
-      store.selectedProcessId = '';
-      store.workerDetailProcess = null;
-      store.workerDetailStats = null;
-      store.workerDetailEvents = [];
-      store.workerDetailEventType = 'all';
-      store.workerDetailSignature = '';
+      clearWorkerDetailState();
       renderProcesses();
     });
   }
   for (const backdrop of document.querySelectorAll('.worker-inspector-backdrop')) {
     backdrop.addEventListener('click', (event) => {
       if (event.target !== backdrop) return;
-      store.selectedProcessId = '';
-      store.workerDetailProcess = null;
-      store.workerDetailStats = null;
-      store.workerDetailEvents = [];
-      store.workerDetailEventType = 'all';
-      store.workerDetailSignature = '';
+      clearWorkerDetailState();
       renderProcesses();
     });
   }
   for (const button of document.querySelectorAll('.worker-category-button')) {
-    button.addEventListener('click', async () => {
+    button.addEventListener('click', () => {
       store.workerDetailCategory = button.dataset.category;
       store.workerDetailEventType = 'all';
-      await loadWorkerDetail();
+      store.workerDetailLoading = true;
+      store.workerDetailError = '';
+      renderProcesses({ preserveScroll: true });
+      loadWorkerDetail({ preserveScroll: true }).catch(() => {});
     });
   }
-  document.getElementById('workerEventTypeSelect')?.addEventListener('change', async (event) => {
+  document.getElementById('workerEventTypeSelect')?.addEventListener('change', (event) => {
     store.workerDetailEventType = event.target.value || 'all';
-    await loadWorkerDetail();
+    store.workerDetailLoading = true;
+    store.workerDetailError = '';
+    renderProcesses({ preserveScroll: true });
+    loadWorkerDetail({ preserveScroll: true }).catch(() => {});
   });
   for (const button of document.querySelectorAll('.stop-button')) {
     button.addEventListener('click', async () => {
@@ -2732,6 +3055,11 @@ function renderWorkerDetail(selectedProcess) {
   const stats = workerStats(selectedProcess);
   const logs = (selectedProcess?.logs || []).slice(-120);
   const detailStats = store.workerDetailStats || selectedProcess?.eventStats || {};
+  const detailStateText = store.workerDetailError
+    ? store.workerDetailError
+    : store.workerDetailLoading
+      ? 'Loading detail...'
+      : 'Loaded';
   const eventTypeOptions = workerEventTypeOptions(detailStats);
   if (store.workerDetailEventType !== 'all' && !eventTypeOptions.some((item) => item.eventType === store.workerDetailEventType)) {
     store.workerDetailEventType = 'all';
@@ -2763,6 +3091,7 @@ function renderWorkerDetail(selectedProcess) {
     ['PID', selectedProcess?.pid || ''],
     ['OS', selectedProcess?.osAlive ? 'active' : 'inactive'],
     ['Managed', selectedProcess?.managed ? 'managed' : 'recovered'],
+    ['Detail', detailStateText],
     ['Started', formatDate(selectedProcess?.startedAt)],
     ['Exited', formatDate(selectedProcess?.exitedAt)],
     ['Current listing', stats.currentListingId || 'waiting'],
@@ -2813,7 +3142,9 @@ function renderWorkerDetail(selectedProcess) {
     detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="empty-state">Event preview appears after worker activity.</div>'));
   }
 
-  const eventRows = store.workerDetailEvents.length
+  const eventRows = store.workerDetailLoading
+    ? '<tr><td colspan="9" class="empty-state">Loading worker events...</td></tr>'
+    : store.workerDetailEvents.length
     ? store.workerDetailEvents.map((event) => (
       '<tr>'
         + `<td>${html(new Date(event.event_at).toLocaleString())}</td>`
@@ -2827,7 +3158,7 @@ function renderWorkerDetail(selectedProcess) {
         + '<td><div class="row-actions">' + workerEventLinks(event) + '</div></td>'
       + '</tr>'
     )).join('')
-    : '<tr><td colspan="9" class="empty-state">Events for this category appear here.</td></tr>';
+    : `<tr><td colspan="9" class="empty-state">${html(store.workerDetailError || 'Events for this category appear here.')}</td></tr>`;
   detailRows.push(workerDetailSectionRow('Audit Events', '<div class="worker-panel-toolbar worker-detail-section-toolbar">'
     + '<div class="worker-panel-title">Audit Events</div>'
     + `<div class="worker-event-filter-row"><div class="segmented worker-categories">${categoryButtons}</div>${eventTypeSelect}</div>`
@@ -2857,7 +3188,7 @@ function renderWorkerDetail(selectedProcess) {
     + '<header class="worker-inspector-header">'
     + '<div><div class="label">Worker Workspace</div>'
     + `<div class="worker-inspector-title">${html(selectedProcess?.label || 'Worker')}</div>`
-    + `<div class="process-meta">${html(selectedProcess?.id || '')}</div></div>`
+    + `<div class="process-meta">${html(selectedProcess?.id || '')}${store.workerDetailLoading ? ' / loading detail' : ''}</div></div>`
     + '<button type="button" class="secondary worker-detail-close-button">Close</button>'
     + '</header>'
     + '<div class="worker-inspector-body worker-detail-table-body">'
@@ -2875,11 +3206,7 @@ async function loadWorkerDetail(options = {}) {
   const onlyIfChanged = options.onlyIfChanged === true;
   const selectedProcess = activeProcess();
   if (!selectedProcess) {
-    store.workerDetailProcess = null;
-    store.workerDetailStats = null;
-    store.workerDetailEvents = [];
-    store.workerDetailEventType = 'all';
-    store.workerDetailSignature = '';
+    clearWorkerDetailState();
     if (render) {
       renderProcesses({ preserveScroll: options.preserveScroll });
     }
@@ -2891,17 +3218,31 @@ async function loadWorkerDetail(options = {}) {
   let selectedEventType = store.workerDetailEventType;
   const requestSeq = ++store.workerDetailRequestSeq;
   const workerId = encodeURIComponent(selectedProcessId);
-  const [detailPayload, statsPayload] = await Promise.all([
-    fetchJson(`/api/workflows/${workerId}`),
-    fetchJson(`/api/workflows/${workerId}/stats`),
-  ]);
-  const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
-  if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
-    selectedEventType = 'all';
-    store.workerDetailEventType = 'all';
+  store.workerDetailLoading = true;
+  store.workerDetailError = '';
+  let detailPayload;
+  let statsPayload;
+  let eventsPayload;
+  try {
+    [detailPayload, statsPayload] = await Promise.all([
+      fetchJson(`/api/workflows/${workerId}`),
+      fetchJson(`/api/workflows/${workerId}/stats`),
+    ]);
+    const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
+    if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
+      selectedEventType = 'all';
+      store.workerDetailEventType = 'all';
+    }
+    const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
+    eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`);
+  } catch (error) {
+    if (requestSeq === store.workerDetailRequestSeq && store.selectedProcessId === selectedProcessId) {
+      store.workerDetailLoading = false;
+      store.workerDetailError = error.message || 'Worker detail could not be loaded.';
+      if (render) renderProcesses({ preserveScroll: options.preserveScroll });
+    }
+    throw error;
   }
-  const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
-  const eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`);
   if (
     requestSeq !== store.workerDetailRequestSeq
     || store.selectedProcessId !== selectedProcessId
@@ -2913,6 +3254,8 @@ async function loadWorkerDetail(options = {}) {
   store.workerDetailProcess = detailPayload.process || selectedProcess;
   store.workerDetailStats = statsPayload.stats || null;
   store.workerDetailEvents = eventsPayload.events || [];
+  store.workerDetailLoading = false;
+  store.workerDetailError = '';
   const nextSignature = workerDetailRenderSignature(
     store.workerDetailProcess,
     store.workerDetailStats,
@@ -3122,12 +3465,7 @@ function bindEvents() {
   setTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !store.selectedProcessId) return;
-    store.selectedProcessId = '';
-    store.workerDetailProcess = null;
-    store.workerDetailStats = null;
-    store.workerDetailEvents = [];
-    store.workerDetailEventType = 'all';
-    store.workerDetailSignature = '';
+    clearWorkerDetailState();
     renderProcesses();
   });
   for (const tab of document.querySelectorAll('.tab')) {
@@ -3233,16 +3571,28 @@ function bindEvents() {
   });
   els.recommendationsStatusSelect?.addEventListener('change', async () => {
     try {
-      store.recommendationCardIndex = 0;
       await loadRecommendations({ refreshBacklog: false });
     } catch (error) {
       alert(error.message || 'Recommendations could not be loaded.');
     }
   });
   els.recommendationsViewModeSelect?.addEventListener('change', () => {
-    const cardsMode = els.recommendationsViewModeSelect.value === 'cards';
-    if (els.recommendationsTable) els.recommendationsTable.hidden = cardsMode;
-    renderRecommendationCardPane();
+    const matchMode = isMatchMode();
+    if (els.recommendationsTable) els.recommendationsTable.hidden = matchMode;
+    if (els.matchDefaultDismissReasonWrap) els.matchDefaultDismissReasonWrap.hidden = !matchMode;
+    if (els.matchResolvedFilterWrap) els.matchResolvedFilterWrap.hidden = !matchMode;
+    if (matchMode) {
+      loadMatchModeBuffer({ reset: true }).catch((error) => {
+        alert(error.message || 'Match Mode could not be loaded.');
+      });
+    } else {
+      renderRecommendations();
+    }
+  });
+  els.matchResolvedFilterSelect?.addEventListener('change', () => {
+    loadMatchModeBuffer({ reset: true }).catch((error) => {
+      alert(error.message || 'Match Mode could not be loaded.');
+    });
   });
   els.recommendationActionForm?.addEventListener('submit', submitRecommendationAction);
   document.getElementById('recommendationActionCloseButton')?.addEventListener('click', () => els.recommendationActionDialog?.close());
@@ -3300,7 +3650,13 @@ function bindEvents() {
     }
   });
   document.getElementById('auditDetailCloseButton')?.addEventListener('click', () => els.auditDetailDialog?.close());
-  document.getElementById('recommendationDetailCloseButton')?.addEventListener('click', () => els.recommendationDetailDialog?.close());
+  document.getElementById('recommendationDetailCloseButton')?.addEventListener('click', () => {
+    store.recommendationDetailItemKey = '';
+    els.recommendationDetailDialog?.close();
+  });
+  els.recommendationDetailDialog?.addEventListener('close', () => {
+    store.recommendationDetailItemKey = '';
+  });
   els.workflowSelect.addEventListener('change', () => {
     selectWorkflowId(els.workflowSelect.value);
     renderWorkflowForm();

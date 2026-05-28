@@ -29,6 +29,8 @@ const {
   scanPurchaseHistoryMatchesForListings,
   scanPurchaseHistoryListingMatches,
   listPurchaseHistoryMatchQueue,
+  listRandomPurchaseHistoryMatches,
+  countPurchaseHistoryMatchQueue,
   listPurchaseHistoryEvents,
   mergePurchaseHistoryDocuments,
   runTransaction,
@@ -628,7 +630,6 @@ test('purchase history match queue captures below-threshold matching listings in
     assert.equal(matches[0].record_id, 'watch-001');
     assert.ok(matches[0].matched_terms.includes('fm2'));
     assert.equal(listResolveQueueItems(db).some((item) => item.listing_id === 'watch-listing-1'), true);
-
     upsertHomepageListing(db, {
       listingId: 'watch-listing-3',
       href: 'https://www.facebook.com/marketplace/item/8003/',
@@ -646,6 +647,23 @@ test('purchase history match queue captures below-threshold matching listings in
     assert.equal(scheduled.scanned, 1);
     assert.equal(scheduled.matched, 1);
     assert.equal(listPurchaseHistoryMatchQueue(db).some((item) => item.listing_id === 'watch-listing-3'), true);
+    assert.equal(countPurchaseHistoryMatchQueue(db, { resolvedOnly: true }), 0);
+    assert.equal(listPurchaseHistoryMatchQueue(db, { resolvedOnly: true }).length, 0);
+
+    markHomepageListingProcessed(db, 'watch-listing-1', {
+      title: 'Nikon FM2 silver body',
+      listingContent: {
+        price: 'CA$ 240',
+        location: 'Vancouver',
+        condition: 'Good',
+        sellerName: 'Camera Seller',
+      },
+      screenshotPath: '/tmp/fm2.png',
+      snapshotPath: '/tmp/fm2.md',
+    });
+    assert.equal(countPurchaseHistoryMatchQueue(db, { resolvedOnly: true }), 1);
+    assert.equal(listPurchaseHistoryMatchQueue(db, { resolvedOnly: true })[0].listing_id, 'watch-listing-1');
+    assert.equal(listRandomPurchaseHistoryMatches(db, { resolvedOnly: true, limit: 3 })[0].listing_id, 'watch-listing-1');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
