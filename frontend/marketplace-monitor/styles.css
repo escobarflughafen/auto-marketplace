@@ -335,6 +335,27 @@ button:not(:disabled):hover,
   background: var(--secondary-hover-bg);
   color: var(--secondary-hover-ink);
 }
+.hero-home-button {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  appearance: none;
+}
+.hero .hero-home-button:not(:disabled):hover,
+.hero .hero-home-button:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  box-shadow: inset 0 -3px 0 var(--accent-strong);
+  outline: 0;
+}
+:root[data-theme="classic"] .hero .hero-home-button:not(:disabled):hover,
+:root[data-theme="classic"] .hero .hero-home-button:focus-visible {
+  background: var(--fill);
+  box-shadow: none;
+}
 .tips {
   margin: 0;
   padding: 7px 10px;
@@ -351,11 +372,15 @@ button:not(:disabled):hover,
   border-radius: var(--radius-control);
 }
 .summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  --summary-cell-min: 150px;
+  display: flex;
+  flex-wrap: nowrap;
   gap: 0;
   margin: 0;
   padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
 }
 .summary .card,
 .workspace-surface > .panel .card {
@@ -363,12 +388,26 @@ button:not(:disabled):hover,
   box-shadow: none;
 }
 .summary .card {
+  flex: 0 0 var(--summary-cell-min);
+  min-height: 76px;
   border: 0;
   border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
   background: #fff;
 }
-.summary .card:last-child {
-  border-right: 0;
+.summary-card {
+  display: block;
+  padding: 10px 12px;
+  color: var(--ink);
+  text-align: left;
+  scroll-snap-align: start;
+}
+.summary .summary-card:not(:disabled):hover,
+.summary .summary-card:focus-visible {
+  background: var(--fill);
+  color: var(--ink);
+  box-shadow: inset 0 -3px 0 var(--accent-strong);
+  outline: 0;
 }
 .label {
   color: var(--muted);
@@ -845,6 +884,11 @@ button:not(:disabled):hover,
 .history-item-title {
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+.history-metric-stack {
+  display: grid;
+  gap: 2px;
+  line-height: 1.2;
 }
 .recommendation-price-stack {
   display: grid;
@@ -2215,8 +2259,7 @@ textarea {
   .worker-control-column:last-child {
     border-bottom: 0;
   }
-  .query-tools .card,
-  .summary .card {
+  .query-tools .card {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }

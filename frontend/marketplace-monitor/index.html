@@ -11,17 +11,17 @@
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
-  <link rel="stylesheet" href="/app/styles.css?v=modal-worker-match-20260528">
+  <link rel="stylesheet" href="/app/styles.css?v=overview-nav-20260529">
 </head>
 <body>
   <div class="shell">
     <section class="hero">
-      <div class="hero-brand">
+      <button type="button" class="hero-brand hero-home-button" id="homeRouteButton" aria-label="Go to listings">
         <span class="route-badge route-badge-market">M</span>
         <div>
           <h1>Marketplace<br>Monitor</h1>
         </div>
-      </div>
+      </button>
     </section>
 
     <section class="access-warning" id="tokenWarning" hidden>
@@ -441,6 +441,11 @@
             <option value="poor">Poor</option>
             <option value="for_parts">For parts</option>
           </select></label>
+          <label>Original package<select id="historyOriginalPackage" name="original_package">
+            <option value="unknown">Unknown</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select></label>
         </div>
       </details>
       <label class="history-notes-field">Notes<textarea id="historyNotes" name="notes" rows="3"></textarea></label>
@@ -539,6 +544,11 @@
             <option value="poor">Poor</option>
             <option value="for_parts">For parts</option>
           </select></label>
+          <label>Original package<select id="historyEditOriginalPackage" name="original_package">
+            <option value="unknown">Unknown</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select></label>
         </div>
       </details>
       <label class="history-notes-field">Notes<textarea id="historyEditNotes" name="notes" rows="4"></textarea></label>
@@ -636,6 +646,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="/app/app.js?v=modal-worker-match-20260528"></script>
+  <script type="module" src="/app/app.js?v=overview-nav-20260529"></script>
 </body>
 </html>

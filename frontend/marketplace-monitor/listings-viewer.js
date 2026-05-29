@@ -113,6 +113,29 @@ function apiUrl(url) {
   return `${next.pathname}${next.search}`;
 }
 
+function queryParamFromUrl() {
+  return new URLSearchParams(window.location.search).get('q') || '';
+}
+
+function updateQueryParam(query, options = {}) {
+  const nextUrl = new URL(window.location.href);
+  const trimmed = String(query || '').trim();
+  if (trimmed) {
+    nextUrl.searchParams.set('q', trimmed);
+  } else {
+    nextUrl.searchParams.delete('q');
+  }
+  const nextPath = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+  if (nextPath === `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    return;
+  }
+  if (options.replace) {
+    window.history.replaceState(null, '', nextPath);
+  } else {
+    window.history.pushState(null, '', nextPath);
+  }
+}
+
 function textFormatter(cell) {
   return `<span class="cell-text">${escapeHtml(cell.getValue())}</span>`;
 }
@@ -185,7 +208,7 @@ function quoteQueryValue(value) {
 
 export function createListingsViewer() {
   const state = {
-    q: '',
+    q: queryParamFromUrl(),
     limit: 50,
     currentLimit: 50,
     total: 0,
@@ -265,6 +288,9 @@ export function createListingsViewer() {
     queueBacklogVisibleButton: document.getElementById('queueBacklogVisibleButton'),
     selectAllBacklogRows: document.getElementById('selectAllBacklogRows'),
   };
+  if (els.queryInput) {
+    els.queryInput.value = state.q;
+  }
 
   function queuedExclusionIds() {
     return state.hideQueuedResolve
@@ -1094,6 +1120,20 @@ export function createListingsViewer() {
     renderResolveControls();
   }
 
+  async function applyQuery(query, options = {}) {
+    state.q = String(query || '').trim();
+    if (els.queryInput) {
+      els.queryInput.value = state.q;
+    }
+    state.selectedSnapshotListingId = '';
+    renderSnapshotPanel(null);
+    updateQueryParam(state.q, { replace: options.replace === true });
+    document.dispatchEvent(new CustomEvent('marketplace-query-applied', {
+      detail: { query: state.q },
+    }));
+    await loadRows();
+  }
+
   async function setListingView(viewId, options = {}) {
     const allowedViews = new Set(['queryResultsView', 'resolveQueueView', 'resolveQueueAuditView', 'backlogQueueView']);
     const nextViewId = allowedViews.has(viewId) ? viewId : 'queryResultsView';
@@ -1128,15 +1168,10 @@ export function createListingsViewer() {
     }
     document.getElementById('queryForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      state.q = els.queryInput.value.trim();
-      await loadRows();
+      await applyQuery(els.queryInput.value);
     });
     document.getElementById('clearButton').addEventListener('click', async () => {
-      els.queryInput.value = '';
-      state.q = '';
-      state.selectedSnapshotListingId = '';
-      renderSnapshotPanel(null);
-      await loadRows();
+      await applyQuery('');
     });
     els.queryFieldSelect.addEventListener('change', updateQueryOperatorOptions);
     document.getElementById('addClauseButton').addEventListener('click', addQueryClause);
@@ -1146,17 +1181,13 @@ export function createListingsViewer() {
     });
     for (const button of document.querySelectorAll('.example-query')) {
       button.addEventListener('click', async () => {
-        els.queryInput.value = button.dataset.query;
-        state.q = els.queryInput.value;
-        await loadRows();
+        await applyQuery(button.dataset.query || '');
       });
     }
     els.listingStatusTools.addEventListener('click', async (event) => {
       const button = event.target.closest('button[data-query]');
       if (!button) return;
-      els.queryInput.value = button.dataset.query || '';
-      state.q = els.queryInput.value;
-      await loadRows();
+      await applyQuery(button.dataset.query || '');
     });
     els.listingLimitSelect.addEventListener('change', async () => {
       state.limit = Number.parseInt(els.listingLimitSelect.value, 10) || 50;
@@ -1323,6 +1354,7 @@ export function createListingsViewer() {
     loadResolveQueue,
     loadBacklogQueue,
     loadRows,
+    applyQuery,
     setListingView,
     activeListingView,
   };

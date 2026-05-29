@@ -1,5 +1,5 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js?v=resolver-status-20260528';
+import { createListingsViewer } from './listings-viewer.js?v=worker-refresh-20260529';
 import {
   listingDisplayTitle,
   listingHasFetchedDetail,
@@ -95,6 +95,8 @@ const store = {
   workerDetailRequestSeq: 0,
   historyTable: null,
   recommendationsTable: null,
+  recommendationsTableBuilt: false,
+  recommendationsTablePendingSetData: false,
   eventRegistryTable: null,
 };
 
@@ -344,6 +346,101 @@ function resultLabelFromHistoryRow(row = {}) {
         : outcome;
 }
 
+function historyNetCost(row = {}) {
+  const explicit = parseMoney(row.net_cost_cad);
+  if (explicit !== null) return explicit;
+  const purchase = parseMoney(row.purchase_price_cad);
+  if (purchase === null) return null;
+  const extraFields = [
+    'fees_cad',
+    'shipping_cad',
+    'tax_cad',
+    'travel_cost_cad',
+    'repair_cost_cad',
+    'other_cost_cad',
+  ];
+  return extraFields.reduce((sum, field) => sum + (parseMoney(row[field]) || 0), purchase);
+}
+
+function historyPrice(row = {}) {
+  return parseMoney(row.sold_price_cad || row.list_price_cad);
+}
+
+function historyProfit(row = {}) {
+  const explicit = parseMoney(row.realized_profit_cad);
+  if (explicit !== null) return explicit;
+  const soldPrice = parseMoney(row.sold_price_cad);
+  const netCost = historyNetCost(row);
+  return soldPrice !== null && netCost !== null ? soldPrice - netCost : null;
+}
+
+function historyRoiPercent(row = {}) {
+  const explicit = Number.parseFloat(String(row.roi_percent || ''));
+  if (Number.isFinite(explicit)) return explicit;
+  const profit = historyProfit(row);
+  const netCost = historyNetCost(row);
+  return profit !== null && netCost > 0 ? (profit / netCost) * 100 : null;
+}
+
+function historyMarginPercent(row = {}) {
+  const profit = historyProfit(row);
+  const soldPrice = parseMoney(row.sold_price_cad);
+  return profit !== null && soldPrice > 0 ? (profit / soldPrice) * 100 : null;
+}
+
+function historyDateMs(value) {
+  if (!value) return null;
+  const parsed = Date.parse(String(value).includes('T') ? value : `${value}T00:00:00`);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function historyDaysHeld(row = {}) {
+  const start = historyDateMs(row.purchase_at);
+  if (start === null) return null;
+  const end = historyDateMs(row.sold_at) || Date.now();
+  return Math.max(0, Math.round((end - start) / 86400000));
+}
+
+function historyListItems(value) {
+  return String(value || '')
+    .split('|')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isOriginalPackageItem(value) {
+  return /^(original_)?(package|packaging|box)$|^original[-_\s]?box$/i.test(String(value || '').trim());
+}
+
+function originalPackageStatus(row = {}) {
+  if (historyListItems(row.included_items).some(isOriginalPackageItem)) return 'yes';
+  if (historyListItems(row.missing_items).some(isOriginalPackageItem)) return 'no';
+  return 'unknown';
+}
+
+function originalPackageLabel(value) {
+  return value === 'yes' ? 'Yes'
+    : value === 'no' ? 'No'
+      : 'Unknown';
+}
+
+function applyOriginalPackageStatus(row, status) {
+  const normalizedStatus = status === 'yes' || status === 'no' ? status : 'unknown';
+  const included = historyListItems(row.included_items).filter((item) => !isOriginalPackageItem(item));
+  const missing = historyListItems(row.missing_items).filter((item) => !isOriginalPackageItem(item));
+  if (normalizedStatus === 'yes') {
+    included.push('original_package');
+  } else if (normalizedStatus === 'no') {
+    missing.push('original_package');
+  }
+  return {
+    ...row,
+    bundle_type: included.length > 1 ? 'bundle' : row.bundle_type || 'single',
+    included_items: included.join('|'),
+    missing_items: missing.join('|'),
+  };
+}
+
 function sumMoney(rows, field) {
   return rows.reduce((sum, row) => {
     const value = parseMoney(row[field]);
@@ -353,7 +450,7 @@ function sumMoney(rows, field) {
 
 function averageRoi(rows) {
   const values = rows
-    .map((row) => Number.parseFloat(String(row.roi_percent || '')))
+    .map((row) => historyRoiPercent(row))
     .filter((value) => Number.isFinite(value));
   if (!values.length) {
     return '';
@@ -499,18 +596,24 @@ function historySortValue(row, key) {
       return historyItemNameSortValue(row);
     case 'subcategory':
       return row.subcategory || '';
+    case 'originalPackage':
+      return originalPackageStatus(row);
     case 'cost':
       return parseMoney(row.purchase_price_cad);
+    case 'netCost':
+      return historyNetCost(row);
     case 'price':
-      return parseMoney(row.sold_price_cad || row.list_price_cad);
+      return historyPrice(row);
     case 'status':
       return inventoryStatusFromHistoryRow(row);
     case 'profit':
-      return parseMoney(row.realized_profit_cad);
-    case 'roi': {
-      const roi = Number.parseFloat(String(row.roi_percent || ''));
-      return Number.isFinite(roi) ? roi : null;
-    }
+      return historyProfit(row);
+    case 'roi':
+      return historyRoiPercent(row);
+    case 'margin':
+      return historyMarginPercent(row);
+    case 'daysHeld':
+      return historyDaysHeld(row);
     case 'result':
       return resultLabelFromHistoryRow(row);
     case 'date':
@@ -553,6 +656,23 @@ function historyEditFormatter(cell) {
   return `<button type="button" class="secondary history-edit-button" data-record-id="${html(cell.getData().record_id)}">Edit</button>`;
 }
 
+function historyMetricFormatter(primaryValue, secondaryLabel, secondaryValue, options = {}) {
+  const primary = options.percent ? formatPercent(primaryValue) : formatMoney(primaryValue);
+  const secondaryFormatted = secondaryValue === null || secondaryValue === undefined || secondaryValue === ''
+    ? ''
+    : options.secondaryPercent ? formatPercent(secondaryValue) : formatMoney(secondaryValue);
+  const secondary = secondaryFormatted ? `${secondaryLabel} ${secondaryFormatted}` : '';
+  return '<div class="history-metric-stack">'
+    + `<div>${html(primary || '-')}</div>`
+    + `<div class="process-meta">${html(secondary || '')}</div>`
+    + '</div>';
+}
+
+function historyProfitFormatter(cell) {
+  const row = cell.getData();
+  return historyMetricFormatter(row._profit, 'ROI', row._roi, { secondaryPercent: true });
+}
+
 function historyTableColumns() {
   return [
     {
@@ -574,9 +694,18 @@ function historyTableColumns() {
       headerClick: historyColumnHeaderClick('subcategory'),
     },
     {
+      title: historyColumnTitle('originalPackage', 'Package'),
+      field: '_originalPackage',
+      width: 92,
+      responsive: 3,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('originalPackage'),
+      formatter: (cell) => originalPackageLabel(cell.getValue()),
+    },
+    {
       title: historyColumnTitle('cost', 'Cost'),
       field: '_cost',
-      width: 100,
+      width: 92,
       hozAlign: 'right',
       responsive: 0,
       headerSort: false,
@@ -584,9 +713,19 @@ function historyTableColumns() {
       formatter: (cell) => formatMoney(cell.getValue()),
     },
     {
+      title: historyColumnTitle('netCost', 'Net cost'),
+      field: '_netCost',
+      width: 104,
+      hozAlign: 'right',
+      responsive: 2,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('netCost'),
+      formatter: (cell) => formatMoney(cell.getValue()),
+    },
+    {
       title: historyColumnTitle('price', 'Price'),
       field: '_price',
-      width: 100,
+      width: 92,
       hozAlign: 'right',
       responsive: 0,
       headerSort: false,
@@ -603,30 +742,43 @@ function historyTableColumns() {
       formatter: historyStatusFormatter,
     },
     {
-      title: historyColumnTitle('profit', 'Profit'),
+      title: historyColumnTitle('profit', 'Profit / ROI'),
       field: '_profit',
-      width: 110,
+      width: 122,
       hozAlign: 'right',
       responsive: 1,
       headerSort: false,
       headerClick: historyColumnHeaderClick('profit'),
-      formatter: (cell) => formatMoney(cell.getValue()),
+      formatter: historyProfitFormatter,
     },
     {
-      title: historyColumnTitle('roi', 'ROI'),
-      field: '_roi',
-      width: 90,
+      title: historyColumnTitle('margin', 'Margin'),
+      field: '_margin',
+      width: 92,
       hozAlign: 'right',
-      responsive: 3,
+      responsive: 4,
       headerSort: false,
-      headerClick: historyColumnHeaderClick('roi'),
+      headerClick: historyColumnHeaderClick('margin'),
       formatter: (cell) => formatPercent(cell.getValue()),
+    },
+    {
+      title: historyColumnTitle('daysHeld', 'Days'),
+      field: '_daysHeld',
+      width: 84,
+      hozAlign: 'right',
+      responsive: 5,
+      headerSort: false,
+      headerClick: historyColumnHeaderClick('daysHeld'),
+      formatter: (cell) => {
+        const value = cell.getValue();
+        return Number.isFinite(value) ? String(value) : '';
+      },
     },
     {
       title: historyColumnTitle('result', 'Result'),
       field: '_result',
       width: 140,
-      responsive: 4,
+      responsive: 6,
       headerSort: false,
       headerClick: historyColumnHeaderClick('result'),
       formatter: historyStatusFormatter,
@@ -635,14 +787,14 @@ function historyTableColumns() {
       title: historyColumnTitle('date', 'Dates'),
       field: '_dates',
       width: 150,
-      responsive: 5,
+      responsive: 7,
       headerSort: false,
       headerClick: historyColumnHeaderClick('date'),
     },
     {
       title: '',
       field: '_actions',
-      width: 236,
+      width: 96,
       responsive: 0,
       headerSort: false,
       formatter: historyEditFormatter,
@@ -654,15 +806,18 @@ function historyTableColumns() {
 function historyTableData(rows) {
   return rows.map((row) => {
     const status = inventoryStatusFromHistoryRow(row);
-    const roi = Number.parseFloat(String(row.roi_percent || ''));
     return {
       ...row,
       _itemName: historyItemNameSortValue(row),
+      _originalPackage: originalPackageStatus(row),
       _cost: parseMoney(row.purchase_price_cad),
-      _price: parseMoney(row.sold_price_cad || row.list_price_cad),
+      _netCost: historyNetCost(row),
+      _price: historyPrice(row),
       _status: status,
-      _profit: parseMoney(row.realized_profit_cad),
-      _roi: Number.isFinite(roi) ? roi : null,
+      _profit: historyProfit(row),
+      _roi: historyRoiPercent(row),
+      _margin: historyMarginPercent(row),
+      _daysHeld: historyDaysHeld(row),
       _result: resultLabelFromHistoryRow(row),
       _dates: [compactDate(row.purchase_at), compactDate(row.sold_at)].filter(Boolean).join(' - '),
     };
@@ -837,6 +992,15 @@ function renderRecommendationsTable(items) {
   if (!els.recommendationsTable) return;
   const data = recommendationTableData(items);
   const columns = recommendationTableColumns();
+  const reloadTableData = () => {
+    if (!store.recommendationsTable) return;
+    if (!store.recommendationsTableBuilt) {
+      store.recommendationsTablePendingSetData = true;
+      return;
+    }
+    store.recommendationsTablePendingSetData = false;
+    store.recommendationsTable.setData('/api/purchase-history-match-queue');
+  };
   if (!store.recommendationsTable) {
     els.recommendationsTable.innerHTML = '';
     store.recommendationsTable = new Tabulator(els.recommendationsTable, {
@@ -865,11 +1029,14 @@ function renderRecommendationsTable(items) {
         });
       },
     });
-    setTimeout(() => store.recommendationsTable?.setData('/api/purchase-history-match-queue'), 0);
+    store.recommendationsTable.on('tableBuilt', () => {
+      store.recommendationsTableBuilt = true;
+      if (store.recommendationsTablePendingSetData) reloadTableData();
+    });
+    reloadTableData();
     return;
   }
-  store.recommendationsTable.setColumns(columns);
-  store.recommendationsTable.setData('/api/purchase-history-match-queue');
+  reloadTableData();
 }
 
 function eventSortValue(event, key) {
@@ -949,7 +1116,7 @@ function buildHistoryFormRow(form = els.historyForm, existingRow = {}) {
   const listPrice = inventoryStatus === 'listed' ? price
     : inventoryStatus === 'sold' ? (parseMoney(existingRow.list_price_cad) ?? price)
       : null;
-  const row = {
+  const row = applyOriginalPackageStatus({
     ...existingRow,
     record_id: data.record_id || existingRow.record_id || '',
     record_source: 'manual',
@@ -986,7 +1153,7 @@ function buildHistoryFormRow(form = els.historyForm, existingRow = {}) {
     seller_risk_score: '0.1',
     watchlist_match: 'true',
     notes: String(data.notes || '').trim(),
-  };
+  }, data.original_package);
   return row;
 }
 
@@ -1110,6 +1277,7 @@ function openHistoryEditModal(recordId) {
   }
   setFormField(els.historyEditForm, 'price_cad', row.sold_price_cad || row.list_price_cad || '');
   setFormField(els.historyEditForm, 'inventory_status', inventoryStatusFromHistoryRow(row));
+  setFormField(els.historyEditForm, 'original_package', originalPackageStatus(row));
   if (els.historyLinkUrl) els.historyLinkUrl.value = '';
   if (els.historyLinkRelationship) els.historyLinkRelationship.value = 'same_listing';
   if (els.historyLinkFetchNow) els.historyLinkFetchNow.checked = false;
@@ -2162,22 +2330,28 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
 function renderSummary() {
   const summary = store.summary || {};
   const counts = summary.queueCounts || {};
+  const workerStats = summary.workerStats || {};
   const cards = [
-    ['Total', summary.totalRows || 0],
-    ['Pending', counts.pending || 0],
-    ['Processing', counts.processing || 0],
-    ['Done', counts.done || 0],
-    ['Needs review', counts.error || 0],
-    ['Sold', counts.sold || 0],
-    ['Pending sale', counts.pending_sale || 0],
+    { label: 'Total', value: summary.totalRows || 0, query: '' },
+    { label: 'Pending', value: counts.pending || 0, query: 'status == pending sort:rank' },
+    { label: 'Processing', value: counts.processing || 0, query: 'status == processing sort:recent' },
+    { label: 'Done', value: counts.done || 0, query: 'status == done sort:completed' },
+    { label: 'Needs review', value: counts.error || 0, query: 'status == error sort:recent' },
+    { label: 'Sold', value: counts.sold || 0, query: 'status == sold sort:recent' },
+    { label: 'Pending sale', value: counts.pending_sale || 0, query: 'status == pending_sale sort:recent' },
+    { label: 'Working workers', value: workerStats.working || 0, route: '/workers' },
   ];
-  els.summary.innerHTML = cards.map(([label, value]) => (
-    `<div class="card"><div class="label">${html(label)}</div><div class="value">${html(value)}</div></div>`
+  els.summary.innerHTML = cards.map((card) => (
+    '<button type="button" class="card summary-card" data-summary-action="navigate"'
+      + (card.route ? ` data-route="${html(card.route)}"` : ` data-query="${html(card.query)}"`)
+      + ` aria-label="${html(`${card.label}: ${card.value}`)}">`
+      + `<div class="label">${html(card.label)}</div><div class="value">${html(card.value)}</div>`
+    + '</button>'
   )).join('');
 }
 
 function renderSummarySkeleton() {
-  const labels = ['Total', 'Pending', 'Processing', 'Done', 'Needs review', 'Sold', 'Pending sale'];
+  const labels = ['Total', 'Pending', 'Processing', 'Done', 'Needs review', 'Sold', 'Pending sale', 'Working workers'];
   els.summary.innerHTML = labels.map((label) => (
     '<div class="card pre-render-card">'
       + `<div class="label">${html(label)}</div>`
@@ -2197,8 +2371,8 @@ function renderSkeletonRows(rowCount, columnCount) {
 function renderHistoryTableSkeleton() {
   if (!els.historyTable || store.historyTable) return;
   els.historyTable.innerHTML = '<div class="tablewrap prerender-tablewrap">'
-    + '<table class="history-table"><thead><tr><th>Item</th><th>Kind</th><th>Cost</th><th>Price</th><th>Status</th><th>Profit</th><th>ROI</th><th>Result</th><th>Dates</th><th></th></tr></thead><tbody>'
-    + renderSkeletonRows(7, 10)
+    + '<table class="history-table"><thead><tr><th>Item</th><th>Kind</th><th>Package</th><th>Cost</th><th>Net cost</th><th>Price</th><th>Status</th><th>Profit / ROI</th><th>Margin</th><th>Days</th><th>Result</th><th>Dates</th><th></th></tr></thead><tbody>'
+    + renderSkeletonRows(7, 13)
     + '</tbody></table></div>';
 }
 
@@ -2254,6 +2428,7 @@ function renderInitialShell() {
 
 function summaryRenderSignature(summary = store.summary) {
   const counts = summary?.queueCounts || {};
+  const workerStats = summary?.workerStats || {};
   return JSON.stringify({
     totalRows: summary?.totalRows || 0,
     pending: counts.pending || 0,
@@ -2262,6 +2437,7 @@ function summaryRenderSignature(summary = store.summary) {
     error: counts.error || 0,
     sold: counts.sold || 0,
     pending_sale: counts.pending_sale || 0,
+    workingWorkers: workerStats.working || 0,
   });
 }
 
@@ -2487,6 +2663,41 @@ function handleWorkflowFieldChange(event) {
   }
 }
 
+async function refreshWorkerPanel(options = {}) {
+  const button = document.getElementById('workerControlRefreshButton');
+  const status = document.getElementById('workerConfigStatus');
+  if (button) button.disabled = true;
+  if (status) status.textContent = 'Refreshing worker status...';
+  try {
+    await loadWorkflows({ light: options.light !== false });
+    scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
+    if (status) status.textContent = 'Worker status refreshed.';
+  } catch (error) {
+    if (status) status.textContent = error.message || 'Worker refresh failed.';
+    throw error;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function reconcileWorkerPanel() {
+  const button = document.getElementById('workerControlReconcileButton');
+  const status = document.getElementById('workerConfigStatus');
+  if (button) button.disabled = true;
+  if (status) status.textContent = 'Checking worker OS state...';
+  try {
+    await fetchJson('/api/workflows/reconcile', { method: 'POST' });
+    await loadWorkflows({ light: true });
+    scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
+    if (status) status.textContent = 'Worker OS state checked.';
+  } catch (error) {
+    if (status) status.textContent = error.message || 'Worker OS check failed.';
+    throw error;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function renderWorkerControl() {
   const workflow = selectedWorkflow();
   if (!workflow || !els.workerControl) {
@@ -2555,8 +2766,16 @@ function renderWorkerControl() {
     persistWorkflowDrafts();
     renderWorkflowForm();
   });
-  document.getElementById('workerControlRefreshButton').addEventListener('click', () => document.getElementById('refreshWorkflowsButton').click());
-  document.getElementById('workerControlReconcileButton').addEventListener('click', () => document.getElementById('reconcileWorkflowsButton').click());
+  document.getElementById('workerControlRefreshButton').addEventListener('click', () => {
+    refreshWorkerPanel({ light: true }).catch((error) => {
+      alert(error.message || 'Worker refresh failed.');
+    });
+  });
+  document.getElementById('workerControlReconcileButton').addEventListener('click', () => {
+    reconcileWorkerPanel().catch((error) => {
+      alert(error.message || 'Worker OS check failed.');
+    });
+  });
 }
 
 function fillCredentialForm(profile) {
@@ -3224,17 +3443,18 @@ async function loadWorkerDetail(options = {}) {
   let statsPayload;
   let eventsPayload;
   try {
-    [detailPayload, statsPayload] = await Promise.all([
+    const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
+    [detailPayload, statsPayload, eventsPayload] = await Promise.all([
       fetchJson(`/api/workflows/${workerId}`),
       fetchJson(`/api/workflows/${workerId}/stats`),
+      fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`),
     ]);
     const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
     if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
       selectedEventType = 'all';
       store.workerDetailEventType = 'all';
+      eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}&limit=50`);
     }
-    const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
-    eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`);
   } catch (error) {
     if (requestSeq === store.workerDetailRequestSeq && store.selectedProcessId === selectedProcessId) {
       store.workerDetailLoading = false;
@@ -3417,13 +3637,36 @@ function updateLocationRoute(routePath, options = {}) {
   }
 }
 
+function activateRouteView(routePath, options = {}) {
+  const normalized = normalizeRoute(routePath);
+  const route = ROUTES[normalized] || ROUTES[DEFAULT_ROUTE];
+  for (const item of document.querySelectorAll('.tab')) {
+    item.classList.toggle('active', item.dataset.panel === route.panel);
+  }
+  for (const panel of document.querySelectorAll('.panel')) {
+    panel.classList.toggle('active', panel.id === route.panel);
+  }
+  if (route.listingView) {
+    listingsViewer.setListingView(route.listingView, { load: false, notify: false }).catch(() => {});
+  }
+  if (route.historyView) {
+    setHistoryView(route.historyView);
+  }
+  updateLocationRoute(normalized, options);
+  return normalized;
+}
+
 async function runRouteLoader(routePath) {
   if (!hasApiToken()) return;
   const route = ROUTES[routePath] || ROUTES[DEFAULT_ROUTE];
   if (route.listingView === 'backlogQueueView') {
     await listingsViewer.setListingView('backlogQueueView', { notify: false });
+  } else if (route.listingView === 'resolveQueueView' || route.listingView === 'resolveQueueAuditView') {
+    await listingsViewer.setListingView(route.listingView, { notify: false });
   } else if (route.listingView) {
     await listingsViewer.setListingView(route.listingView, { load: false, notify: false });
+    await listingsViewer.loadResolveQueue();
+    await listingsViewer.loadRows();
   }
   if (route.historyView) {
     setHistoryView(route.historyView);
@@ -3437,21 +3680,16 @@ async function runRouteLoader(routePath) {
       await loadPurchaseHistory();
     }
   } else if (route.panel === 'opsPanel') {
-    await loadWorkflows();
-    scheduleWorkflowSync();
+    await loadWorkflows({ light: true });
+    scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
+  } else if (route.panel === 'settingsPanel') {
+    await loadCredentials({ render: false });
+    renderSettings();
   }
 }
 
 async function navigateToRoute(routePath, options = {}) {
-  const normalized = normalizeRoute(routePath);
-  const route = ROUTES[normalized] || ROUTES[DEFAULT_ROUTE];
-  for (const item of document.querySelectorAll('.tab')) {
-    item.classList.toggle('active', item.dataset.panel === route.panel);
-  }
-  for (const panel of document.querySelectorAll('.panel')) {
-    panel.classList.toggle('active', panel.id === route.panel);
-  }
-  updateLocationRoute(normalized, options);
+  const normalized = activateRouteView(routePath, options);
   await runRouteLoader(normalized);
 }
 
@@ -3468,6 +3706,26 @@ function bindEvents() {
     clearWorkerDetailState();
     renderProcesses();
   });
+  document.getElementById('homeRouteButton')?.addEventListener('click', async () => {
+    try {
+      await navigateToRoute(DEFAULT_ROUTE);
+    } catch (error) {
+      alert(error.message || 'Listings route could not be loaded.');
+    }
+  });
+  els.summary?.addEventListener('click', async (event) => {
+    const card = event.target.closest('[data-summary-action="navigate"]');
+    if (!card) return;
+    try {
+      if (card.dataset.route) {
+        await navigateToRoute(card.dataset.route);
+      } else {
+        await listingsViewer.applyQuery(card.dataset.query || '');
+      }
+    } catch (error) {
+      alert(error.message || 'Overview route could not be loaded.');
+    }
+  });
   for (const tab of document.querySelectorAll('.tab')) {
     tab.addEventListener('click', async () => {
       try {
@@ -3481,6 +3739,9 @@ function bindEvents() {
     navigateToRoute(routeForListingView(event.detail?.listingView), { replace: false }).catch((error) => {
       alert(error.message || 'Listing route could not be loaded.');
     });
+  });
+  document.addEventListener('marketplace-query-applied', () => {
+    activateRouteView('/listings', { replace: true });
   });
   for (const subtab of document.querySelectorAll('[data-history-view]')) {
     subtab.addEventListener('click', async () => {
@@ -3678,10 +3939,13 @@ function bindEvents() {
       alert(error.message || 'Workflow could not be started.');
     }
   });
-  document.getElementById('refreshWorkflowsButton').addEventListener('click', loadWorkflows);
+  document.getElementById('refreshWorkflowsButton').addEventListener('click', () => {
+    refreshWorkerPanel({ light: true }).catch((error) => {
+      alert(error.message || 'Worker refresh failed.');
+    });
+  });
   document.getElementById('reconcileWorkflowsButton').addEventListener('click', async () => {
-    await fetchJson('/api/workflows/reconcile', { method: 'POST' });
-    await loadWorkflows();
+    await reconcileWorkerPanel();
   });
 }
 
@@ -3690,21 +3954,28 @@ listingsViewer.bindEvents();
 listingsViewer.renderHead();
 renderInitialShell();
 renderTokenWarning();
+const initialRoute = activateRouteView(normalizeRoute(window.location.hash), { replace: !window.location.hash });
 if (hasApiToken()) {
-  await loadSummary();
-  await listingsViewer.loadQueryFields();
-  await listingsViewer.loadResolveQueue();
-  await listingsViewer.loadRows();
-  await loadPurchaseHistory();
-  await loadCredentials({ render: false });
-  renderSettings();
-  await loadWorkflows();
-  applyRouteFromLocation({ replace: !window.location.hash });
+  loadSummary().catch((error) => {
+    console.warn('Initial summary load failed:', error.message || error);
+  });
+  listingsViewer.loadQueryFields().catch((error) => {
+    console.warn('Initial query field load failed:', error.message || error);
+  });
+  if (initialRoute !== '/settings') {
+    loadCredentials({ render: false })
+      .then(renderSettings)
+      .catch((error) => {
+        console.warn('Initial credential load failed:', error.message || error);
+      });
+  }
+  await runRouteLoader(initialRoute);
   scheduleSummarySync();
-  scheduleWorkflowSync();
+  if (initialRoute !== '/workers') {
+    scheduleWorkflowSync();
+  }
 } else {
   els.summary.innerHTML = '<div class="card"><div class="label">Access</div><div class="value">Token needed</div></div>';
   renderPurchaseHistory();
   renderSettings();
-  applyRouteFromLocation({ replace: !window.location.hash });
 }

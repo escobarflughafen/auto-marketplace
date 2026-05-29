@@ -791,6 +791,30 @@ function getRunningManagedProcesses(db) {
   return runs.filter((record) => isManagedStatusActive(record.status) && (record.osAlive || record.managed));
 }
 
+function getWorkflowRuntimeSummary(db, options = {}) {
+  const reconcile = options.reconcile !== false;
+  const runs = reconcile
+    ? reconcileWorkflowRuns(db, { includeStats: false })
+    : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats: false });
+  const statuses = runs.reduce((accumulator, run) => {
+    const status = run.status || 'unknown';
+    accumulator[status] = (accumulator[status] || 0) + 1;
+    return accumulator;
+  }, {});
+  const activeRuns = runs.filter((run) => isManagedStatusActive(run.status));
+  const workingRuns = activeRuns.filter((run) => run.osAlive || run.managed);
+  return {
+    working: workingRuns.length,
+    active: activeRuns.length,
+    totalRecent: runs.length,
+    running: statuses.running || 0,
+    starting: statuses.starting || 0,
+    stopping: statuses.stopping || 0,
+    lost: statuses.lost || 0,
+    failed: (statuses.failed || 0) + (statuses.error || 0),
+  };
+}
+
 function ensureManagedWorkerIdArg(args, runId, workflow) {
   const supportsWorkerId = WORKFLOW_SCRIPTS_WITH_WORKER_ID.has(workflow.script)
     || fieldsForWorkflow(workflow)
@@ -2199,6 +2223,7 @@ function createServer(options) {
         latestSeenAt: latest.latest_seen_at,
         queueCounts: getHomepageListingCounts(db),
         resolveQueueCounts: getResolveQueueCounts(db),
+        workerStats: getWorkflowRuntimeSummary(db, { reconcile: access.canWrite }),
         auth: authPayloadForAccess(access),
       });
       return;
