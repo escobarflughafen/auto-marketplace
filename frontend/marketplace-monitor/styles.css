@@ -279,15 +279,173 @@ h1 {
   min-width: 0;
   border-bottom: 1px solid var(--line);
 }
+.query-input-shell {
+  position: relative;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  background: #fff;
+}
 .querybar input,
+.querybar textarea,
 .querybar button {
   min-width: 0;
   border: 0;
   border-right: 1px solid var(--line);
   border-radius: 0;
 }
+.query-mode-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--fill);
+}
+.querybar .query-mode-button {
+  border-right: 1px solid var(--line);
+  padding: 5px 9px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+}
+.querybar .query-mode-button.active {
+  color: var(--ink);
+  background: #fff;
+  box-shadow: inset 0 -2px 0 var(--accent-strong);
+}
+.query-mode-pane[hidden] {
+  display: none;
+}
+.querybar .query-input-shell input {
+  width: 100%;
+  border-right: 0;
+}
+.query-editor {
+  position: relative;
+  min-height: 90px;
+  overflow: hidden;
+  background: #fff;
+}
+.query-highlight,
+.query-editor textarea {
+  min-height: 90px;
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+.query-highlight {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--muted);
+  background: #fff;
+}
+.query-editor textarea {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  resize: vertical;
+  color: transparent;
+  caret-color: var(--ink);
+  background: transparent;
+  border-right: 0;
+  outline: 0;
+}
+.query-editor textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+.query-editor textarea::selection {
+  background: rgba(95, 132, 255, 0.28);
+}
+.query-token-keyword {
+  color: #6f42c1;
+  font-weight: 700;
+}
+.query-token-source {
+  color: #0969da;
+  font-weight: 700;
+}
+.query-token-field {
+  color: #24292f;
+}
+.query-token-string {
+  color: #0a7f43;
+}
+.query-token-number {
+  color: #953800;
+}
+.query-token-operator {
+  color: #8250df;
+  font-weight: 700;
+}
 .querybar button:last-child {
   border-right: 0;
+}
+.query-autocomplete {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+}
+.query-suggestion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+  gap: 12px;
+  padding: 7px 9px;
+  color: var(--ink);
+  background: #fff;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  text-align: left;
+}
+.query-suggestion:last-child {
+  border-bottom: 0;
+}
+.query-suggestion span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.query-suggestion span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.query-suggestion.active,
+.query-suggestion:not(:disabled):hover {
+  color: var(--ink);
+  background: var(--fill);
+  box-shadow: inset 3px 0 0 var(--accent-strong);
+}
+.query-diagnostics {
+  min-height: 31px;
+}
+.query-diagnostic {
+  display: inline-block;
+  margin-right: 8px;
+}
+.query-diagnostic.error {
+  color: #b42318;
+}
+.query-diagnostic.warning {
+  color: #9a6700;
 }
 input, button, select, textarea {
   font: inherit;

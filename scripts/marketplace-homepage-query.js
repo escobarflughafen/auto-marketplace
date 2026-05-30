@@ -1,5 +1,11 @@
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+const {
+  looksLikeLiteKql,
+  buildLiteListingsQuery,
+  buildLiteListingIdsQuery,
+  buildLiteCountQuery,
+} = require('./lite-kql-sqlite');
 
 const FIELD_ALIASES = {
   id: 'listing_id',
@@ -713,6 +719,9 @@ function appendExcludeListingIds(where, excludeListingIds) {
 }
 
 function buildListingsQuery(options = {}) {
+  if (looksLikeLiteKql(options.query || '')) {
+    return buildLiteListingsQuery(options);
+  }
   const parsedQuery = parseQuery(options.query || '');
   if (SORT_FIELDS.has(String(options.sort || '').toLowerCase())) {
     parsedQuery.sort = normalizeSort(options.sort);
@@ -764,6 +773,9 @@ function buildListingsQuery(options = {}) {
 }
 
 function buildListingIdsQuery(options = {}) {
+  if (looksLikeLiteKql(options.query || '')) {
+    return buildLiteListingIdsQuery(options);
+  }
   const parsedQuery = parseQuery(options.query || '');
   if (SORT_FIELDS.has(String(options.sort || '').toLowerCase())) {
     parsedQuery.sort = normalizeSort(options.sort);
@@ -795,6 +807,9 @@ function buildListingIdsQuery(options = {}) {
 }
 
 function buildCountQuery(options = {}) {
+  if (looksLikeLiteKql(options.query || '')) {
+    return buildLiteCountQuery(options);
+  }
   const parsedQuery = parseQuery(options.query || '');
   const where = appendExcludeListingIds(buildWhereClause(parsedQuery), options.excludeListingIds);
   return {

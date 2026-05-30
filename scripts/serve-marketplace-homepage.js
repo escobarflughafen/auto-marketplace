@@ -53,6 +53,9 @@ const {
   buildCountQuery,
 } = require('./marketplace-homepage-query');
 const {
+  completeLiteKql,
+} = require('./lite-kql-authoring');
+const {
   getMarketplaceLocationOptions,
 } = require('./marketplace-utils');
 const {
@@ -2236,6 +2239,23 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/query/complete' && request.method === 'POST') {
+      try {
+        const body = await readRequestJson(request);
+        writeJson(response, 200, completeLiteKql({
+          source: body.source || 'listings',
+          query: body.query || '',
+          cursor: body.cursor,
+        }));
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, {
+          error: error.message,
+          diagnostics: error.diagnostics || [],
+        });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/purchase-history/documents' && request.method === 'GET') {
       try {
         const fields = readTradingHistoryFields();
@@ -2494,9 +2514,10 @@ function createServer(options) {
           },
         });
       } catch (error) {
-        writeJson(response, 400, {
+        writeJson(response, error.statusCode || 400, {
           error: error.message,
           query,
+          diagnostics: error.diagnostics || [],
         });
       }
       return;

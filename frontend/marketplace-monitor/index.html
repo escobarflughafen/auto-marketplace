@@ -11,7 +11,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
-  <link rel="stylesheet" href="/app/styles.css?v=overview-nav-20260529">
+  <link rel="stylesheet" href="/app/styles.css?v=lite-kql-20260530">
 </head>
 <body>
   <div class="shell">
@@ -34,12 +34,23 @@
     <section class="workspace-surface">
       <div class="workspace-row query-row">
         <form class="querybar" id="queryForm">
-          <input id="queryInput" name="q" placeholder='title contains "pentax 67" and price >= 2000 sort:recent'>
+          <div class="query-input-shell">
+            <div class="query-mode-tabs" role="group" aria-label="Query input mode">
+              <button type="button" class="query-mode-button active" data-query-mode="editor">Editor</button>
+              <button type="button" class="query-mode-button" data-query-mode="line">Line</button>
+            </div>
+            <div class="query-editor query-mode-pane active" data-query-pane="editor">
+              <pre class="query-highlight" id="queryHighlight" aria-hidden="true"></pre>
+              <textarea id="queryEditor" rows="3" spellcheck="false" autocomplete="off" placeholder='listings | where title contains "pentax 67" and price >= 2000&#10;| sort by last_seen_at desc'></textarea>
+            </div>
+            <input id="queryInput" class="query-mode-pane" data-query-pane="line" name="q" autocomplete="off" placeholder='status == pending and price >= 2000' hidden>
+            <div class="query-autocomplete" id="queryAutocomplete" hidden></div>
+          </div>
           <button type="submit">Search</button>
           <button type="button" class="secondary" id="clearButton">Clear</button>
         </form>
-        <div class="tips">
-          Query examples: <code>status != done</code> <code>price >= 2000</code> <code>source_keyword in ("nikon","leica")</code>
+        <div class="tips query-diagnostics" id="queryDiagnostics">
+          Query examples: <code>listings | where status == "pending" | sort by rank asc</code> <code>status != done</code> <code>price >= 2000</code>
         </div>
       </div>
 
@@ -646,6 +657,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="/app/app.js?v=overview-nav-20260529"></script>
+  <script type="module" src="/app/app.js?v=lite-kql-20260530"></script>
 </body>
 </html>

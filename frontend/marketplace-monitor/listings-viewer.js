@@ -218,6 +218,12 @@ export function createListingsViewer() {
     selectedIds: [],
     selectedBacklogIds: [],
     selectedPovOrderIds: [],
+    queryCompletionTimer: null,
+    queryCompletionSeq: 0,
+    querySuggestions: [],
+    querySuggestionIndex: -1,
+    queryDiagnostics: [],
+    queryMode: localStorage.getItem('marketplace-query-mode') === 'line' ? 'line' : 'editor',
     resolveQueueIds: [],
     resolveQueueItems: [],
     resolveQueueEvents: [],
@@ -239,6 +245,12 @@ export function createListingsViewer() {
   const els = {
     resultsMeta: document.getElementById('resultsMeta'),
     queryInput: document.getElementById('queryInput'),
+    queryEditor: document.getElementById('queryEditor'),
+    queryHighlight: document.getElementById('queryHighlight'),
+    queryAutocomplete: document.getElementById('queryAutocomplete'),
+    queryDiagnostics: document.getElementById('queryDiagnostics'),
+    queryModeButtons: Array.from(document.querySelectorAll('[data-query-mode]')),
+    queryModePanes: Array.from(document.querySelectorAll('[data-query-pane]')),
     queryFieldSelect: document.getElementById('queryFieldSelect'),
     queryOperatorSelect: document.getElementById('queryOperatorSelect'),
     queryValueInput: document.getElementById('queryValueInput'),
@@ -288,8 +300,73 @@ export function createListingsViewer() {
     queueBacklogVisibleButton: document.getElementById('queueBacklogVisibleButton'),
     selectAllBacklogRows: document.getElementById('selectAllBacklogRows'),
   };
-  if (els.queryInput) {
-    els.queryInput.value = state.q;
+  setQueryControlValue(state.q);
+  setQueryMode(state.queryMode);
+
+  function activeQueryControl() {
+    return state.queryMode === 'line' ? els.queryInput : els.queryEditor;
+  }
+
+  function getQueryControlValue() {
+    return activeQueryControl()?.value || '';
+  }
+
+  function renderQueryHighlight() {
+    if (!els.queryHighlight) return;
+    const value = els.queryEditor?.value || '';
+    if (!value) {
+      els.queryHighlight.innerHTML = '';
+      return;
+    }
+    const pattern = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|(==|!=|<=|>=|=~|!~|\.\.|\||[(),<>])|\b(where|sort|by|take|skip|and|or|not|in|between|contains|startswith|endswith|has|listings|events|workers|recommendations|asc|desc)\b|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*/gi;
+    let cursor = 0;
+    let output = '';
+    for (const match of value.matchAll(pattern)) {
+      output += escapeHtml(value.slice(cursor, match.index));
+      const token = match[0];
+      const lower = token.toLowerCase();
+      const klass = token.startsWith('"') || token.startsWith("'") ? 'string'
+        : /^-?\d/.test(token) ? 'number'
+          : ['|', '==', '!=', '<=', '>=', '=~', '!~', '..', '(', ')', ',', '<', '>'].includes(token) ? 'operator'
+            : ['where', 'sort', 'by', 'take', 'skip', 'and', 'or', 'not', 'in', 'between', 'contains', 'startswith', 'endswith', 'has', 'asc', 'desc'].includes(lower) ? 'keyword'
+              : ['listings', 'events', 'workers', 'recommendations'].includes(lower) ? 'source'
+                : 'field';
+      output += `<span class="query-token-${klass}">${escapeHtml(token)}</span>`;
+      cursor = match.index + token.length;
+    }
+    output += escapeHtml(value.slice(cursor));
+    els.queryHighlight.innerHTML = output + (value.endsWith('\n') ? ' ' : '');
+  }
+
+  function setQueryControlValue(value, source = null) {
+    const text = String(value || '');
+    if (source !== els.queryInput && els.queryInput) {
+      els.queryInput.value = text.replace(/\s*\n\s*/g, ' ').trim();
+    }
+    if (source !== els.queryEditor && els.queryEditor) {
+      els.queryEditor.value = text;
+    }
+    renderQueryHighlight();
+  }
+
+  function setQueryMode(mode) {
+    state.queryMode = mode === 'line' ? 'line' : 'editor';
+    localStorage.setItem('marketplace-query-mode', state.queryMode);
+    for (const button of els.queryModeButtons || []) {
+      button.classList.toggle('active', button.dataset.queryMode === state.queryMode);
+    }
+    for (const pane of els.queryModePanes || []) {
+      const active = pane.dataset.queryPane === state.queryMode;
+      pane.classList.toggle('active', active);
+      if ('hidden' in pane) pane.hidden = !active;
+    }
+    setQueryControlValue(getQueryControlValue());
+    renderQueryAssist();
+  }
+
+  function syncQueryFromControl(control) {
+    setQueryControlValue(control?.value || '', control);
+    renderQueryHighlight();
   }
 
   function queuedExclusionIds() {
@@ -423,12 +500,98 @@ export function createListingsViewer() {
   function renderMeta(payload = {}) {
     const stats = payload.stats || {};
     const offset = stats.offset ?? 0;
+    const warnings = payload.parsedQuery?.warnings || [];
     els.resultsMeta.textContent = 'Showing ' + state.rows.length + ' of ' + state.total + ' rows'
       + (state.q ? ' for query: ' + state.q : '')
       + (queuedExclusionIds().length ? ` · hiding ${queuedExclusionIds().length} queued` : '')
       + ' · sort: ' + (payload.sort || '') + ' ' + (payload.sortDirection || '')
       + ' · query: ' + (stats.elapsedMs ?? 0) + 'ms'
-      + ' · window: ' + offset + '-' + (offset + state.rows.length);
+      + ' · window: ' + offset + '-' + (offset + state.rows.length)
+      + (warnings.length ? ` · ${warnings[0]}` : '');
+  }
+
+  function renderQueryAssist() {
+    if (els.queryDiagnostics) {
+      const diagnostics = state.queryDiagnostics || [];
+      if (diagnostics.length) {
+        els.queryDiagnostics.innerHTML = diagnostics.map((item) => (
+          `<span class="query-diagnostic ${escapeHtml(item.severity || 'info')}">${escapeHtml(item.message)}</span>`
+        )).join('');
+      } else {
+        els.queryDiagnostics.innerHTML = 'Query examples: '
+          + '<code>listings | where status == "pending" | sort by rank asc</code> '
+          + '<code>status != done</code> <code>price >= 2000</code>';
+      }
+    }
+    if (!els.queryAutocomplete) return;
+    const activeControl = activeQueryControl();
+    if (!state.querySuggestions.length || document.activeElement !== activeControl) {
+      els.queryAutocomplete.hidden = true;
+      els.queryAutocomplete.innerHTML = '';
+      return;
+    }
+    els.queryAutocomplete.hidden = false;
+    els.queryAutocomplete.innerHTML = state.querySuggestions.map((suggestion, index) => (
+      `<button type="button" class="query-suggestion${index === state.querySuggestionIndex ? ' active' : ''}" data-index="${index}">`
+        + `<span>${escapeHtml(suggestion.label)}</span>`
+        + `<span>${escapeHtml(suggestion.detail || suggestion.kind || '')}</span>`
+      + '</button>'
+    )).join('');
+  }
+
+  function applyQuerySuggestion(suggestion) {
+    const control = activeQueryControl();
+    if (!suggestion || !control) return;
+    const value = control.value;
+    const start = Number.isFinite(suggestion.replacementStart) ? suggestion.replacementStart : control.selectionStart;
+    const end = Number.isFinite(suggestion.replacementEnd) ? suggestion.replacementEnd : control.selectionEnd;
+    const insertText = suggestion.insertText || suggestion.label || '';
+    control.value = value.slice(0, start) + insertText + value.slice(end);
+    syncQueryFromControl(control);
+    const nextCursor = start + insertText.length;
+    control.focus();
+    control.setSelectionRange(nextCursor, nextCursor);
+    state.querySuggestions = [];
+    state.querySuggestionIndex = -1;
+    renderQueryAssist();
+    scheduleQueryCompletion(80);
+  }
+
+  async function requestQueryCompletion() {
+    const control = activeQueryControl();
+    if (!control) return;
+    const requestSeq = state.queryCompletionSeq + 1;
+    state.queryCompletionSeq = requestSeq;
+    const query = control.value;
+    const cursor = control.selectionStart ?? query.length;
+    try {
+      const payload = await fetchJson('/api/query/complete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ source: 'listings', query, cursor }),
+      });
+      if (requestSeq !== state.queryCompletionSeq) return;
+      state.querySuggestions = payload.suggestions || [];
+      state.querySuggestionIndex = state.querySuggestions.length ? 0 : -1;
+      state.queryDiagnostics = [
+        ...(payload.diagnostics || []),
+        ...(payload.warnings || []).map((message) => ({ severity: 'warning', message })),
+      ];
+      renderQueryAssist();
+    } catch (_error) {
+      if (requestSeq !== state.queryCompletionSeq) return;
+      state.querySuggestions = [];
+      renderQueryAssist();
+    }
+  }
+
+  function scheduleQueryCompletion(delay = 160) {
+    if (state.queryCompletionTimer) {
+      clearTimeout(state.queryCompletionTimer);
+    }
+    state.queryCompletionTimer = setTimeout(() => {
+      requestQueryCompletion();
+    }, delay);
   }
 
   function renderSkeletonRows(rowCount, columnCount) {
@@ -1074,8 +1237,8 @@ export function createListingsViewer() {
       ? '(' + values.map(quoteQueryValue).join(', ') + ')'
       : quoteQueryValue(rawValue);
     const clause = `${field} ${operator} ${value}`;
-    const current = els.queryInput.value.trim();
-    els.queryInput.value = current ? `${current} ${els.queryJoinSelect.value} ${clause}` : clause;
+    const current = getQueryControlValue().trim();
+    setQueryControlValue(current ? `${current} ${els.queryJoinSelect.value} ${clause}` : clause);
     els.queryValueInput.value = '';
   }
 
@@ -1122,9 +1285,10 @@ export function createListingsViewer() {
 
   async function applyQuery(query, options = {}) {
     state.q = String(query || '').trim();
-    if (els.queryInput) {
-      els.queryInput.value = state.q;
-    }
+    setQueryControlValue(state.q);
+    state.querySuggestions = [];
+    state.querySuggestionIndex = -1;
+    renderQueryAssist();
     state.selectedSnapshotListingId = '';
     renderSnapshotPanel(null);
     updateQueryParam(state.q, { replace: options.replace === true });
@@ -1168,7 +1332,71 @@ export function createListingsViewer() {
     }
     document.getElementById('queryForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      await applyQuery(els.queryInput.value);
+      await applyQuery(getQueryControlValue());
+    });
+    const bindQueryControl = (control) => {
+      if (!control) return;
+      control.addEventListener('input', () => {
+        syncQueryFromControl(control);
+        scheduleQueryCompletion();
+      });
+      control.addEventListener('focus', () => {
+        scheduleQueryCompletion(60);
+      });
+      control.addEventListener('blur', () => {
+        setTimeout(() => {
+          state.querySuggestions = [];
+          state.querySuggestionIndex = -1;
+          renderQueryAssist();
+        }, 120);
+      });
+      control.addEventListener('scroll', () => {
+        if (control === els.queryEditor && els.queryHighlight) {
+          els.queryHighlight.scrollTop = control.scrollTop;
+          els.queryHighlight.scrollLeft = control.scrollLeft;
+        }
+      });
+      control.addEventListener('keydown', (event) => {
+        if (control === els.queryEditor && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          document.getElementById('queryForm').requestSubmit();
+          return;
+        }
+      if (!state.querySuggestions.length || els.queryAutocomplete?.hidden) return;
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        state.querySuggestionIndex = (state.querySuggestionIndex + 1) % state.querySuggestions.length;
+        renderQueryAssist();
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        state.querySuggestionIndex = (state.querySuggestionIndex - 1 + state.querySuggestions.length) % state.querySuggestions.length;
+        renderQueryAssist();
+      } else if (event.key === 'Tab') {
+        event.preventDefault();
+        applyQuerySuggestion(state.querySuggestions[state.querySuggestionIndex] || state.querySuggestions[0]);
+      } else if (event.key === 'Escape') {
+        state.querySuggestions = [];
+        state.querySuggestionIndex = -1;
+        renderQueryAssist();
+      }
+      });
+    };
+    bindQueryControl(els.queryInput);
+    bindQueryControl(els.queryEditor);
+    for (const button of els.queryModeButtons || []) {
+      button.addEventListener('click', () => {
+        const previous = activeQueryControl();
+        syncQueryFromControl(previous);
+        setQueryMode(button.dataset.queryMode);
+        activeQueryControl()?.focus();
+      });
+    }
+    els.queryAutocomplete?.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      const button = event.target.closest('.query-suggestion');
+      if (!button) return;
+      const index = Number.parseInt(button.dataset.index, 10);
+      applyQuerySuggestion(state.querySuggestions[index]);
     });
     document.getElementById('clearButton').addEventListener('click', async () => {
       await applyQuery('');
@@ -1176,8 +1404,8 @@ export function createListingsViewer() {
     els.queryFieldSelect.addEventListener('change', updateQueryOperatorOptions);
     document.getElementById('addClauseButton').addEventListener('click', addQueryClause);
     document.getElementById('wrapQueryButton').addEventListener('click', () => {
-      const current = els.queryInput.value.trim();
-      if (current) els.queryInput.value = '(' + current + ')';
+      const current = getQueryControlValue().trim();
+      if (current) setQueryControlValue('(' + current + ')');
     });
     for (const button of document.querySelectorAll('.example-query')) {
       button.addEventListener('click', async () => {
