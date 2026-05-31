@@ -1363,13 +1363,14 @@ button:not(:disabled):hover,
   box-sizing: border-box;
   max-width: 100%;
   min-width: 0;
-  gap: 8px;
+  gap: 4px;
   overflow: hidden;
-  padding: 5px 8px;
+  padding: 4px 6px;
 }
 .tabulator .tabulator-footer .tabulator-page-counter {
   flex: 0 1 auto;
   min-width: 0;
+  max-width: 34%;
   overflow: hidden;
   color: var(--muted);
   font-weight: 500;
@@ -1387,8 +1388,8 @@ button:not(:disabled):hover,
 }
 .tabulator .tabulator-footer .tabulator-pages {
   display: inline-flex;
-  gap: 2px;
-  margin: 0 5px;
+  gap: 1px;
+  margin: 0 3px;
   vertical-align: middle;
 }
 .tabulator .tabulator-footer .tabulator-page,
@@ -1400,9 +1401,17 @@ button:not(:disabled):hover,
   font-size: 12px;
   font-weight: 500;
 }
+.tabulator .tabulator-footer .tabulator-page-size {
+  width: auto;
+  min-width: 3.9rem;
+  max-width: 4.8rem;
+  margin: 0 3px;
+  padding: 2px 18px 2px 5px;
+}
 .tabulator .tabulator-footer .tabulator-page {
   margin: 0;
-  padding: 2px 6px;
+  min-width: 1.55rem;
+  padding: 2px 5px;
 }
 .tabulator .tabulator-footer .tabulator-page.active {
   color: var(--accent);

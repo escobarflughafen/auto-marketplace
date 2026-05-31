@@ -1,5 +1,5 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js?v=saved-query-menu-20260530';
+import { createListingsViewer } from './listings-viewer.js?v=query-source-routing-20260531';
 import {
   listingDisplayTitle,
   listingHasFetchedDetail,
@@ -9,7 +9,7 @@ import {
   mergeResolverStatuses,
 } from './listing-components.js?v=resolver-status-20260528';
 
-const listingsViewer = createListingsViewer();
+const listingsViewer = createListingsViewer({ routeQuerySource });
 
 const WORKFLOW_DRAFTS_STORAGE_KEY = 'marketplace-monitor-workflow-drafts';
 const WORKFLOW_SELECTION_STORAGE_KEY = 'marketplace-monitor-selected-workflow';
@@ -2358,6 +2358,47 @@ function renderSummarySkeleton() {
       + '<div class="skeleton-block skeleton-value"></div>'
     + '</div>'
   )).join('');
+}
+
+function writeQueryParam(query) {
+  const nextUrl = new URL(window.location.href);
+  const text = String(query || '').trim();
+  if (text) {
+    nextUrl.searchParams.set('q', text);
+  } else {
+    nextUrl.searchParams.delete('q');
+  }
+  const nextPath = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+  const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (nextPath !== currentPath) {
+    window.history.replaceState(null, '', nextPath);
+  }
+}
+
+function recommendationStatusFromQuery(query) {
+  const match = String(query || '').match(/\bstatus\s*(?:==|=~|:)\s*["']?(queued|all|saved|dismissed|cleared|ignored)["']?/i);
+  return match?.[1]?.toLowerCase() || '';
+}
+
+function routeForQuerySource(source) {
+  if (source === 'recommendations') return '/history/recommendations';
+  if (source === 'events') return '/review';
+  if (source === 'workers') return '/workers';
+  return '';
+}
+
+async function routeQuerySource(source, query) {
+  const route = routeForQuerySource(source);
+  if (!route) return false;
+  if (source === 'recommendations' && els.recommendationsStatusSelect) {
+    const status = recommendationStatusFromQuery(query);
+    if (status && Array.from(els.recommendationsStatusSelect.options).some((option) => option.value === status)) {
+      els.recommendationsStatusSelect.value = status;
+    }
+  }
+  await navigateToRoute(route);
+  writeQueryParam(query);
+  return true;
 }
 
 function renderSkeletonRows(rowCount, columnCount) {

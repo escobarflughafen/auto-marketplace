@@ -24,6 +24,7 @@ const SORT_BY_FIELD = {
 };
 
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
+const QUERY_SOURCES = new Set(['listings', 'events', 'workers', 'recommendations']);
 const SAVED_QUERY_STORAGE_KEY = 'marketplace-monitor-saved-queries';
 const DEFAULT_SAVED_QUERIES = [
   {
@@ -219,7 +220,13 @@ function quoteQueryValue(value) {
   return '"' + text.replace(/"/g, '\\"') + '"';
 }
 
-export function createListingsViewer() {
+function querySourceFromText(query) {
+  const firstStage = String(query || '').trim().split('|')[0]?.trim() || '';
+  const firstWord = firstStage.match(/^([A-Za-z_][\w]*)\b/)?.[1]?.toLowerCase() || '';
+  return QUERY_SOURCES.has(firstWord) ? firstWord : 'listings';
+}
+
+export function createListingsViewer(config = {}) {
   const state = {
     q: queryParamFromUrl(),
     limit: 50,
@@ -1438,8 +1445,21 @@ export function createListingsViewer() {
     renderResolveControls();
   }
 
-  async function applyQuery(query, options = {}) {
-    state.q = String(query || '').trim();
+  async function applyQuery(query, applyOptions = {}) {
+    const nextQuery = String(query || '').trim();
+    const querySource = querySourceFromText(nextQuery);
+    if (querySource !== 'listings' && typeof config.routeQuerySource === 'function') {
+      state.q = nextQuery;
+      setQueryControlValue(state.q);
+      syncSavedQuerySelect(state.q);
+      state.querySuggestions = [];
+      state.querySuggestionIndex = -1;
+      renderQueryAssist();
+      if (await config.routeQuerySource(querySource, state.q)) {
+        return;
+      }
+    }
+    state.q = nextQuery;
     setQueryControlValue(state.q);
     syncSavedQuerySelect(state.q);
     state.querySuggestions = [];
@@ -1447,7 +1467,7 @@ export function createListingsViewer() {
     renderQueryAssist();
     state.selectedSnapshotListingId = '';
     renderSnapshotPanel(null);
-    updateQueryParam(state.q, { replace: options.replace === true });
+    updateQueryParam(state.q, { replace: applyOptions.replace === true });
     document.dispatchEvent(new CustomEvent('marketplace-query-applied', {
       detail: { query: state.q },
     }));
