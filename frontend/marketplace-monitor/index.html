@@ -11,7 +11,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
-  <link rel="stylesheet" href="/app/styles.css?v=tabulator-footer-20260530">
+  <link rel="stylesheet" href="/app/styles.css?v=query-layout-clean-20260531">
 </head>
 <body>
   <div class="shell">
@@ -35,22 +35,23 @@
       <div class="workspace-row query-row">
         <form class="querybar" id="queryForm">
           <div class="query-input-shell">
-            <div class="query-mode-tabs" role="group" aria-label="Query input mode">
-              <button type="button" class="query-mode-button active" data-query-mode="editor">Editor</button>
-              <button type="button" class="query-mode-button" data-query-mode="line">Line</button>
-            </div>
             <div class="query-editor query-mode-pane active" data-query-pane="editor">
+              <button type="button" class="query-clear-button" id="clearButton" aria-label="Clear query">X</button>
               <pre class="query-highlight" id="queryHighlight" aria-hidden="true"></pre>
               <textarea id="queryEditor" rows="3" spellcheck="false" autocomplete="off" placeholder='listings | where title contains "pentax 67" and price >= 2000&#10;| sort by last_seen_at desc'></textarea>
             </div>
-            <input id="queryInput" class="query-mode-pane" data-query-pane="line" name="q" autocomplete="off" placeholder='status == pending and price >= 2000' hidden>
             <div class="query-autocomplete" id="queryAutocomplete" hidden></div>
           </div>
-          <button type="submit">Search</button>
-          <button type="button" class="secondary" id="clearButton">Clear</button>
         </form>
         <div class="tips query-diagnostics" id="queryDiagnostics">
-          Query examples: <code>listings | where status == "pending" | sort by rank asc</code> <code>status != done</code> <code>price >= 2000</code>
+          <div class="query-examples">
+            <label for="savedQuerySelect">Saved query</label>
+            <select id="savedQuerySelect" class="query-saved-select">
+              <option value="">Choose query</option>
+            </select>
+            <span class="query-assist-message" id="queryAssistMessage" aria-live="polite"></span>
+          </div>
+          <button type="submit" class="secondary query-action-button" form="queryForm">Search</button>
         </div>
       </div>
 
@@ -72,31 +73,6 @@
         <button type="button" class="subtab" data-listing-view="backlogQueueView">Backlog</button>
       </nav>
       <section class="listing-view active" id="queryResultsView">
-      <div class="query-tools">
-        <div class="card">
-          <div class="label">Query</div>
-          <div class="builder-row">
-            <select id="queryFieldSelect"></select>
-            <select id="queryOperatorSelect"></select>
-            <input id="queryValueInput" type="text" placeholder="Value">
-            <select id="queryJoinSelect">
-              <option value="and">AND</option>
-              <option value="or">OR</option>
-            </select>
-          </div>
-          <div class="builder-actions">
-            <button type="button" id="addClauseButton">Add Filter</button>
-            <button type="button" class="secondary" id="wrapQueryButton">Wrap</button>
-          </div>
-        </div>
-        <div class="card query-helper">
-          <div class="label">Saved Filters</div>
-          <button type="button" class="example-query" data-query='status == pending sort:rank'>Pending by rank</button>
-          <button type="button" class="example-query" data-query='status != done and source == search'>Search backlog</button>
-          <button type="button" class="example-query" data-query='title contains "pentax" and price >= 2000'>Pentax over 2000</button>
-        </div>
-      </div>
-
       <div class="listings-toolbar">
         <div class="segmented" id="listingStatusTools">
           <button type="button" class="secondary" data-query="">All</button>
@@ -657,6 +633,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="/app/app.js?v=lite-kql-20260530"></script>
+  <script type="module" src="/app/app.js?v=saved-query-menu-20260530"></script>
 </body>
 </html>

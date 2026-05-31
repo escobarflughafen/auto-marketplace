@@ -273,8 +273,9 @@ h1 {
   border: 0;
 }
 .querybar {
+  --query-action-width: 86px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   min-width: 0;
   border-bottom: 1px solid var(--line);
@@ -282,7 +283,7 @@ h1 {
 .query-input-shell {
   position: relative;
   min-width: 0;
-  border-right: 1px solid var(--line);
+  border-right: 0;
   background: #fff;
 }
 .querybar input,
@@ -323,6 +324,36 @@ h1 {
   min-height: 90px;
   overflow: hidden;
   background: #fff;
+}
+.query-clear-button {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 3;
+  display: grid;
+  place-items: start end;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 1;
+  text-align: right;
+}
+.querybar .query-clear-button {
+  border: 0;
+}
+button.query-clear-button:not(:disabled):hover,
+.query-clear-button:focus,
+.query-clear-button:focus-visible {
+  color: var(--ink);
+  background: transparent;
+  box-shadow: none;
+  outline: 0;
 }
 .query-highlight,
 .query-editor textarea {
@@ -392,7 +423,7 @@ h1 {
   z-index: 30;
   top: calc(100% + 2px);
   left: 0;
-  right: 0;
+  right: var(--query-action-width);
   max-height: 260px;
   overflow: auto;
   background: #fff;
@@ -518,8 +549,70 @@ button:not(:disabled):hover,
   margin: 0;
   padding: 7px 10px;
   font-size: 14px;
-  border-bottom: 1px solid var(--line);
   background: var(--fill);
+}
+.query-diagnostics {
+  --query-action-width: 86px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(var(--query-action-width), max-content);
+  justify-content: stretch;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+}
+.query-examples {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  border-right: 1px solid var(--line);
+}
+.query-examples label {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0 8px;
+  border-right: 1px solid var(--line);
+}
+.query-saved-select {
+  flex: 1 1 auto;
+  min-width: 120px;
+  max-width: none;
+  width: 100%;
+  height: 100%;
+  min-height: 30px;
+  padding: 0 24px 0 8px;
+  font-size: 12px;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+.query-assist-message {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+}
+.query-action-button {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 28px;
+  padding: 4px 16px;
+  color: #fff;
+  background: var(--ink);
+  font-size: 12px;
+  border-radius: 0;
+  border: 0;
 }
 .tips code {
   font-family: var(--mono);
@@ -667,48 +760,11 @@ button:not(:disabled):hover,
 .history-view.active {
   display: block;
 }
-.query-tools {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.55fr);
-  gap: 0;
-  margin: 0;
-  align-items: start;
-  border-bottom: 1px solid var(--line);
-}
-.query-tools .card {
-  border: 0;
-  border-right: 1px solid var(--line);
-}
-.query-tools .card:last-child {
-  border-right: 0;
-}
-.builder-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(96px, 140px) minmax(120px, 1fr) minmax(68px, 92px);
-  gap: 6px;
-}
 .builder-actions, .pager {
   display: flex;
   gap: 4px;
   margin-top: 8px;
   flex-wrap: wrap;
-}
-.query-helper {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  flex-wrap: wrap;
-  font-size: 13px;
-}
-.query-helper .label {
-  flex: 0 0 100%;
-}
-.query-helper button {
-  text-align: left;
-  color: var(--secondary-ink);
-  background: var(--secondary-bg);
-  border-color: var(--secondary-line);
-  padding: 5px 7px;
 }
 .results-meta {
   display: flex;
@@ -2385,7 +2441,7 @@ textarea {
   :root[data-theme="classic"] .theme-field {
     padding: 0 0 2px;
   }
-  .querybar, .query-tools, .builder-row, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-live-screen-grid, .worker-control-columns, .credential-grid, .settings-grid, .history-form, .history-form-section, .history-tool-grid, .recommendation-swipe-card { grid-template-columns: 1fr; }
+  .querybar, .ops-grid, .workflow-form, .snapshot-grid, .worker-status-grid, .worker-preview-grid, .worker-live-screen-grid, .worker-control-columns, .credential-grid, .settings-grid, .history-form, .history-form-section, .history-tool-grid, .recommendation-swipe-card { grid-template-columns: 1fr; }
   .recommendation-swipe-media {
     min-height: 260px;
   }
@@ -2445,11 +2501,12 @@ textarea {
     width: 100%;
   }
   .querybar {
-    grid-template-columns: minmax(0, 1fr) minmax(72px, auto) minmax(66px, auto);
+    grid-template-columns: minmax(0, 1fr);
   }
-  .tips {
-    overflow-x: auto;
+  .query-diagnostics {
+    grid-template-columns: minmax(0, 1fr) minmax(86px, max-content);
   }
+  .query-examples { width: 100%; }
   .worker-control-title {
     align-items: stretch;
     flex-direction: column;
@@ -2472,10 +2529,6 @@ textarea {
   }
   .worker-control-column:last-child {
     border-bottom: 0;
-  }
-  .query-tools .card {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
   }
   .process-header {
     align-items: stretch;
