@@ -72,7 +72,10 @@
 }
 
 * { box-sizing: border-box; }
-html { min-width: 0; }
+html {
+  min-width: 0;
+  background: #0d0015;
+}
 body {
   margin: 0;
   font-family: var(--sans);
@@ -80,13 +83,25 @@ body {
   background: var(--bg);
   overflow-x: auto;
 }
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  height: env(safe-area-inset-top, 0);
+  background: #0d0015;
+  pointer-events: none;
+}
 body.worker-inspector-open {
   overflow-x: auto;
 }
 .shell {
   width: min(1440px, 100%);
   margin: 0 auto;
-  padding: 0 18px 18px;
+  padding: env(safe-area-inset-top, 0) 18px 18px;
+  background: var(--bg);
 }
 .workspace-surface {
   margin-top: 12px;
