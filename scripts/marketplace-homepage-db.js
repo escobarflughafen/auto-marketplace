@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { listedAgoToUnixRange } = require('./marketplace-listed-time-normalizer');
 
 const DEFAULT_DB_PATH = path.join(
   process.cwd(),
@@ -84,6 +85,16 @@ function ensureSchema(db) {
       detail_location TEXT NOT NULL DEFAULT '',
       detail_condition TEXT NOT NULL DEFAULT '',
       detail_listed_ago TEXT NOT NULL DEFAULT '',
+      detail_listed_at_raw TEXT NOT NULL DEFAULT '',
+      detail_listed_at_earliest_unix INTEGER,
+      detail_listed_at_latest_unix INTEGER,
+      detail_listed_at_anchor_unix INTEGER,
+      detail_listed_at_language TEXT NOT NULL DEFAULT '',
+      detail_listed_at_unit TEXT NOT NULL DEFAULT '',
+      detail_listed_at_value INTEGER,
+      detail_listed_at_confidence TEXT NOT NULL DEFAULT '',
+      detail_listed_at_source TEXT NOT NULL DEFAULT '',
+      detail_listed_at_normalized_at TEXT NOT NULL DEFAULT '',
       detail_seller_name TEXT NOT NULL DEFAULT '',
       detail_json TEXT NOT NULL DEFAULT '{}',
       screenshot_path TEXT NOT NULL DEFAULT '',
@@ -93,6 +104,16 @@ function ensureSchema(db) {
 
   ensureColumn(db, 'homepage_listings', 'source', "TEXT NOT NULL DEFAULT 'homepage'");
   ensureColumn(db, 'homepage_listings', 'source_keyword', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_raw', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_earliest_unix', 'INTEGER');
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_latest_unix', 'INTEGER');
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_anchor_unix', 'INTEGER');
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_language', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_unit', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_value', 'INTEGER');
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_confidence', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_source', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'homepage_listings', 'detail_listed_at_normalized_at', "TEXT NOT NULL DEFAULT ''");
 
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_listings_href
@@ -132,6 +153,16 @@ function ensureSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_homepage_listings_completed
     ON homepage_listings (detail_completed_at DESC, last_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_listed_latest
+    ON homepage_listings (detail_listed_at_latest_unix DESC, last_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_status_listed_latest
+    ON homepage_listings (detail_status, detail_listed_at_latest_unix DESC);
   `);
 
   db.exec(`
@@ -999,6 +1030,102 @@ function getLatestListingEvent(db, listingId, options = {}) {
   `).get(...params) || null;
 }
 
+function unixSecondsFromIso(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+function writeListedTimeNormalization(db, listingId, listedAgo, anchorIso, range) {
+  const normalizedAt = range?.normalizedAt || new Date().toISOString();
+  const anchorUnix = range?.anchorUnix ?? unixSecondsFromIso(anchorIso);
+  db.prepare(`
+    UPDATE homepage_listings
+    SET
+      detail_listed_at_raw = ?,
+      detail_listed_at_earliest_unix = ?,
+      detail_listed_at_latest_unix = ?,
+      detail_listed_at_anchor_unix = ?,
+      detail_listed_at_language = ?,
+      detail_listed_at_unit = ?,
+      detail_listed_at_value = ?,
+      detail_listed_at_confidence = ?,
+      detail_listed_at_source = ?,
+      detail_listed_at_normalized_at = ?
+    WHERE listing_id = ?
+  `).run(
+    String(listedAgo || '').trim(),
+    range?.earliestUnix ?? null,
+    range?.latestUnix ?? null,
+    anchorUnix,
+    range?.language || '',
+    range?.unit || '',
+    range?.value ?? null,
+    range?.confidence || 'unparsed',
+    range?.source || 'detail_listed_ago:first_seen_at',
+    normalizedAt,
+    String(listingId),
+  );
+}
+
+function normalizeHomepageListingListedTime(db, listingId) {
+  const row = db.prepare(`
+    SELECT listing_id, detail_listed_ago, first_seen_at, last_seen_at
+    FROM homepage_listings
+    WHERE listing_id = ?
+  `).get(String(listingId));
+  if (!row) {
+    return { status: 'missing', listingId: String(listingId) };
+  }
+
+  const listedAgo = String(row.detail_listed_ago || '').trim();
+  if (!listedAgo) {
+    return { status: 'skipped', reason: 'empty_detail_listed_ago', listingId: row.listing_id };
+  }
+
+  const anchorIso = row.first_seen_at || row.last_seen_at || '';
+  const range = listedAgoToUnixRange(listedAgo, anchorIso);
+  writeListedTimeNormalization(db, row.listing_id, listedAgo, anchorIso, range);
+  return {
+    status: range ? 'normalized' : 'unparsed',
+    listingId: row.listing_id,
+    listedAgo,
+    range,
+  };
+}
+
+function normalizeHomepageListedTimeRanges(db, options = {}) {
+  const limit = Math.max(1, Math.min(Number.parseInt(options.limit, 10) || 1000, 10000));
+  const staleOnly = options.staleOnly !== false;
+  const staleSql = staleOnly
+    ? "AND (detail_listed_at_normalized_at = '' OR detail_listed_at_raw != detail_listed_ago)"
+    : '';
+  const rows = db.prepare(`
+    SELECT listing_id
+    FROM homepage_listings
+    WHERE LENGTH(TRIM(detail_listed_ago)) > 0
+      ${staleSql}
+    ORDER BY first_seen_at DESC
+    LIMIT ?
+  `).all(limit);
+
+  const summary = {
+    scanned: rows.length,
+    normalized: 0,
+    unparsed: 0,
+    skipped: 0,
+    missing: 0,
+  };
+
+  for (const row of rows) {
+    const result = normalizeHomepageListingListedTime(db, row.listing_id);
+    if (Object.prototype.hasOwnProperty.call(summary, result.status)) {
+      summary[result.status] += 1;
+    }
+  }
+
+  return summary;
+}
+
 function markHomepageListingProcessed(db, listingId, detailRecord) {
   const completedAt = new Date().toISOString();
   const detailJson = serializeJson(detailRecord);
@@ -1035,6 +1162,7 @@ function markHomepageListingProcessed(db, listingId, detailRecord) {
     listingId,
   );
 
+  normalizeHomepageListingListedTime(db, listingId);
   return getHomepageListing(db, listingId);
 }
 
@@ -1133,6 +1261,7 @@ function markHomepageListingInactive(db, listingId, status, detailRecord, reason
     listingId,
   );
 
+  normalizeHomepageListingListedTime(db, listingId);
   return getHomepageListing(db, listingId);
 }
 
@@ -3879,6 +4008,15 @@ function runDatabaseMaintenance(db, dbPath = DEFAULT_DB_PATH, options = {}) {
   const before = getDatabaseMaintenanceReport(db, dbPath);
   const actions = [];
 
+  if (options.normalizeListedAt) {
+    actions.push({
+      normalizeListedAt: normalizeHomepageListedTimeRanges(db, {
+        limit: options.normalizeListedAtLimit,
+        staleOnly: options.normalizeListedAtStaleOnly !== false,
+      }),
+    });
+  }
+
   if (options.optimize !== false) {
     db.exec('PRAGMA optimize;');
     actions.push('optimize');
@@ -3979,6 +4117,8 @@ module.exports = {
   listWorkerAuditEvents,
   getWorkerListingEventStats,
   getWorkerAuditEventStats,
+  normalizeHomepageListingListedTime,
+  normalizeHomepageListedTimeRanges,
   getDatabaseMaintenanceReport,
   runDatabaseMaintenance,
 };

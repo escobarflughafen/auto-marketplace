@@ -1,5 +1,5 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js?v=query-source-routing-20260531';
+import { createListingsViewer } from './listings-viewer.js?v=backlog-indexer-worker-20260531';
 import {
   listingDisplayTitle,
   listingHasFetchedDetail,
@@ -2254,6 +2254,7 @@ function summaryPollDelayMs() {
 function workerTypeLabel(value) {
   return value === 'resolver' ? 'Resolver'
     : value === 'collector' ? 'Collector'
+      : value === 'backlog_indexer' ? 'Backlog Indexer'
       : value || 'Worker';
 }
 
@@ -2268,6 +2269,10 @@ function workflowModeLabel(workflow) {
     return workflow.strategy === 'queue' ? 'Backlog Queue'
       : workflow.strategy === 'filtered' ? 'Selection / Filter'
         : workflow.label;
+  }
+  if (workflow.workerType === 'backlog_indexer') {
+    return workflow.strategy === 'resolved_metadata' ? 'Resolved Metadata'
+      : workflow.label;
   }
   return workflow.label;
 }

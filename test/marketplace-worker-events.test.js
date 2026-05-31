@@ -30,11 +30,13 @@ function createTempDbPath() {
   return path.join(tempDir, 'events.db');
 }
 
-test('worker model exposes two primary worker types with explicit strategies', () => {
-  assert.deepEqual(Object.values(WORKER_TYPES).sort(), ['collector', 'resolver']);
+test('worker model exposes primary worker types with explicit strategies', () => {
+  assert.deepEqual(Object.values(WORKER_TYPES).sort(), ['backlog_indexer', 'collector', 'resolver']);
   assert.deepEqual(WORKER_STRATEGIES.collector, ['feed', 'search', 'explorer']);
   assert.deepEqual(WORKER_STRATEGIES.resolver, ['queue', 'selected', 'filtered']);
+  assert.deepEqual(WORKER_STRATEGIES.backlog_indexer, ['resolved_metadata']);
   assert.equal(normalizeWorkerStrategy('collector', 'SEARCH'), 'search');
+  assert.equal(normalizeWorkerStrategy('backlog_indexer', 'RESOLVED_METADATA'), 'resolved_metadata');
   assert.throws(
     () => normalizeWorkerStrategy('resolver', 'explorer'),
     /Unknown resolver strategy: explorer/,
@@ -78,6 +80,19 @@ test('resolver strategy event list includes detail capture events and excludes c
   assert.ok(eventTypes.includes('detail_capture_failed'));
   assert.ok(!eventTypes.includes('collector_cycle_started'));
   assert.ok(!eventTypes.includes('listing_observed'));
+});
+
+test('backlog indexer event list includes metadata indexing events and excludes browser capture events', () => {
+  const eventTypes = listWorkerEventDefinitions({
+    workerType: 'backlog_indexer',
+    strategy: 'resolved_metadata',
+  }).map((definition) => definition.eventType);
+
+  assert.ok(eventTypes.includes('backlog_index_started'));
+  assert.ok(eventTypes.includes('backlog_index_completed'));
+  assert.ok(eventTypes.includes('worker_sleeping'));
+  assert.ok(!eventTypes.includes('detail_capture_started'));
+  assert.ok(!eventTypes.includes('browser_context_ready'));
 });
 
 test('event validation enforces worker type, strategy, and required payload keys', () => {
@@ -151,6 +166,16 @@ test('resolve queue event names are registered', () => {
     'resolve_queue_completed',
     'resolve_queue_failed',
     'resolve_queue_cleared',
+  ]) {
+    assert.ok(getWorkerEventDefinition(eventType), `${eventType} should be registered`);
+  }
+});
+
+test('backlog indexer event names are registered', () => {
+  for (const eventType of [
+    'backlog_index_started',
+    'backlog_index_completed',
+    'backlog_index_failed',
   ]) {
     assert.ok(getWorkerEventDefinition(eventType), `${eventType} should be registered`);
   }

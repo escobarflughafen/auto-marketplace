@@ -13,6 +13,8 @@ test('parseArgs reads maintenance flags', () => {
     '--no-optimize',
     '--analyze',
     '--vacuum',
+    '--normalize-listed-at',
+    '--normalize-listed-at-limit', '25',
     '--dry-run',
     '--json',
   ]);
@@ -22,6 +24,8 @@ test('parseArgs reads maintenance flags', () => {
   assert.equal(options.optimize, false);
   assert.equal(options.analyze, true);
   assert.equal(options.vacuum, true);
+  assert.equal(options.normalizeListedAt, true);
+  assert.equal(options.normalizeListedAtLimit, 25);
   assert.equal(options.dryRun, true);
   assert.equal(options.json, true);
 });

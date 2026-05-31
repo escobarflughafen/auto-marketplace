@@ -14,6 +14,14 @@ function readFlagValue(argv, index, flagName) {
   return value;
 }
 
+function parseIntegerFlag(value, flagName, minimum = 1) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < minimum) {
+    throw new Error(`Expected ${flagName} to be an integer >= ${minimum}`);
+  }
+  return parsed;
+}
+
 function parseArgs(argv) {
   const options = {
     dbPath: DEFAULT_DB_PATH,
@@ -21,6 +29,9 @@ function parseArgs(argv) {
     optimize: true,
     analyze: false,
     vacuum: false,
+    normalizeListedAt: false,
+    normalizeListedAtLimit: 1000,
+    normalizeListedAtStaleOnly: true,
     dryRun: false,
     json: false,
   };
@@ -49,6 +60,17 @@ function parseArgs(argv) {
         break;
       case '--vacuum':
         options.vacuum = true;
+        break;
+      case '--normalize-listed-at':
+        options.normalizeListedAt = true;
+        break;
+      case '--normalize-listed-at-limit':
+        options.normalizeListedAtLimit = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--normalize-listed-at-all':
+        options.normalizeListedAt = true;
+        options.normalizeListedAtStaleOnly = false;
         break;
       case '--dry-run':
         options.dryRun = true;

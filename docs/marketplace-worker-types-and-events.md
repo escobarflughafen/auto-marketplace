@@ -2,10 +2,11 @@
 
 ## Purpose
 
-The runtime should converge on two browser worker types:
+The runtime should converge on two browser worker types and one non-browser metadata worker:
 
 - `collector`
 - `resolver`
+- `backlog_indexer`
 
 Worker variants are strategies, not separate worker classes. This keeps browser launch, profile lease, auth/session handling, logging, command handling, and live event transport shared.
 
@@ -51,6 +52,21 @@ Resolver workers should emit:
 - detail capture events;
 - command lifecycle events when running under a dispatcher.
 
+### Backlog Indexer
+
+Backlog indexer workers compute derived metadata from already resolved listings. They do not open Facebook, do not need a browser profile, and should not participate in browser profile leasing.
+
+Strategies:
+
+- `resolved_metadata`: normalize and index post-resolution fields, starting with listed-time ranges derived from `detail_listed_ago`.
+
+Backlog indexer workers should emit:
+
+- workflow lifecycle events;
+- `backlog_index_started`;
+- `backlog_index_completed`;
+- `backlog_index_failed`.
+
 ## Event Scopes
 
 ### `workflow`
@@ -74,6 +90,9 @@ Examples:
 - `browser_context_closed`
 - `session_ready`
 - `auth_required`
+- `backlog_index_started`
+- `backlog_index_completed`
+- `backlog_index_failed`
 
 ### `listing`
 

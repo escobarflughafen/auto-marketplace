@@ -389,17 +389,34 @@ const WORKFLOWS = {
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
+  'backlog-indexer': {
+    label: 'Backlog Indexer',
+    script: 'marketplace:home:index',
+    workerType: 'backlog_indexer',
+    strategy: 'resolved_metadata',
+    fields: [
+      { id: 'limit', label: 'Batch size', kind: 'number', flag: '--limit', defaultValue: 250, min: 1 },
+      { id: 'pollIntervalSeconds', label: 'Poll interval seconds', kind: 'number', flag: '--poll-interval-seconds', defaultValue: 300, min: 1 },
+      { id: 'pollJitterMin', label: 'Poll jitter min', kind: 'number', flag: '--poll-jitter-min', defaultValue: 0.8, min: 0, step: 0.1 },
+      { id: 'pollJitterMax', label: 'Poll jitter max', kind: 'number', flag: '--poll-jitter-max', defaultValue: 1.2, min: 0, step: 0.1 },
+      { id: 'allRows', label: 'Re-index all resolved rows', kind: 'boolean', flag: '--all', defaultValue: false },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+      { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
+    ],
+  },
 };
 
 const WORKFLOW_CONCURRENCY_LIMITS = {
   collector: 1,
   resolver: 2,
+  backlog_indexer: 1,
   worker: 1,
 };
 const WORKFLOW_SCRIPTS_WITH_WORKER_ID = new Set([
   'marketplace:home:collect',
   'marketplace:search:explore',
   'marketplace:home:process',
+  'marketplace:home:index',
 ]);
 const COMMON_WORKER_SCREENSHOT_VALUE_FLAGS = new Set([
   '--worker-screenshot-format',

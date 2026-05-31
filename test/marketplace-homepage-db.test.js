@@ -12,6 +12,7 @@ const {
   normalizeKeyword,
   upsertHomepageListingWithStatus,
   upsertHomepageListing,
+  getHomepageListing,
   listBacklogCandidates,
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
@@ -61,6 +62,7 @@ const {
   listWorkerAuditEvents,
   getWorkerListingEventStats,
   getWorkerAuditEventStats,
+  normalizeHomepageListedTimeRanges,
   getDatabaseMaintenanceReport,
   runDatabaseMaintenance,
 } = require('../scripts/marketplace-homepage-db');
@@ -701,6 +703,83 @@ test('claimNextPendingHomepageListing can append start event in claim transactio
     const events = listWorkerListingEvents(db, 'workflow-run-claim', { category: 'started' });
     assert.equal(events.length, 1);
     assert.equal(events[0].workflow_run_id, 'workflow-run-claim');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('resolved listing updates normalize listed age into unix range fields', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'listed-time-1',
+      href: 'https://www.facebook.com/marketplace/item/7101/',
+      title: 'Listed time row',
+      text: 'CA$ 100 | Listed time row',
+      rank: 1,
+    }, {
+      seenAt: '2026-05-09T10:40:45.000Z',
+    });
+
+    const row = markHomepageListingProcessed(db, 'listed-time-1', {
+      title: 'Listed time row',
+      listingContent: {
+        price: 'CA$ 100',
+        listedAgo: '2天前',
+      },
+    });
+
+    assert.equal(row.detail_listed_ago, '2天前');
+    assert.equal(row.detail_listed_at_raw, '2天前');
+    assert.equal(row.detail_listed_at_language, 'zh');
+    assert.equal(row.detail_listed_at_unit, 'day');
+    assert.equal(row.detail_listed_at_value, 2);
+    assert.equal(row.detail_listed_at_confidence, 'range');
+    assert.equal(row.detail_listed_at_anchor_unix, Date.parse('2026-05-09T10:40:45.000Z') / 1000);
+    assert.equal(row.detail_listed_at_earliest_unix, Date.parse('2026-05-06T10:40:46.000Z') / 1000);
+    assert.equal(row.detail_listed_at_latest_unix, Date.parse('2026-05-07T10:40:45.000Z') / 1000);
+    assert.ok(row.detail_listed_at_normalized_at);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('maintenance can backfill stale listed age normalization', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'listed-time-backfill',
+      href: 'https://www.facebook.com/marketplace/item/7102/',
+      title: 'Backfill row',
+      text: 'CA$ 100 | Backfill row',
+      rank: 1,
+    }, {
+      seenAt: '2026-05-09T10:40:45.000Z',
+    });
+
+    db.prepare(`
+      UPDATE homepage_listings
+      SET detail_listed_ago = ?
+      WHERE listing_id = ?
+    `).run('卖房 Vancouver, BC 发布于超过 1 周前 发消息', 'listed-time-backfill');
+
+    const summary = normalizeHomepageListedTimeRanges(db, { limit: 10 });
+    const row = getHomepageListing(db, 'listed-time-backfill');
+
+    assert.deepEqual(summary, {
+      scanned: 1,
+      normalized: 1,
+      unparsed: 0,
+      skipped: 0,
+      missing: 0,
+    });
+    assert.equal(row.detail_listed_at_confidence, 'lower_bound_only');
+    assert.equal(row.detail_listed_at_earliest_unix, null);
+    assert.equal(row.detail_listed_at_latest_unix, Date.parse('2026-05-02T10:40:45.000Z') / 1000);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

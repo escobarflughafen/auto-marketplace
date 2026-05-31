@@ -25,6 +25,89 @@ const SORT_BY_FIELD = {
 
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
 const QUERY_SOURCES = new Set(['listings', 'events', 'workers', 'recommendations']);
+const TEXT_OPERATORS = ['contains', '!contains', '==', '!=', '=~', '!~', 'startswith', '!startswith', 'endswith', '!endswith', 'in', '!in'];
+const ENUM_OPERATORS = ['==', '!=', '=~', '!~', 'in', '!in'];
+const NUMBER_OPERATORS = ['==', '!=', '<', '<=', '>', '>=', 'between', 'in', '!in'];
+const DATE_OPERATORS = ['==', '!=', '<', '<=', '>', '>=', 'between'];
+const LOCAL_QUERY_SCHEMA = {
+  listings: {
+    label: 'Listings',
+    fields: [
+      { name: 'id', label: 'Listing ID', type: 'text', aliases: ['listing_id'], operators: TEXT_OPERATORS },
+      { name: 'status', label: 'Status', type: 'enum', aliases: ['detail_status', 'outcome'], values: ['pending', 'processing', 'done', 'error', 'sold', 'pending_sale'], operators: ENUM_OPERATORS },
+      { name: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search', 'manual'], operators: ENUM_OPERATORS },
+      { name: 'keyword', label: 'Source keyword', type: 'text', aliases: ['source_keyword'], operators: TEXT_OPERATORS },
+      { name: 'title', label: 'Title', type: 'text', aliases: ['card_title', 'detail_title'], operators: TEXT_OPERATORS },
+      { name: 'text', label: 'Card/detail text', type: 'text', aliases: ['card_text', 'detail_text', 'description'], operators: TEXT_OPERATORS },
+      { name: 'seller', label: 'Seller', type: 'text', aliases: ['detail_seller_name'], operators: TEXT_OPERATORS },
+      { name: 'location', label: 'Location', type: 'text', aliases: ['detail_location'], operators: TEXT_OPERATORS },
+      { name: 'condition', label: 'Condition', type: 'text', aliases: ['detail_condition'], operators: TEXT_OPERATORS },
+      { name: 'price', label: 'Price', type: 'number', operators: NUMBER_OPERATORS },
+      { name: 'rank', label: 'Rank', type: 'number', aliases: ['last_seen_rank'], operators: NUMBER_OPERATORS },
+      { name: 'attempts', label: 'Attempts', type: 'number', aliases: ['detail_attempts'], operators: NUMBER_OPERATORS },
+      { name: 'last_seen_at', label: 'Last seen', type: 'date', aliases: ['seen', 'recent'], operators: DATE_OPERATORS },
+      { name: 'first_seen_at', label: 'First seen', type: 'date', aliases: ['first_seen'], operators: DATE_OPERATORS },
+      { name: 'completed_at', label: 'Completed', type: 'date', aliases: ['completed', 'detail_completed_at'], operators: DATE_OPERATORS },
+    ],
+  },
+  recommendations: {
+    label: 'Recommendations',
+    fields: [
+      { name: 'status', label: 'Status', type: 'enum', values: ['queued', 'saved', 'dismissed', 'cleared', 'ignored'], operators: ENUM_OPERATORS },
+      { name: 'score', label: 'Score', type: 'number', operators: NUMBER_OPERATORS },
+      { name: 'created_at', label: 'Created', type: 'date', operators: DATE_OPERATORS },
+    ],
+  },
+  workers: {
+    label: 'Workers',
+    fields: [
+      { name: 'status', label: 'Status', type: 'enum', values: ['running', 'starting', 'stopping', 'lost', 'failed', 'completed'], operators: ENUM_OPERATORS },
+      { name: 'worker_type', label: 'Worker type', type: 'enum', values: ['collector', 'resolver', 'backlog_indexer'], operators: ENUM_OPERATORS },
+      { name: 'started_at', label: 'Started', type: 'date', operators: DATE_OPERATORS },
+    ],
+  },
+  events: {
+    label: 'Worker events',
+    fields: [
+      { name: 'worker_type', label: 'Worker type', type: 'enum', values: ['collector', 'resolver', 'backlog_indexer', 'recommendation', 'server'], operators: ENUM_OPERATORS },
+      { name: 'event_type', label: 'Event type', type: 'text', operators: TEXT_OPERATORS },
+      { name: 'created_at', label: 'Created', type: 'date', operators: DATE_OPERATORS },
+    ],
+  },
+};
+const LOCAL_STAGE_SUGGESTIONS = [
+  { label: 'where', kind: 'keyword', insertText: 'where ', detail: 'Filter rows', score: 100 },
+  { label: 'sort by', kind: 'keyword', insertText: 'sort by ', detail: 'Sort rows', score: 95 },
+  { label: 'take', kind: 'keyword', insertText: 'take 50', detail: 'Limit rows', score: 90 },
+  { label: 'skip', kind: 'keyword', insertText: 'skip ', detail: 'Offset rows', score: 70 },
+];
+const LOCAL_LOGICAL_SUGGESTIONS = [
+  { label: 'and', kind: 'keyword', insertText: 'and ', detail: 'Both conditions must match', score: 70 },
+  { label: 'or', kind: 'keyword', insertText: 'or ', detail: 'Either condition can match', score: 65 },
+];
+const LOCAL_SNIPPET_SUGGESTIONS = [
+  {
+    label: 'pending listings',
+    kind: 'snippet',
+    insertText: 'listings | where status == "pending" | sort by rank asc | take 50',
+    detail: 'Pending listings by rank',
+    score: 100,
+  },
+  {
+    label: 'price filter',
+    kind: 'snippet',
+    insertText: 'listings | where title contains "" and price <= 1200 | sort by last_seen_at desc | take 50',
+    detail: 'Title and max price',
+    score: 90,
+  },
+  {
+    label: 'saved recommendations',
+    kind: 'snippet',
+    insertText: 'recommendations | where status == "saved"',
+    detail: 'Trade & Match saved items',
+    score: 85,
+  },
+];
 const SAVED_QUERY_STORAGE_KEY = 'marketplace-monitor-saved-queries';
 const DEFAULT_SAVED_QUERIES = [
   {
@@ -226,6 +309,182 @@ function querySourceFromText(query) {
   return QUERY_SOURCES.has(firstWord) ? firstWord : 'listings';
 }
 
+function withQueryReplacement(suggestion, start, end) {
+  return { ...suggestion, replacementStart: start, replacementEnd: end };
+}
+
+function tokenizeQueryText(query) {
+  const pattern = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|(==|!=|<=|>=|=~|!~|\.\.|\||[(),<>])|\b(where|sort|by|take|skip|and|or|not|in|between|contains|startswith|endswith|has|asc|desc)\b|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*/gi;
+  const tokens = [];
+  for (const match of String(query || '').matchAll(pattern)) {
+    const text = match[0];
+    const lower = text.toLowerCase();
+    const start = match.index;
+    const end = start + text.length;
+    const type = text === '|' ? 'pipe'
+      : ['(', ')'].includes(text) ? 'paren'
+        : text === ',' ? 'comma'
+          : text.startsWith('"') || text.startsWith("'") ? 'string'
+            : /^-?\d/.test(text) ? 'number'
+              : ['==', '!=', '<=', '>=', '=~', '!~', '..', '<', '>'].includes(text) ? 'operator'
+                : 'identifier';
+    tokens.push({ text, lower, start, end, type });
+  }
+  return tokens;
+}
+
+function tokenAtQueryCursor(tokens, cursor) {
+  return tokens.find((token) => token.start <= cursor && cursor <= token.end) || null;
+}
+
+function tokenBeforeQueryCursor(tokens, cursor) {
+  return tokens.filter((token) => token.end <= cursor).at(-1) || null;
+}
+
+function queryTokenReplacementRange(query, tokens, cursor) {
+  const active = tokenAtQueryCursor(tokens, cursor);
+  if (active && !['pipe', 'paren', 'comma'].includes(active.type)) {
+    return { start: active.start, end: active.end, prefix: query.slice(active.start, cursor) };
+  }
+  return { start: cursor, end: cursor, prefix: '' };
+}
+
+function tokensSinceLastPipe(tokens, cursor) {
+  const before = tokens.filter((token) => token.start < cursor);
+  const lastPipeIndex = before.map((token) => token.type).lastIndexOf('pipe');
+  return lastPipeIndex >= 0 ? before.slice(lastPipeIndex + 1) : before;
+}
+
+function localFieldLookup(sourceName) {
+  const lookup = new Map();
+  for (const field of LOCAL_QUERY_SCHEMA[sourceName]?.fields || []) {
+    lookup.set(field.name.toLowerCase(), field);
+    for (const alias of field.aliases || []) {
+      lookup.set(String(alias).toLowerCase(), field);
+    }
+  }
+  return lookup;
+}
+
+function resolveLocalQueryField(sourceName, fieldName) {
+  return localFieldLookup(sourceName).get(String(fieldName || '').toLowerCase()) || null;
+}
+
+function localFieldSuggestions(sourceName, start, end) {
+  return (LOCAL_QUERY_SCHEMA[sourceName]?.fields || []).map((field) => withQueryReplacement({
+    label: field.name,
+    kind: 'field',
+    insertText: field.name,
+    detail: `${field.label} (${field.type})`,
+    fieldType: field.type,
+    score: field.type === 'enum' ? 95 : 85,
+  }, start, end));
+}
+
+function localSourceSuggestions(start, end) {
+  return Object.entries(LOCAL_QUERY_SCHEMA).map(([name, source]) => withQueryReplacement({
+    label: name,
+    kind: 'table',
+    insertText: `${name} | `,
+    detail: `${source.label} table`,
+    score: name === 'listings' ? 100 : 75,
+  }, start, end));
+}
+
+function filterLocalSuggestionsByPrefix(suggestions, prefix) {
+  const normalized = String(prefix || '').toLowerCase();
+  if (!normalized) return suggestions;
+  return suggestions
+    .filter((item) => item.label.toLowerCase().startsWith(normalized) || String(item.insertText || '').toLowerCase().startsWith(normalized))
+    .map((item) => ({ ...item, score: (item.score || 0) + 5 }));
+}
+
+function completeQueryLocally(input = {}) {
+  const query = String(input.query || '');
+  const cursor = Math.max(0, Math.min(Number.parseInt(input.cursor, 10) || query.length, query.length));
+  const tokens = tokenizeQueryText(query);
+  const hasPipeBeforeCursor = query.slice(0, cursor).includes('|');
+  const source = querySourceFromText(query) || input.source || 'listings';
+  const hasPipeline = tokens.some((token) => token.type === 'pipe') || QUERY_SOURCES.has(tokens[0]?.lower);
+  const range = queryTokenReplacementRange(query, tokens, cursor);
+  const active = tokenAtQueryCursor(tokens, cursor);
+  const previous = tokenBeforeQueryCursor(tokens, range.start);
+  const segmentTokens = hasPipeline
+    ? tokensSinceLastPipe(tokens, cursor)
+    : [{ lower: 'where', text: 'where', type: 'identifier', start: 0, end: 0 }, ...tokensSinceLastPipe(tokens, cursor)];
+  const stageToken = segmentTokens[0];
+  let suggestions = [];
+  const tablePosition = !hasPipeBeforeCursor && (
+    !query.slice(0, cursor).trim()
+    || (tokens.length <= 1 && (!active || active.type === 'identifier'))
+  );
+
+  if (tablePosition) {
+    suggestions.push(...localSourceSuggestions(range.start, range.end));
+    if (!range.prefix) {
+      suggestions.push(...LOCAL_SNIPPET_SUGGESTIONS.map((item) => withQueryReplacement(item, range.start, range.end)));
+    }
+  } else if (previous?.type === 'pipe' || (stageToken && stageToken.start >= range.start && segmentTokens.length <= 1)) {
+    suggestions.push(...LOCAL_STAGE_SUGGESTIONS.map((item) => withQueryReplacement(item, range.start, range.end)));
+  } else if (stageToken?.lower === 'where') {
+    const tokenBefore = tokenBeforeQueryCursor(tokens, range.start);
+    const twoBefore = tokens.filter((token) => token.end <= range.start).at(-2);
+    const maybeField = resolveLocalQueryField(source, tokenBefore?.text);
+    const maybePriorField = resolveLocalQueryField(source, twoBefore?.text);
+    if (maybeField && !maybeField.operators.includes(active?.lower)) {
+      suggestions.push(...maybeField.operators.map((operator) => withQueryReplacement({
+        label: operator,
+        kind: 'operator',
+        insertText: `${operator} `,
+        detail: `${maybeField.name} operator`,
+        score: 100,
+      }, range.start, range.end)));
+    } else if (maybePriorField && maybePriorField.values?.length && maybePriorField.operators.includes(tokenBefore?.lower)) {
+      suggestions.push(...maybePriorField.values.map((value) => withQueryReplacement({
+        label: value,
+        kind: 'value',
+        insertText: `"${value}"`,
+        detail: maybePriorField.name,
+        score: 100,
+      }, range.start, range.end)));
+    } else {
+      suggestions.push(...localFieldSuggestions(source, range.start, range.end));
+      suggestions.push(...LOCAL_LOGICAL_SUGGESTIONS.map((item) => withQueryReplacement(item, range.start, range.end)));
+    }
+  } else if (stageToken?.lower === 'sort' || stageToken?.lower === 'order') {
+    suggestions.push(...localFieldSuggestions(source, range.start, range.end).map((item) => ({
+      ...item,
+      kind: 'sort-field',
+      detail: `Sort by ${item.detail}`,
+    })));
+    suggestions.push(...['asc', 'desc'].map((direction) => withQueryReplacement({
+      label: direction,
+      kind: 'direction',
+      insertText: direction,
+      detail: 'Sort direction',
+      score: 75,
+    }, range.start, range.end)));
+  } else if (previous?.type === 'identifier' && QUERY_SOURCES.has(previous.lower)) {
+    suggestions.push(withQueryReplacement({ label: '|', kind: 'keyword', insertText: '| ', detail: 'Start query pipeline', score: 100 }, range.start, range.end));
+  }
+
+  suggestions = filterLocalSuggestionsByPrefix(suggestions, range.prefix)
+    .sort((left, right) => (right.score || 0) - (left.score || 0))
+    .slice(0, 12);
+  return {
+    suggestions,
+    diagnostics: [],
+    warnings: [],
+    context: {
+      source,
+      stage: stageToken?.lower || '',
+      replacementStart: range.start,
+      replacementEnd: range.end,
+      mode: 'local',
+    },
+  };
+}
+
 export function createListingsViewer(config = {}) {
   const state = {
     q: queryParamFromUrl(),
@@ -243,6 +502,7 @@ export function createListingsViewer(config = {}) {
     querySuggestions: [],
     querySuggestionIndex: -1,
     queryDiagnostics: [],
+    queryAssistMode: 'local',
     queryMode: 'editor',
     resolveQueueIds: [],
     resolveQueueItems: [],
@@ -673,8 +933,12 @@ export function createListingsViewer(config = {}) {
     if (els.queryDiagnostics) {
       const diagnosticsTarget = els.queryAssistMessage || els.queryDiagnostics.querySelector('.query-assist-message') || els.queryDiagnostics;
       const diagnostics = state.queryDiagnostics || [];
-      if (diagnostics.length) {
-        diagnosticsTarget.innerHTML = diagnostics.map((item) => (
+      const assistMode = state.queryAssistMode === 'remote-error'
+        ? [{ severity: 'warning', message: 'Local suggestions only; server autocomplete is unavailable.' }]
+        : [];
+      const messages = [...assistMode, ...diagnostics];
+      if (messages.length) {
+        diagnosticsTarget.innerHTML = messages.map((item) => (
           `<span class="query-diagnostic ${escapeHtml(item.severity || 'info')}">${escapeHtml(item.message)}</span>`
         )).join('');
       } else {
@@ -709,10 +973,27 @@ export function createListingsViewer(config = {}) {
     const nextCursor = start + insertText.length;
     control.focus();
     control.setSelectionRange(nextCursor, nextCursor);
-    state.querySuggestions = [];
-    state.querySuggestionIndex = -1;
+    renderLocalQueryCompletion(control);
+    scheduleQueryCompletion();
+  }
+
+  function renderLocalQueryCompletion(control = activeQueryControl()) {
+    if (!control) return;
+    const query = control.value;
+    const cursor = control.selectionStart ?? query.length;
+    const payload = completeQueryLocally({
+      source: querySourceFromText(query),
+      query,
+      cursor,
+    });
+    state.querySuggestions = payload.suggestions || [];
+    state.querySuggestionIndex = state.querySuggestions.length ? 0 : -1;
+    state.queryDiagnostics = [
+      ...(payload.diagnostics || []),
+      ...(payload.warnings || []).map((message) => ({ severity: 'warning', message })),
+    ];
+    state.queryAssistMode = 'local';
     renderQueryAssist();
-    scheduleQueryCompletion(80);
   }
 
   async function requestQueryCompletion() {
@@ -726,24 +1007,27 @@ export function createListingsViewer(config = {}) {
       const payload = await fetchJson('/api/query/complete', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ source: 'listings', query, cursor }),
+        body: JSON.stringify({ source: querySourceFromText(query), query, cursor }),
       });
       if (requestSeq !== state.queryCompletionSeq) return;
-      state.querySuggestions = payload.suggestions || [];
+      if ((payload.suggestions || []).length) {
+        state.querySuggestions = payload.suggestions || [];
+      }
       state.querySuggestionIndex = state.querySuggestions.length ? 0 : -1;
       state.queryDiagnostics = [
         ...(payload.diagnostics || []),
         ...(payload.warnings || []).map((message) => ({ severity: 'warning', message })),
       ];
+      state.queryAssistMode = 'remote';
       renderQueryAssist();
     } catch (_error) {
       if (requestSeq !== state.queryCompletionSeq) return;
-      state.querySuggestions = [];
+      state.queryAssistMode = 'remote-error';
       renderQueryAssist();
     }
   }
 
-  function scheduleQueryCompletion(delay = 160) {
+  function scheduleQueryCompletion(delay = 650) {
     if (state.queryCompletionTimer) {
       clearTimeout(state.queryCompletionTimer);
     }
@@ -1514,10 +1798,12 @@ export function createListingsViewer(config = {}) {
       if (!control) return;
       control.addEventListener('input', () => {
         syncQueryFromControl(control);
+        renderLocalQueryCompletion(control);
         scheduleQueryCompletion();
       });
       control.addEventListener('focus', () => {
-        scheduleQueryCompletion(60);
+        renderLocalQueryCompletion(control);
+        scheduleQueryCompletion();
       });
       control.addEventListener('blur', () => {
         setTimeout(() => {
