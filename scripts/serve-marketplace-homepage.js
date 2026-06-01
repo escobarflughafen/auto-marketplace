@@ -68,6 +68,9 @@ const {
   setActiveCredentialProfile,
   upsertCredentialProfile,
 } = require('./marketplace-profile-auth');
+const {
+  appendWorkerCommand,
+} = require('./marketplace-worker-command-channel');
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
@@ -404,19 +407,44 @@ const WORKFLOWS = {
       { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
     ],
   },
+  'profile-onboarder': {
+    label: 'Profile Onboarder',
+    script: 'marketplace:auth:profile-onboarder',
+    workerType: 'profile_onboarder',
+    strategy: 'guided_login',
+    fields: [
+      CREDENTIAL_PROFILE_FIELD,
+      {
+        id: 'browserMode',
+        label: 'Browser mode',
+        kind: 'choice',
+        defaultValue: 'headless',
+        options: [
+          { value: 'headless', label: 'Headless', args: ['--headless'] },
+          { value: 'headed', label: 'Headed', args: ['--headed'] },
+        ],
+      },
+      { id: 'loginTimeoutSeconds', label: 'Login timeout seconds', kind: 'number', flag: '--login-timeout-seconds', defaultValue: 900, min: 30 },
+      { id: 'pollSeconds', label: 'Poll seconds', kind: 'number', flag: '--poll-seconds', defaultValue: 3, min: 1 },
+    ],
+  },
 };
 
 const WORKFLOW_CONCURRENCY_LIMITS = {
-  collector: 1,
-  resolver: 2,
-  backlog_indexer: 1,
-  worker: 1,
+  'search-explore': 2,
+  'profile-onboarder': 1,
 };
+const WORKER_TYPE_CONCURRENCY_LIMITS = {
+  resolver: 2,
+};
+const BROWSER_WORKER_TYPES = new Set(['collector', 'resolver', 'profile_onboarder']);
+const EXCLUSIVE_BROWSER_WORKER_TYPES = new Set(['profile_onboarder']);
 const WORKFLOW_SCRIPTS_WITH_WORKER_ID = new Set([
   'marketplace:home:collect',
   'marketplace:search:explore',
   'marketplace:home:process',
   'marketplace:home:index',
+  'marketplace:auth:profile-onboarder',
 ]);
 const COMMON_WORKER_SCREENSHOT_VALUE_FLAGS = new Set([
   '--worker-screenshot-format',
@@ -466,8 +494,7 @@ function getCredentialProfilesForUi() {
   }
 }
 
-function credentialProfileOptions() {
-  const credentials = getCredentialProfilesForUi();
+function credentialProfileOptions(credentials = getCredentialProfilesForUi()) {
   const active = credentials.profiles.find((profile) => profile.id === credentials.activeProfileId);
   return [
     {
@@ -485,14 +512,40 @@ function credentialProfileOptions() {
   ];
 }
 
-function fieldsForWorkflow(workflow) {
+function fieldsForWorkflow(workflow, options = {}) {
   return (workflow.fields || []).map((field) => {
     if (field.id !== CREDENTIAL_PROFILE_FIELD.id) {
       return field;
     }
     return {
       ...field,
-      options: credentialProfileOptions(),
+      options: typeof options.credentialOptions === 'function'
+        ? options.credentialOptions()
+        : options.credentialOptions || credentialProfileOptions(),
+    };
+  });
+}
+
+function buildWorkflowDefinitions() {
+  let credentialOptionsCache = null;
+  const getCredentialOptions = () => {
+    if (!credentialOptionsCache) {
+      credentialOptionsCache = credentialProfileOptions();
+    }
+    return credentialOptionsCache;
+  };
+  return Object.entries(WORKFLOWS).map(([id, workflow]) => {
+    const fields = fieldsForWorkflow(workflow, {
+      credentialOptions: getCredentialOptions,
+    });
+    return {
+      id,
+      label: workflow.label,
+      script: workflow.script,
+      workerType: workflow.workerType || '',
+      strategy: workflow.strategy || '',
+      fields,
+      defaultArgs: buildDefaultArgsFromFields(fields),
     };
   });
 }
@@ -528,8 +581,32 @@ function workflowTypeForId(workflowId) {
   return WORKFLOWS[workflowId]?.workerType || 'worker';
 }
 
-function workflowConcurrencyLimit(workerType) {
-  return WORKFLOW_CONCURRENCY_LIMITS[workerType] || WORKFLOW_CONCURRENCY_LIMITS.worker;
+function workflowConcurrencyLimit(workflowId, workerType) {
+  if (Object.prototype.hasOwnProperty.call(WORKFLOW_CONCURRENCY_LIMITS, workflowId)) {
+    return WORKFLOW_CONCURRENCY_LIMITS[workflowId];
+  }
+  if (Object.prototype.hasOwnProperty.call(WORKER_TYPE_CONCURRENCY_LIMITS, workerType)) {
+    return WORKER_TYPE_CONCURRENCY_LIMITS[workerType];
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function workflowConcurrencyScope(workflowId, workerType) {
+  if (Object.prototype.hasOwnProperty.call(WORKFLOW_CONCURRENCY_LIMITS, workflowId)) {
+    return 'workflow';
+  }
+  if (Object.prototype.hasOwnProperty.call(WORKER_TYPE_CONCURRENCY_LIMITS, workerType)) {
+    return 'workerType';
+  }
+  return 'none';
+}
+
+function isBrowserWorkerType(workerType) {
+  return BROWSER_WORKER_TYPES.has(String(workerType || ''));
+}
+
+function isExclusiveBrowserWorkerType(workerType) {
+  return EXCLUSIVE_BROWSER_WORKER_TYPES.has(String(workerType || ''));
 }
 
 function isManagedStatusActive(status) {
@@ -782,11 +859,16 @@ function reconcileWorkflowRuns(db, options = {}) {
     }
 
     if (active && !alive) {
+      const nextStatus = run.status === 'stopping' ? 'terminated' : 'lost';
       updateWorkflowRun(db, run.run_id, {
-        status: run.status === 'stopping' ? 'terminated' : 'lost',
+        status: nextStatus,
         exitedAt: now,
         osCheckedAt: now,
         osAlive: false,
+        logs: [
+          ...(run.logs || []),
+          `[${now}] workflow_reconciled status=${nextStatus} reason=process_missing previous_status=${run.status || ''} pid=${run.pid || ''}`,
+        ],
       });
     } else {
       updateWorkflowRun(db, run.run_id, {
@@ -1262,10 +1344,31 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
 
   const running = getRunningManagedProcesses(db);
   const workerType = workflow.workerType || 'worker';
-  const limit = workflowConcurrencyLimit(workerType);
-  const runningForType = running.filter((record) => (record.workerType || workflowTypeForId(record.workflowId)) === workerType);
-  if (runningForType.length >= limit) {
-    const error = new Error(`${workerType} worker limit reached: ${runningForType.length}/${limit} running`);
+  const limit = workflowConcurrencyLimit(workflowId, workerType);
+  const limitScope = workflowConcurrencyScope(workflowId, workerType);
+  const runningForLimit = limitScope === 'workflow'
+    ? running.filter((record) => record.workflowId === workflowId)
+    : limitScope === 'workerType'
+      ? running.filter((record) => (record.workerType || workflowTypeForId(record.workflowId)) === workerType)
+      : [];
+  if (Number.isFinite(limit) && runningForLimit.length >= limit) {
+    const limitLabel = limitScope === 'workflow' ? workflow.label : `${workerType} worker`;
+    const error = new Error(`${limitLabel} limit reached: ${runningForLimit.length}/${limit} running`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const browserConflict = running.find((record) => {
+    const runningWorkerType = record.workerType || workflowTypeForId(record.workflowId);
+    if (!isBrowserWorkerType(workerType) || !isBrowserWorkerType(runningWorkerType)) {
+      return false;
+    }
+    return isExclusiveBrowserWorkerType(workerType) || isExclusiveBrowserWorkerType(runningWorkerType);
+  });
+  if (browserConflict) {
+    const error = new Error(
+      `Interactive browser worker conflict: ${browserConflict.label || browserConflict.workflowId || browserConflict.id}. `
+      + 'Profile onboarder needs exclusive browser access; stop it or wait until it finishes before starting another browser worker.',
+    );
     error.statusCode = 409;
     throw error;
   }
@@ -2076,8 +2179,8 @@ function enrichEventPaths(event) {
   if (!event) {
     return null;
   }
-  const screenshotPath = event?.screenshot_path || event?.listing?.screenshot_path || '';
-  const snapshotPath = event?.snapshot_path || event?.listing?.snapshot_path || '';
+  const screenshotPath = event?.screenshot_path || event?.content?.screenshotPath || event?.content?.screenshot_path || event?.listing?.screenshot_path || '';
+  const snapshotPath = event?.snapshot_path || event?.content?.snapshotPath || event?.content?.snapshot_path || event?.listing?.snapshot_path || '';
   return {
     ...event,
     screenshotPath,
@@ -2801,6 +2904,13 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/workflows/config' && request.method === 'GET') {
+      writeJson(response, 200, {
+        workflows: buildWorkflowDefinitions(),
+      });
+      return;
+    }
+
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
       const reconcile = requestUrl.searchParams.get('reconcile') !== '0';
       const includeStats = requestUrl.searchParams.get('stats') !== '0';
@@ -2808,15 +2918,7 @@ function createServer(options) {
         refreshResolveQueueRunStatuses(db);
       }
       writeJson(response, 200, {
-        workflows: Object.entries(WORKFLOWS).map(([id, workflow]) => ({
-          id,
-          label: workflow.label,
-          script: workflow.script,
-          workerType: workflow.workerType || '',
-          strategy: workflow.strategy || '',
-          fields: fieldsForWorkflow(workflow),
-          defaultArgs: buildDefaultArgsFromFields(fieldsForWorkflow(workflow)),
-        })),
+        workflows: buildWorkflowDefinitions(),
         processes: access.canWrite
           ? listManagedProcesses(db, { reconcile, includeStats })
           : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats }),
@@ -2930,6 +3032,40 @@ function createServer(options) {
       return;
     }
 
+    const workerCommandsMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)\/commands$/);
+    if (workerCommandsMatch && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const workerId = decodeURIComponent(workerCommandsMatch[1]);
+        const run = getWorkflowRun(db, workerId);
+        if (!run) {
+          writeJson(response, 404, { error: `Unknown workflow run: ${workerId}` });
+          return;
+        }
+        const body = await readRequestJson(request);
+        const command = await appendWorkerCommand(workerId, {
+          type: body.type || body.command || body.action,
+          payload: body.payload || {},
+          actor: 'viewer',
+        });
+        writeJson(response, 202, {
+          ok: true,
+          command: {
+            commandId: command.commandId,
+            commandAt: command.commandAt,
+            type: command.type,
+            actor: command.actor,
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/workflows/start' && request.method === 'POST') {
       if (!access.canWrite) {
         writeAuthError(response, access);
@@ -3020,4 +3156,8 @@ module.exports = {
   validateWorkflowStartArgs,
   buildDefaultArgsFromFields,
   fieldsForWorkflow,
+  workflowConcurrencyLimit,
+  workflowConcurrencyScope,
+  isBrowserWorkerType,
+  isExclusiveBrowserWorkerType,
 };

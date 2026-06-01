@@ -2255,6 +2255,7 @@ function workerTypeLabel(value) {
   return value === 'resolver' ? 'Resolver'
     : value === 'collector' ? 'Collector'
       : value === 'backlog_indexer' ? 'Backlog Indexer'
+        : value === 'profile_onboarder' ? 'Profile Onboarder'
       : value || 'Worker';
 }
 
@@ -2274,11 +2275,20 @@ function workflowModeLabel(workflow) {
     return workflow.strategy === 'resolved_metadata' ? 'Resolved Metadata'
       : workflow.label;
   }
+  if (workflow.workerType === 'profile_onboarder') {
+    return workflow.strategy === 'guided_login' ? 'Guided Login'
+      : workflow.label;
+  }
   return workflow.label;
 }
 
 function workflowWorkerTypes() {
-  return [...new Set(store.workflows.map((workflow) => workflow.workerType || 'worker'))];
+  const preferred = ['collector', 'resolver', 'profile_onboarder', 'backlog_indexer'];
+  const available = new Set(store.workflows.map((workflow) => workflow.workerType || 'worker'));
+  return [
+    ...preferred.filter((workerType) => available.has(workerType)),
+    ...[...available].filter((workerType) => !preferred.includes(workerType)).sort(),
+  ];
 }
 
 function workflowsForType(workerType) {
@@ -2432,7 +2442,7 @@ function renderWorkerControlSkeleton() {
   ].map(([label, content]) => `<tr><th>${html(label)}</th><td>${content}</td></tr>`).join('');
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker Setup</div><div class="process-meta">Preparing worker modes.</div></div>'
-    + '<div class="segmented worker-type-tabs"><button type="button" class="secondary active" disabled>Collector</button><button type="button" class="secondary" disabled>Resolver</button></div>'
+    + '<label class="worker-type-select-label">Worker Type<select disabled><option>Collector</option><option>Resolver</option><option>Backlog Indexer</option></select></label>'
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
@@ -2756,15 +2766,17 @@ function renderWorkerControl() {
   const draft = ensureWorkflowDraft(workflow);
   const rows = renderWorkflowRows(workflow, draft);
   const selectedType = workflow.workerType || 'worker';
-  const typeButtons = workflowWorkerTypes().map((workerType) => (
-    `<button type="button" class="secondary${workerType === selectedType ? ' active' : ''}" data-worker-type="${html(workerType)}">${html(workerTypeLabel(workerType))}</button>`
+  const typeOptions = workflowWorkerTypes().map((workerType) => (
+    `<option value="${html(workerType)}"${workerType === selectedType ? ' selected' : ''}>${html(workerTypeLabel(workerType))}</option>`
   )).join('');
   const modeOptions = workflowsForType(selectedType).map((item) => (
     `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(workflowModeLabel(item))}</option>`
   )).join('');
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker Setup</div><div class="process-meta">Saved per worker mode on this browser.</div></div>'
-    + `<div class="segmented worker-type-tabs">${typeButtons}</div>`
+    + '<label class="worker-type-select-label" for="workerControlTypeSelect">Worker Type'
+    + `<select id="workerControlTypeSelect">${typeOptions}</select>`
+    + '</label>'
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
@@ -2791,11 +2803,10 @@ function renderWorkerControl() {
     + '</section>'
     + '</div>';
 
-  els.workerControl.querySelectorAll('[data-worker-type]').forEach((button) => {
-    button.addEventListener('click', () => {
-      selectWorkerType(button.dataset.workerType);
-      renderWorkflowForm();
-    });
+  const workerTypeSelect = document.getElementById('workerControlTypeSelect');
+  workerTypeSelect?.addEventListener('change', () => {
+    selectWorkerType(workerTypeSelect.value);
+    renderWorkflowForm();
   });
   const workflowSelect = document.getElementById('workerControlWorkflowSelect');
   workflowSelect.addEventListener('change', () => {
@@ -3167,6 +3178,41 @@ function renderProcesses(options = {}) {
     renderProcesses({ preserveScroll: true });
     loadWorkerDetail({ preserveScroll: true }).catch(() => {});
   });
+  const commandStatus = document.getElementById('profileOnboarderCommandStatus');
+  const activeWorkerId = selectedProcess?.id || '';
+  const submitProfileCommand = async (type, payload = {}) => {
+    if (!activeWorkerId) return;
+    if (commandStatus) commandStatus.textContent = 'Sending command...';
+    try {
+      await sendWorkerCommand(activeWorkerId, type, payload);
+      if (commandStatus) commandStatus.textContent = 'Command sent.';
+      await loadWorkerDetail({ preserveScroll: true });
+    } catch (error) {
+      if (commandStatus) commandStatus.textContent = error.message || 'Command failed.';
+      throw error;
+    }
+  };
+  document.getElementById('profileOnboarderSubmitCode')?.addEventListener('click', () => {
+    const code = document.getElementById('profileOnboarderCodeInput')?.value || '';
+    submitProfileCommand('submit_verification_code', { code }).catch((error) => {
+      alert(error.message || 'Verification code could not be submitted.');
+    });
+  });
+  document.getElementById('profileOnboarderContinue')?.addEventListener('click', () => {
+    submitProfileCommand('continue_after_external_approval').catch((error) => {
+      alert(error.message || 'Continue command could not be sent.');
+    });
+  });
+  document.getElementById('profileOnboarderRetry')?.addEventListener('click', () => {
+    submitProfileCommand('retry_credentials').catch((error) => {
+      alert(error.message || 'Retry command could not be sent.');
+    });
+  });
+  document.getElementById('profileOnboarderCancel')?.addEventListener('click', () => {
+    submitProfileCommand('cancel').catch((error) => {
+      alert(error.message || 'Cancel command could not be sent.');
+    });
+  });
   for (const button of document.querySelectorAll('.stop-button')) {
     button.addEventListener('click', async () => {
       button.disabled = true;
@@ -3294,6 +3340,52 @@ function renderWorkerScreenshotHistory(selectedProcess) {
     + '</div>';
 }
 
+function latestProfileOnboarderPrompt(detailStats = {}) {
+  const event = detailStats.latestEvent || null;
+  const content = event?.content || {};
+  return {
+    eventType: event?.event_type || '',
+    status: event?.status || '',
+    step: content.step || '',
+    prompt: content.prompt || eventReason(event) || 'Use the controls below when the profile onboarder asks for input.',
+    acceptedInputs: Array.isArray(content.acceptedInputs) ? content.acceptedInputs : [],
+  };
+}
+
+function renderProfileOnboarderControls(selectedProcess, detailStats = {}) {
+  if (selectedProcess?.workerType !== 'profile_onboarder') {
+    return '';
+  }
+  const prompt = latestProfileOnboarderPrompt(detailStats);
+  const acceptsCode = prompt.acceptedInputs.includes('submit_verification_code')
+    || prompt.eventType === 'verification_required';
+  const acceptsContinue = prompt.acceptedInputs.includes('continue_after_external_approval')
+    || prompt.eventType === 'external_approval_required';
+  const running = ['starting', 'running', 'stopping', 'stop_failed'].includes(selectedProcess.status || '');
+  return '<div class="profile-onboarder-controls">'
+    + '<div class="profile-onboarder-prompt">'
+    + `<div class="label">Interactive Login</div><div>${html(prompt.prompt)}</div>`
+    + `<div class="process-meta">Step: ${html(prompt.step || prompt.eventType || 'waiting')} / Status: ${html(prompt.status || selectedProcess.status || '')}</div>`
+    + '</div>'
+    + '<div class="profile-onboarder-command-row">'
+    + `<input id="profileOnboarderCodeInput" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Verification code"${acceptsCode && running ? '' : ' disabled'}>`
+    + `<button type="button" id="profileOnboarderSubmitCode" class="secondary"${acceptsCode && running ? '' : ' disabled'}>Submit Code</button>`
+    + `<button type="button" id="profileOnboarderContinue" class="secondary"${acceptsContinue && running ? '' : ' disabled'}>Continue</button>`
+    + `<button type="button" id="profileOnboarderRetry" class="secondary"${running ? '' : ' disabled'}>Retry Login</button>`
+    + `<button type="button" id="profileOnboarderCancel" class="danger"${running ? '' : ' disabled'}>Cancel</button>`
+    + '</div>'
+    + '<div class="process-meta" id="profileOnboarderCommandStatus"></div>'
+    + '</div>';
+}
+
+async function sendWorkerCommand(workerId, type, payload = {}) {
+  return await fetchJson(`/api/workflows/${encodeURIComponent(workerId)}/commands`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type, payload }),
+  });
+}
+
 function workerEventTypeOptions(detailStats = {}) {
   return (detailStats.eventTypes || [])
     .map((item) => ({
@@ -3381,6 +3473,10 @@ function renderWorkerDetail(selectedProcess) {
       + '</div>'),
     workerDetailSectionRow('Live Screen', renderWorkerScreenshotHistory(selectedProcess)),
   ];
+  const interactiveControls = renderProfileOnboarderControls(selectedProcess, detailStats);
+  if (interactiveControls) {
+    detailRows.push(workerDetailSectionRow('Interactive', interactiveControls));
+  }
 
   if (previewEvent) {
     const previewRows = tableRows([
@@ -3549,8 +3645,13 @@ async function loadSummary() {
 async function loadWorkflows(options = {}) {
   const background = options.background === true;
   const light = options.light === true;
+  const configOnly = options.configOnly === true;
   const requestSeq = ++store.workflowRequestSeq;
-  const payload = await fetchJson(light ? '/api/workflows?reconcile=0&stats=0' : '/api/workflows');
+  const payload = await fetchJson(configOnly
+    ? '/api/workflows/config'
+    : light
+      ? '/api/workflows?reconcile=0&stats=0'
+      : '/api/workflows');
   if (requestSeq !== store.workflowRequestSeq) return;
   const nextWorkflows = payload.workflows || [];
   const nextWorkflowSignature = JSON.stringify(nextWorkflows.map((workflow) => ({
@@ -3566,13 +3667,16 @@ async function loadWorkflows(options = {}) {
   store.workflows = nextWorkflows;
   store.workflowsLoaded = true;
   store.workflowSignature = nextWorkflowSignature;
-  store.processes = payload.processes || [];
-  store.processSignature = nextProcessSignature;
   for (const workflow of store.workflows) ensureWorkflowDraft(workflow);
   if (!background && (workflowDefinitionsChanged || !els.workerControl.innerHTML.trim())) {
     renderWorkflowOptions();
     renderWorkflowForm();
   }
+  if (configOnly) {
+    return;
+  }
+  store.processes = payload.processes || [];
+  store.processSignature = nextProcessSignature;
   const shouldRenderWorkerPanel = !background || isPanelActive('opsPanel');
   if (shouldRenderWorkerPanel && (!background || (!store.selectedProcessId && processDefinitionsChanged))) {
     renderProcesses({ preserveScroll: background });
@@ -3726,7 +3830,10 @@ async function runRouteLoader(routePath) {
       await loadPurchaseHistory();
     }
   } else if (route.panel === 'opsPanel') {
-    await loadWorkflows({ light: true });
+    await loadWorkflows({ configOnly: true });
+    loadWorkflows({ light: true, background: true }).catch((error) => {
+      console.warn('Initial worker status load failed:', error.message || error);
+    });
     scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
   } else if (route.panel === 'settingsPanel') {
     await loadCredentials({ render: false });

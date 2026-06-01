@@ -18,6 +18,8 @@ const {
   markHomepageListingProcessed,
   markHomepageListingFailed,
   releaseHomepageListingClaim,
+  listStaleProcessingHomepageListings,
+  recoverStaleProcessingHomepageListings,
   markHomepageListingInactive,
   getHomepageListingCounts,
   createPurchaseHistoryDocument,
@@ -1280,6 +1282,61 @@ test('releaseHomepageListingClaim returns interrupted claims to backlog without 
     assert.equal(released.listing.claimed_by, '');
     assert.equal(released.listing.detail_attempts, 0);
     assert.equal(released.listing.detail_last_error, 'worker_shutdown:SIGTERM');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('stale processing recovery lists and releases old claims with audit events', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'stale-processing-1',
+      href: 'https://www.facebook.com/marketplace/item/9101/',
+      title: 'Stale processing row',
+      text: 'Card text',
+      rank: 1,
+    });
+    claimNextPendingHomepageListing(db, {
+      workerId: 'stale-worker',
+      claimedAt: '2026-05-11T01:00:00.000Z',
+    });
+
+    const fresh = listStaleProcessingHomepageListings(db, {
+      now: '2026-05-11T01:10:00.000Z',
+      staleAfterSeconds: 1800,
+    });
+    assert.equal(fresh.length, 0);
+
+    const dryRun = recoverStaleProcessingHomepageListings(db, {
+      dryRun: true,
+      now: '2026-05-11T02:00:00.000Z',
+      staleAfterSeconds: 1800,
+    });
+    assert.equal(dryRun.scanned, 1);
+    assert.equal(dryRun.recovered, 0);
+    assert.equal(getHomepageListing(db, 'stale-processing-1').detail_status, 'processing');
+
+    const recovered = recoverStaleProcessingHomepageListings(db, {
+      dryRun: false,
+      now: '2026-05-11T02:00:00.000Z',
+      staleAfterSeconds: 1800,
+      reason: 'alpha_stale_claim_recovery',
+    });
+    assert.equal(recovered.scanned, 1);
+    assert.equal(recovered.recovered, 1);
+
+    const listing = getHomepageListing(db, 'stale-processing-1');
+    assert.equal(listing.detail_status, 'pending');
+    assert.equal(listing.claimed_by, '');
+    assert.equal(listing.detail_attempts, 0);
+    assert.equal(listing.detail_last_error, 'alpha_stale_claim_recovery');
+
+    const events = getListingEvents(db, 'stale-processing-1');
+    assert.equal(events[0].event_type, 'detail_capture_interrupted');
+    assert.equal(events[0].status, 'interrupted');
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

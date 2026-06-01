@@ -13,14 +13,14 @@
   --warm: #9a6700;
   --bad: #ee352e;
   --good: #00933c;
-  --banner-bg: #0d0015;
+  --banner-bg: #000000;
   --banner-ink: #ffffff;
   --brand-bg: #ff6319;
   --button-bg: #0d0015;
   --button-ink: #ffffff;
   --button-hover-bg: #ffffff;
   --button-hover-ink: #0d0015;
-  --button-hover-shadow: inset 6px 0 0 #fccc0a;
+  --button-hover-shadow: inset 0 -3px 0 #fccc0a;
   --secondary-bg: #ffffff;
   --secondary-ink: #0d0015;
   --secondary-line: rgba(13, 0, 21, 0.5);
@@ -57,7 +57,7 @@
   --button-ink: #ffffff;
   --button-hover-bg: #0757ba;
   --button-hover-ink: #ffffff;
-  --button-hover-shadow: none;
+  --button-hover-shadow: inset 0 -3px 0 #0969da;
   --secondary-bg: transparent;
   --secondary-ink: #0969da;
   --secondary-line: transparent;
@@ -74,7 +74,7 @@
 * { box-sizing: border-box; }
 html {
   min-width: 0;
-  background: #0d0015;
+  background: #000000;
 }
 body {
   margin: 0;
@@ -91,7 +91,7 @@ body::before {
   right: 0;
   z-index: 1000;
   height: env(safe-area-inset-top, 0);
-  background: #0d0015;
+  background: #000000;
   pointer-events: none;
 }
 body.worker-inspector-open {
@@ -538,6 +538,7 @@ button:not(:disabled):hover,
 .button-link.compact:hover {
   background: var(--secondary-hover-bg);
   color: var(--secondary-hover-ink);
+  box-shadow: var(--button-hover-shadow);
 }
 .hero-home-button {
   width: 100%;
@@ -628,6 +629,15 @@ button:not(:disabled):hover,
   font-size: 12px;
   border-radius: 0;
   border: 0;
+}
+.query-action-button:not(:disabled):hover,
+.query-action-button:not(:disabled):active,
+.query-action-button.active,
+.query-action-button:focus-visible,
+.querybar:focus-within .query-action-button {
+  color: var(--ink);
+  background: #fff;
+  box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
 .tips code {
   font-family: var(--mono);
@@ -740,6 +750,9 @@ button:not(:disabled):hover,
   background: var(--button-bg);
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
+.tab:not(:disabled):hover {
+  box-shadow: inset 0 -3px 0 var(--accent-strong);
+}
 .panel { display: none; }
 .panel.active {
   display: block;
@@ -765,6 +778,9 @@ button:not(:disabled):hover,
 .subtab.active {
   color: var(--button-ink);
   background: var(--button-bg);
+  box-shadow: inset 0 -3px 0 var(--accent-strong);
+}
+.subtab:not(:disabled):hover {
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
 .listing-view,
@@ -1272,6 +1288,9 @@ button:not(:disabled):hover,
   background: var(--button-bg);
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
+.segmented button:not(:disabled):hover {
+  box-shadow: inset 0 -3px 0 var(--accent-strong);
+}
 .toolbar-spacer {
   flex: 1 1 auto;
 }
@@ -1574,6 +1593,26 @@ a:hover { text-decoration: underline; }
   border-bottom: 1px solid var(--line);
   background: var(--fill);
 }
+.worker-type-select-label {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.worker-type-select-label select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: none;
+  background: #fff;
+  border-color: var(--line);
+}
 .credential-manager {
   min-width: 0;
   max-width: 100%;
@@ -1715,6 +1754,24 @@ a:hover { text-decoration: underline; }
 .worker-command-tablewrap textarea {
   min-height: 142px;
   resize: vertical;
+}
+.profile-onboarder-controls {
+  display: grid;
+  gap: 8px;
+}
+.profile-onboarder-prompt {
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+}
+.profile-onboarder-command-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) repeat(4, max-content);
+  gap: 6px;
+  align-items: center;
+}
+.profile-onboarder-command-row input {
+  min-width: 0;
 }
 .workflow-form {
   display: grid;
@@ -2444,7 +2501,7 @@ textarea {
   }
 }
 @media (max-width: 800px) {
-  .shell { padding: 12px; }
+  .shell { padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px 12px; }
   .hero {
     grid-template-columns: minmax(0, 1fr);
     margin: -12px -12px 12px;
@@ -2537,6 +2594,9 @@ textarea {
   }
   .worker-control-actions {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+  .profile-onboarder-command-row {
     grid-template-columns: 1fr;
   }
   .worker-control-column {

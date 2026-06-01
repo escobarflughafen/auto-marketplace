@@ -62,14 +62,14 @@ const LOCAL_QUERY_SCHEMA = {
     label: 'Workers',
     fields: [
       { name: 'status', label: 'Status', type: 'enum', values: ['running', 'starting', 'stopping', 'lost', 'failed', 'completed'], operators: ENUM_OPERATORS },
-      { name: 'worker_type', label: 'Worker type', type: 'enum', values: ['collector', 'resolver', 'backlog_indexer'], operators: ENUM_OPERATORS },
+      { name: 'worker_type', label: 'Worker type', type: 'enum', values: ['collector', 'resolver', 'profile_onboarder', 'backlog_indexer'], operators: ENUM_OPERATORS },
       { name: 'started_at', label: 'Started', type: 'date', operators: DATE_OPERATORS },
     ],
   },
   events: {
     label: 'Worker events',
     fields: [
-      { name: 'worker_type', label: 'Worker type', type: 'enum', values: ['collector', 'resolver', 'backlog_indexer', 'recommendation', 'server'], operators: ENUM_OPERATORS },
+      { name: 'worker_type', label: 'Worker type', type: 'enum', values: ['collector', 'resolver', 'profile_onboarder', 'backlog_indexer', 'recommendation', 'server'], operators: ENUM_OPERATORS },
       { name: 'event_type', label: 'Event type', type: 'text', operators: TEXT_OPERATORS },
       { name: 'created_at', label: 'Created', type: 'date', operators: DATE_OPERATORS },
     ],

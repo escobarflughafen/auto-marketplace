@@ -14,7 +14,7 @@ Recent remote checks showed:
 - Source code deployed on the remote includes worker screenshot support and workflow-start argument validation.
 - Remote SQLite maintenance/checkpoint completed quickly.
 - Worker screenshot artifacts exist remotely.
-- No active workflow runs at the time of inspection.
+- Active browser workers can make the dashboard CPU-bound on the current 4-vCPU host.
 - Recent DB state had a large pending backlog and several stale processing rows.
 
 ## Issues
@@ -134,6 +134,33 @@ Recommended fix:
 - Add a deploy preflight that refuses source sync when the local tree is dirty, unless explicitly overridden.
 - Keep runtime sync separate from source-only deploys.
 
+### 7. Remote Runtime Sizing And Dashboard Stats Cost
+
+Severity: Medium
+
+Remote inspection on `10.10.20.3` showed the host becoming CPU-bound while active browser workers and the dashboard were running together:
+
+- current host shape: 4 vCPU, 7.7 GiB RAM;
+- load average around 20 during inspection;
+- memory and disk were not the immediate bottleneck;
+- `auto-browser` was using roughly 110-125% CPU;
+- `/api/listings?limit=50` could return quickly;
+- `/api/workflows?stats=1` could exceed 20 seconds and block `/healthz`, because expensive workflow audit stats run synchronously on the Node server's main thread.
+
+This is an operational/runtime sizing issue, not a local development runtime blocker. Do not track these remote host limits as dev-runtime requirements.
+
+Planned host sizing:
+
+- 8 vCPU;
+- 16 GiB RAM.
+
+Recommended software follow-up:
+
+- keep `/api/workflows` lightweight by default;
+- compute worker audit stats only for selected workers, or cache them in the background;
+- add frontend timeout/backoff for worker polling;
+- avoid large continuous resolver batches such as `--batch-size 1000` on small hosts.
+
 ## Good Signals
 
 - Remote web service health check is passing.
@@ -150,6 +177,7 @@ Recommended fix:
 3. Add dashboard metrics for backlog age, stale processing count, resolver success rate, and latest worker error.
 4. Normalize exceptional worker event types through the registry.
 5. Add deploy preflight checks for dirty source trees and remote rebuild health.
+6. Move expensive workflow audit stats out of the default polling path.
 
 ## TypeScript Decision
 

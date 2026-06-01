@@ -1221,6 +1221,94 @@ function releaseHomepageListingClaim(db, listingId, options = {}) {
   };
 }
 
+function listStaleProcessingHomepageListings(db, options = {}) {
+  const staleAfterSeconds = Number.isFinite(options.staleAfterSeconds)
+    ? Math.max(1, options.staleAfterSeconds)
+    : 30 * 60;
+  const limit = Number.isFinite(options.limit)
+    ? Math.max(1, Math.min(options.limit, 1000))
+    : 100;
+  const now = options.now || new Date().toISOString();
+  const staleBefore = new Date(Date.parse(now) - (staleAfterSeconds * 1000)).toISOString();
+  return db.prepare(`
+    SELECT
+      listing_id,
+      href,
+      card_title,
+      detail_title,
+      detail_status,
+      detail_attempts,
+      detail_started_at,
+      detail_completed_at,
+      detail_last_error,
+      claimed_by,
+      first_seen_at,
+      last_seen_at
+    FROM homepage_listings
+    WHERE detail_status = 'processing'
+      AND COALESCE(detail_started_at, '') != ''
+      AND detail_started_at <= ?
+    ORDER BY detail_started_at ASC, listing_id ASC
+    LIMIT ?
+  `).all(staleBefore, limit);
+}
+
+function recoverStaleProcessingHomepageListings(db, options = {}) {
+  const dryRun = options.dryRun !== false;
+  const nextStatus = String(options.nextStatus || 'pending').trim();
+  const recoveredAt = options.recoveredAt || options.now || new Date().toISOString();
+  const reason = String(options.reason || 'stale_processing_recovery').trim();
+  if (!['pending', 'error'].includes(nextStatus)) {
+    throw new Error(`Unsupported stale processing recovery status: ${nextStatus}`);
+  }
+  const rows = listStaleProcessingHomepageListings(db, options);
+  const recovered = [];
+  if (!dryRun) {
+    runTransaction(db, () => {
+      for (const row of rows) {
+        appendListingEvent(db, {
+          workflowRunId: row.claimed_by || '',
+          listingId: row.listing_id,
+          eventType: 'detail_capture_interrupted',
+          eventAt: recoveredAt,
+          workerId: row.claimed_by || 'maintenance',
+          sourceUrl: row.href,
+          attempt: row.detail_attempts,
+          status: 'interrupted',
+          content: {
+            recovery: {
+              reason,
+              nextStatus,
+              previousStatus: row.detail_status,
+              detailStartedAt: row.detail_started_at,
+              claimedBy: row.claimed_by || '',
+            },
+          },
+          error: reason,
+        });
+        const release = releaseHomepageListingClaim(db, row.listing_id, {
+          nextStatus,
+          reason,
+          completedAt: recoveredAt,
+          decrementAttempts: true,
+        });
+        if (release.changed) {
+          recovered.push(release.listing);
+        }
+      }
+    });
+  }
+  return {
+    dryRun,
+    staleAfterSeconds: Number.isFinite(options.staleAfterSeconds) ? options.staleAfterSeconds : 30 * 60,
+    nextStatus,
+    reason,
+    scanned: rows.length,
+    recovered: dryRun ? 0 : recovered.length,
+    items: dryRun ? rows : recovered,
+  };
+}
+
 function markHomepageListingInactive(db, listingId, status, detailRecord, reason = '') {
   const inactiveStatus = status === 'pending_sale' ? 'pending_sale' : 'sold';
   const completedAt = new Date().toISOString();
@@ -4008,6 +4096,20 @@ function runDatabaseMaintenance(db, dbPath = DEFAULT_DB_PATH, options = {}) {
   const before = getDatabaseMaintenanceReport(db, dbPath);
   const actions = [];
 
+  if (options.recoverStaleProcessing) {
+    const staleProcessing = recoverStaleProcessingHomepageListings(db, {
+      dryRun: false,
+      staleAfterSeconds: options.staleProcessingSeconds,
+      limit: options.staleProcessingLimit,
+      nextStatus: options.staleProcessingStatus,
+      reason: options.staleProcessingReason,
+    });
+    actions.push({
+      recoverStaleProcessing: staleProcessing,
+    });
+    options.staleProcessing = staleProcessing;
+  }
+
   if (options.normalizeListedAt) {
     actions.push({
       normalizeListedAt: normalizeHomepageListedTimeRanges(db, {
@@ -4041,6 +4143,7 @@ function runDatabaseMaintenance(db, dbPath = DEFAULT_DB_PATH, options = {}) {
     startedAt,
     completedAt: new Date().toISOString(),
     actions,
+    ...(options.staleProcessing ? { staleProcessing: options.staleProcessing } : {}),
     before,
     after: getDatabaseMaintenanceReport(db, dbPath),
   };
@@ -4062,6 +4165,8 @@ module.exports = {
   markHomepageListingProcessed,
   markHomepageListingFailed,
   releaseHomepageListingClaim,
+  listStaleProcessingHomepageListings,
+  recoverStaleProcessingHomepageListings,
   markHomepageListingInactive,
   getHomepageListingCounts,
   createPurchaseHistoryDocument,

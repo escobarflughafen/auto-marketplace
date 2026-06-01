@@ -3,9 +3,34 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  isBrowserWorkerType,
+  isExclusiveBrowserWorkerType,
   normalizeWorkflowArgs,
   validateWorkflowStartArgs,
+  workflowConcurrencyLimit,
+  workflowConcurrencyScope,
 } = require('../scripts/serve-marketplace-homepage');
+
+test('workflow worker type browser classification keeps only profile onboarding exclusive', () => {
+  assert.equal(isBrowserWorkerType('collector'), true);
+  assert.equal(isBrowserWorkerType('resolver'), true);
+  assert.equal(isBrowserWorkerType('profile_onboarder'), true);
+  assert.equal(isBrowserWorkerType('backlog_indexer'), false);
+  assert.equal(isExclusiveBrowserWorkerType('collector'), false);
+  assert.equal(isExclusiveBrowserWorkerType('resolver'), false);
+  assert.equal(isExclusiveBrowserWorkerType('profile_onboarder'), true);
+});
+
+test('workflow concurrency is lenient except selected browser caps', () => {
+  assert.equal(workflowConcurrencyLimit('search-explore', 'collector'), 2);
+  assert.equal(workflowConcurrencyScope('search-explore', 'collector'), 'workflow');
+  assert.equal(workflowConcurrencyLimit('backlog-resolve', 'resolver'), 2);
+  assert.equal(workflowConcurrencyScope('backlog-resolve', 'resolver'), 'workerType');
+  assert.equal(workflowConcurrencyLimit('home-collect', 'collector'), Number.POSITIVE_INFINITY);
+  assert.equal(workflowConcurrencyScope('home-collect', 'collector'), 'none');
+  assert.equal(workflowConcurrencyLimit('backlog-indexer', 'backlog_indexer'), Number.POSITIVE_INFINITY);
+  assert.equal(workflowConcurrencyScope('backlog-indexer', 'backlog_indexer'), 'none');
+});
 
 test('workflow start args reject formula-style command values', () => {
   assert.throws(
@@ -37,6 +62,27 @@ test('workflow start args allow declared fields and worker screenshot runtime se
     '--worker-screenshot-format', 'jpeg',
     '--worker-screenshot-quality', '55',
   ]);
+});
+
+test('workflow start args allow profile onboarder interactive flags', () => {
+  const args = validateWorkflowStartArgs('profile-onboarder', [
+    '--credentials-profile', 'default',
+    '--headed',
+    '--login-timeout-seconds', '300',
+    '--poll-seconds', '2',
+  ]);
+
+  assert.deepEqual(args, [
+    '--credentials-profile', 'default',
+    '--headed',
+    '--login-timeout-seconds', '300',
+    '--poll-seconds', '2',
+  ]);
+
+  assert.throws(
+    () => validateWorkflowStartArgs('profile-onboarder', ['--worker-id', 'custom']),
+    /Unsupported workflow argument: --worker-id/,
+  );
 });
 
 test('workflow start args keep internal listing-id files private to generated resolve batches', () => {

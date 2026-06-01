@@ -31,12 +31,14 @@ function createTempDbPath() {
 }
 
 test('worker model exposes primary worker types with explicit strategies', () => {
-  assert.deepEqual(Object.values(WORKER_TYPES).sort(), ['backlog_indexer', 'collector', 'resolver']);
+  assert.deepEqual(Object.values(WORKER_TYPES).sort(), ['backlog_indexer', 'collector', 'profile_onboarder', 'resolver']);
   assert.deepEqual(WORKER_STRATEGIES.collector, ['feed', 'search', 'explorer']);
   assert.deepEqual(WORKER_STRATEGIES.resolver, ['queue', 'selected', 'filtered']);
   assert.deepEqual(WORKER_STRATEGIES.backlog_indexer, ['resolved_metadata']);
+  assert.deepEqual(WORKER_STRATEGIES.profile_onboarder, ['guided_login']);
   assert.equal(normalizeWorkerStrategy('collector', 'SEARCH'), 'search');
   assert.equal(normalizeWorkerStrategy('backlog_indexer', 'RESOLVED_METADATA'), 'resolved_metadata');
+  assert.equal(normalizeWorkerStrategy('profile_onboarder', 'GUIDED_LOGIN'), 'guided_login');
   assert.throws(
     () => normalizeWorkerStrategy('resolver', 'explorer'),
     /Unknown resolver strategy: explorer/,
@@ -93,6 +95,20 @@ test('backlog indexer event list includes metadata indexing events and excludes 
   assert.ok(eventTypes.includes('worker_sleeping'));
   assert.ok(!eventTypes.includes('detail_capture_started'));
   assert.ok(!eventTypes.includes('browser_context_ready'));
+});
+
+test('profile onboarder event list includes interactive auth events', () => {
+  const eventTypes = listWorkerEventDefinitions({
+    workerType: 'profile_onboarder',
+    strategy: 'guided_login',
+  }).map((definition) => definition.eventType);
+
+  assert.ok(eventTypes.includes('profile_onboarding_started'));
+  assert.ok(eventTypes.includes('verification_required'));
+  assert.ok(eventTypes.includes('user_command_received'));
+  assert.ok(eventTypes.includes('profile_ready'));
+  assert.ok(!eventTypes.includes('listing_observed'));
+  assert.ok(!eventTypes.includes('backlog_index_started'));
 });
 
 test('event validation enforces worker type, strategy, and required payload keys', () => {
@@ -176,6 +192,21 @@ test('backlog indexer event names are registered', () => {
     'backlog_index_started',
     'backlog_index_completed',
     'backlog_index_failed',
+  ]) {
+    assert.ok(getWorkerEventDefinition(eventType), `${eventType} should be registered`);
+  }
+});
+
+test('profile onboarder event names are registered', () => {
+  for (const eventType of [
+    'profile_onboarding_started',
+    'profile_onboarding_step',
+    'credentials_submitted',
+    'verification_required',
+    'external_approval_required',
+    'user_command_received',
+    'profile_ready',
+    'profile_onboarding_failed',
   ]) {
     assert.ok(getWorkerEventDefinition(eventType), `${eventType} should be registered`);
   }

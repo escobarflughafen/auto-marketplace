@@ -3,6 +3,7 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   getDatabaseMaintenanceReport,
+  recoverStaleProcessingHomepageListings,
   runDatabaseMaintenance,
 } = require('./marketplace-homepage-db');
 
@@ -32,6 +33,11 @@ function parseArgs(argv) {
     normalizeListedAt: false,
     normalizeListedAtLimit: 1000,
     normalizeListedAtStaleOnly: true,
+    recoverStaleProcessing: false,
+    staleProcessingSeconds: 30 * 60,
+    staleProcessingLimit: 100,
+    staleProcessingStatus: 'pending',
+    staleProcessingReason: 'stale_processing_recovery',
     dryRun: false,
     json: false,
   };
@@ -72,6 +78,28 @@ function parseArgs(argv) {
         options.normalizeListedAt = true;
         options.normalizeListedAtStaleOnly = false;
         break;
+      case '--recover-stale-processing':
+        options.recoverStaleProcessing = true;
+        break;
+      case '--stale-processing-seconds':
+        options.staleProcessingSeconds = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--stale-processing-limit':
+        options.staleProcessingLimit = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--stale-processing-status':
+        options.staleProcessingStatus = readFlagValue(argv, index, arg);
+        if (!['pending', 'error'].includes(options.staleProcessingStatus)) {
+          throw new Error('Expected --stale-processing-status to be pending or error');
+        }
+        index += 1;
+        break;
+      case '--stale-processing-reason':
+        options.staleProcessingReason = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
       case '--dry-run':
         options.dryRun = true;
         break;
@@ -108,6 +136,12 @@ function renderReport(payload) {
     lines.push(`Before WAL: ${formatBytes(before.files.walBytes)}`);
     lines.push(`Actions: ${payload.actions.map((action) => typeof action === 'string' ? action : Object.keys(action)[0]).join(', ') || 'none'}`);
   }
+  if (payload.staleProcessing) {
+    lines.push(`Stale processing: scanned=${payload.staleProcessing.scanned} recovered=${payload.staleProcessing.recovered}`);
+    for (const item of payload.staleProcessing.items.slice(0, 20)) {
+      lines.push(`- ${item.listing_id} status=${item.detail_status} started=${item.detail_started_at || ''} claimed_by=${item.claimed_by || ''}`);
+    }
+  }
   return lines.join('\n');
 }
 
@@ -115,9 +149,24 @@ function main() {
   const options = parseArgs(process.argv.slice(2));
   const { db, dbPath } = openMarketplaceHomepageDatabase(options.dbPath);
   try {
-    const payload = options.dryRun
-      ? getDatabaseMaintenanceReport(db, dbPath)
-      : runDatabaseMaintenance(db, dbPath, options);
+    let payload;
+    if (options.dryRun) {
+      payload = getDatabaseMaintenanceReport(db, dbPath);
+      if (options.recoverStaleProcessing) {
+        payload = {
+          ...payload,
+          staleProcessing: recoverStaleProcessingHomepageListings(db, {
+            dryRun: true,
+            staleAfterSeconds: options.staleProcessingSeconds,
+            limit: options.staleProcessingLimit,
+            nextStatus: options.staleProcessingStatus,
+            reason: options.staleProcessingReason,
+          }),
+        };
+      }
+    } else {
+      payload = runDatabaseMaintenance(db, dbPath, options);
+    }
     if (options.json) {
       console.log(JSON.stringify(payload, null, 2));
     } else {
