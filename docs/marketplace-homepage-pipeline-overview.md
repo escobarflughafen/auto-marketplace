@@ -13,10 +13,13 @@ This project now includes a Facebook Marketplace homepage collection pipeline th
 - provides a small local web server for browsing and querying collected rows
 - provides a Tabulator-based local management UI for worker control, listing review, and per-worker audit views
 
-The design is intentionally minimal:
+The design is still intentionally small, but the current runtime has expanded
+from the original two-worker MVP:
 
-- one collector process for homepage discovery
-- one backlog worker for detail extraction
+- collector/search workers discover listings and upsert queue state
+- resolver workers claim listing rows and capture details
+- the backlog indexer computes derived metadata after resolution
+- the profile onboarder is an interactive login/checkpoint worker
 - one SQLite database as the shared system of record
 
 That keeps the current implementation easy to inspect, easy to modify, and easy to operate from the terminal.
@@ -118,11 +121,13 @@ The project also includes a lightweight local web server that reads the same SQL
 - browser-based row browsing
 - queue summary counts
 - Tabulator pagination and table sorting
-- KQL-style filtering
+- KQL-lite filtering, syntax highlighting, and autocomplete
 - direct links to listing pages and captured artifacts
-- workflow controls for homepage collection, search exploration, and backlog resolution
+- workflow controls for homepage collection, search exploration, backlog resolution, backlog indexing, and profile onboarding
 - listing-table resolve dispatch for one backlog row, selected backlog rows, or all backlog rows matching the current viewer query
-- per-worker status, text history, event audit tables, and latest POV screenshot preview
+- per-worker status, text history, event-type filtering, event audit tables, interactive profile-onboarder commands, and latest POV screenshot preview
+- listing, resolve queue, queue audit, purchase history, recommendation, and audit-log subtabs
+- recommendation review in both table mode and randomized Match Mode cards
 
 ## Main Commands
 
@@ -188,14 +193,42 @@ Use the read-only index preview tool before a resolver run when you want to insp
 npm run marketplace:home:backlog:indexes -- --backlog-order earliest --seen-time-field first_seen --status-filter pending --limit 20
 ```
 
+### Backlog indexer
+
+```bash
+npm run marketplace:home:index -- --once --limit 250
+```
+
+The backlog indexer is a non-browser worker for post-resolution metadata. It
+currently normalizes listed-time fields from resolved listing detail text and
+can run once or as a jittered loop. It does not open Facebook and can run while
+browser workers are active.
+
+### Profile onboarder
+
+```bash
+npm run marketplace:auth:profile-onboarder -- --credentials-profile default --headed
+```
+
+The profile onboarder is the interactive worker used when the shared Facebook
+profile needs login, 2FA, or checkpoint handling. The dashboard can submit
+verification codes, continue after external approval, retry credentials, or
+cancel the run through the worker command channel under
+`artifacts/marketplace-homepage/worker-commands/`.
+
 ### Homepage browser UI
 
 ```bash
 npm run marketplace:home:serve
 ```
 
-The browser UI lives in `frontend/marketplace-monitor/` and uses the Node server as an API/process-management backend. Workflow form state is kept client-side per worker type so operator settings survive switching between workflows. The Worker Control panel is split into workflow settings and command preview/actions. The worker overview stays visible below it, and selecting a worker opens a centered detail view with status, preview, event tables, and text history.
+The browser UI lives in `frontend/marketplace-monitor/` and uses the Node server as an API/process-management backend. Workflow form state is kept client-side per worker type so operator settings survive switching between workflows. Static workflow definitions load from `/api/workflows/config`; lightweight status polling uses `/api/workflows?reconcile=0&stats=0`; selected worker details load stats, screenshots, and event pages on demand. The Worker Control panel has a workflow type selector, workflow settings, command preview/actions, and profile-onboarder command controls when that worker is selected. The worker overview stays visible below it, and selecting a worker opens a centered detail view with status, preview, event picker, event tables, and text history.
 Managed backlog workers are started with their workflow run id as `--worker-id`, so `listing_events` can be used as a per-worker audit log. The worker detail view groups those events into done, skipped, errors, and started, and shows the latest screenshot as a live POV preview when available. Legacy `pid-*` event rows are linked to workflow runs by overlapping listing IDs in run logs.
+
+The current workspace layout includes Listings subtabs for results, resolve
+queue, and queue audit; a renamed Trade & Match area for purchase history and
+recommendations; a recommendation table plus randomized Match Mode card flow;
+and an Audit Logs table with JSON/syslog detail output.
 
 The monitor API uses two access tokens:
 
@@ -320,11 +353,32 @@ The high-level flow is:
 
 The worker uses the browser, not raw HTTP fetches, for listing detail extraction.
 
+## Backlog indexer and recommendations
+
+The backlog indexer implementation is in:
+
+- `scripts/index-marketplace-resolved-listings.js`
+
+It scans resolved listing rows in bounded batches and updates derived metadata,
+starting with normalized listed-time ranges from `detail_listed_ago`. It is a
+non-browser worker, so it should not contend for the Facebook profile.
+
+The recommendation matcher currently lives in the monitor server:
+
+- `scripts/serve-marketplace-homepage.js`
+
+It maintains incremental cursor state in `purchase_history_match_scan_state`,
+queues candidate recommendations in `purchase_history_match_queue`, and records
+viewer save/dismiss decisions in `purchase_history_match_events`. The UI exposes
+these rows under Trade & Match -> Recommendations. This is useful for the MVP,
+but the scheduling plan calls out moving it into a first-class worker later.
+
 ## Session/bootstrap logic
 
 Authentication support is in:
 
 - `scripts/marketplace-profile-auth.js`
+- `scripts/onboard-marketplace-profile-worker.js`
 
 The collector can run in two ways:
 
@@ -340,6 +394,11 @@ DB-backed collectors and workers also support explicit auth modes:
 
 Use `npm run marketplace:auth:bootstrap -- --auth-mode credentials` to refresh a
 remote persistent profile before running Ubuntu headless workers.
+
+Use `npm run marketplace:auth:profile-onboarder` or the dashboard Profile
+Onboarder workflow when the login flow needs operator input. The worker records
+login-step events, takes POV screenshots, and polls the command channel written
+by `POST /api/workflows/:id/commands`.
 
 The signed-in runtime identity is inferred from:
 
@@ -483,21 +542,16 @@ That is correct for a minimal build, but it will bottleneck if homepage volume r
 
 The older keyword collectors still use artifact/state-file persistence. The homepage pipeline uses SQLite. There is no unified persistence story yet.
 
-### 8. No dashboard or operator view
+### 8. Dashboard exists, but health modeling is still shallow
 
-Right now, visibility depends on:
+The Tabulator monitor now covers queue depth, listings, resolve queue, worker
+state, audit events, recommendations, screenshots, and profile onboarding.
+Remaining visibility gaps are more about interpretation than raw access:
 
-- log output
-- direct DB queries
-- ad hoc analysis
-
-There is no lightweight admin view for:
-
-- queue depth
-- oldest pending item
-- error rows
-- session status
-- recent detail completions
+- no explicit health-state reducer for login/challenge/rate-limit states
+- limited page-quality scoring for partial or degraded Marketplace loads
+- recommendation refresh is still an embedded server scheduler
+- worker event semantics still need a durable reducer model
 
 ## Recommended TODOs
 
@@ -507,8 +561,8 @@ There is no lightweight admin view for:
 - add display-name/session verification after login
 - improve multilingual parsing for rental/property cards
 - add a hard maximum item cap for `--collect-all`
-- add a small command that prints collector health and DB status
 - add worker-side session status logging similar to collector logging
+- promote recommendation matching from server timer to a first-class worker
 
 ### Medium-term
 

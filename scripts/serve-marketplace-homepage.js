@@ -219,6 +219,8 @@ const WORKFLOWS = {
         ],
       },
       { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax' },
+      { id: 'queries', label: 'Keyword list', kind: 'textarea', editor: 'list', flag: '--queries', defaultValue: '' },
+      { id: 'randomWalksBetweenSeeds', label: 'Random walks between entries', kind: 'number', flag: '--random-walks-between-seeds', defaultValue: '', min: 0 },
       { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
       { id: 'radiusMiles', label: 'Radius miles', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
@@ -2914,15 +2916,19 @@ function createServer(options) {
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
       const reconcile = requestUrl.searchParams.get('reconcile') !== '0';
       const includeStats = requestUrl.searchParams.get('stats') !== '0';
+      const includeConfig = requestUrl.searchParams.get('config') !== '0';
       if (access.canWrite && reconcile) {
         refreshResolveQueueRunStatuses(db);
       }
-      writeJson(response, 200, {
-        workflows: buildWorkflowDefinitions(),
+      const payload = {
         processes: access.canWrite
           ? listManagedProcesses(db, { reconcile, includeStats })
           : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats }),
-      });
+      };
+      if (includeConfig) {
+        payload.workflows = buildWorkflowDefinitions();
+      }
+      writeJson(response, 200, payload);
       return;
     }
 

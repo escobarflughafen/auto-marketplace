@@ -1751,6 +1751,33 @@ a:hover { text-decoration: underline; }
   width: 16px;
   height: 16px;
 }
+.worker-list-editor {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.worker-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+.worker-list-row input {
+  width: 100%;
+  min-width: 0;
+}
+.worker-list-remove,
+.worker-list-add {
+  min-width: 34px;
+  padding: 6px 8px;
+}
+.worker-list-remove {
+  width: 34px;
+}
+.worker-list-add {
+  justify-self: start;
+}
 .worker-command-tablewrap textarea {
   min-height: 142px;
   resize: vertical;

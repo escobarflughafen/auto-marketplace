@@ -20,6 +20,16 @@ npm run marketplace:home:serve -- --admin-token dev-admin --read-only-token dev-
 
 Open the printed admin URL. If no token is provided, the server generates ephemeral admin/read-only URLs at startup.
 
+## Included Dashboard Surfaces
+
+- Listings with result, resolve queue, and queue audit subtabs.
+- Trade & Match with purchase history and paged recommendations.
+- Recommendation review in table mode and randomized Match Mode cards.
+- Audit Logs with paged Tabulator rows and JSON/syslog detail output.
+- Worker Setup with collector, search explorer, resolver, backlog indexer, and profile onboarder workflows.
+- Worker detail panes with event-type filtering, latest POV screenshot, text logs, and interactive profile-onboarder commands.
+- KQL-lite query entry with frontend-first autocomplete for universal syntax and table fields.
+
 ## Worker Safety Rule
 
 For this alpha, browser concurrency is intentionally bounded but not globally single-worker.

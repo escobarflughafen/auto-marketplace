@@ -6,10 +6,11 @@ The central web app is the workflow launcher and monitor. It starts child proces
 
 Current worker-type limits:
 
-- `collector`: 1
-- `resolver`: 2
-- `backlog_indexer`: 1
-- fallback `worker`: 1
+- `search-explore`: 2 concurrent workflow runs
+- `resolver`: 2 concurrent runs across resolver workflows
+- `profile-onboarder`: 1 run, exclusive with other browser workers
+- `collector`: one active run is the intended operating mode, but it is not currently capped as a separate workflow limit
+- `backlog_indexer`: no browser-profile cap
 
 The running worker process owns its own loop after launch. There is not yet one global scheduler or one global job queue.
 
@@ -75,6 +76,30 @@ Primary backlog signal:
 - stale or missing `detail_listed_at_*` derived fields
 
 This worker should not lease a browser profile and should not open Facebook.
+
+### Profile Onboarder
+
+Workflow: `profile-onboarder`
+
+Scheduling model: operator-guided browser session.
+
+Backlog model: no listing backlog. It starts a Facebook profile login/checkpoint
+session, emits workflow/listing-style audit events for each observed step, and
+polls a file-backed command channel for dashboard commands.
+
+Command channel:
+
+- `artifacts/marketplace-homepage/worker-commands/<worker-id>.jsonl`
+
+Supported dashboard commands:
+
+- submit a verification code
+- continue after external approval
+- retry credentials
+- cancel
+
+It is exclusive with other browser workers because it manipulates the shared
+browser profile and may wait for human action.
 
 ### Recommendation Matcher
 

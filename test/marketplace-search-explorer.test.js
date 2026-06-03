@@ -11,6 +11,7 @@ const {
 } = require('../scripts/marketplace-homepage-db');
 const {
   parseArgs,
+  parseKeywordList,
   pickSearchCardTitle,
   filterBagKeywordsFromItems,
   computeNextSeedRound,
@@ -72,6 +73,26 @@ test('parseArgs supports unauthenticated search exploration', () => {
   const options = parseArgs(['--query', 'nikon', '--auth-mode', 'none']);
 
   assert.equal(options.authMode, 'none');
+});
+
+test('parseKeywordList accepts comma, semicolon, and newline separated seeds', () => {
+  assert.deepEqual(
+    parseKeywordList(' leica m6, nikon d850\npentax 67; canon r5 '),
+    ['leica m6', 'nikon d850', 'pentax 67', 'canon r5'],
+  );
+});
+
+test('parseArgs reads round-robin seed queries and random walk count', () => {
+  const options = parseArgs([
+    '--query', 'fallback',
+    '--queries', 'leica m6\nnikon d850\npentax 67',
+    '--random-walks-between-seeds', '2',
+  ]);
+
+  assert.equal(options.query, 'leica m6');
+  assert.deepEqual(options.seedQueries, ['leica m6', 'nikon d850', 'pentax 67']);
+  assert.equal(options.randomWalksBetweenSeedsMin, 2);
+  assert.equal(options.randomWalksBetweenSeedsMax, 2);
 });
 
 test('parseArgs reads search explorer worker id', () => {
@@ -172,6 +193,94 @@ test('chooseRoundQuery uses seed on first round and bag keywords on later rounds
     assert.equal(bagQuery.query, 'Pentax 67 body');
     assert.equal(bagQuery.querySource, 'bag');
     assert.equal(bagQuery.nextSeedRound, 15);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('chooseRoundQuery rotates seed list with random walks from previous round candidates', async () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+  const options = {
+    query: 'leica m6',
+    seedQueries: ['leica m6', 'nikon d850'],
+    keywordListProvided: true,
+    randomWalksBetweenSeedsMin: 2,
+    randomWalksBetweenSeedsMax: 2,
+    bagMinTimesSeen: 1,
+  };
+  const state = {
+    roundNumber: 1,
+    nextSeedRound: 1,
+    seedIndex: 0,
+    randomWalksRemaining: 0,
+    randomWalkCandidates: [],
+  };
+
+  try {
+    const firstSeed = await chooseRoundQuery(db, state, options);
+    assert.equal(firstSeed.query, 'leica m6');
+    assert.equal(firstSeed.querySource, 'seed_round_robin');
+    assert.equal(firstSeed.seedIndex, 0);
+    assert.equal(firstSeed.nextSeedIndex, 1);
+    assert.equal(firstSeed.randomWalksRemaining, 2);
+
+    state.roundNumber += 1;
+    state.randomWalkCandidates = ['Leica M6 Classic'];
+    const firstWalk = await chooseRoundQuery(db, state, options);
+    assert.equal(firstWalk.query, 'Leica M6 Classic');
+    assert.equal(firstWalk.querySource, 'round_random_walk');
+    assert.equal(firstWalk.randomWalkCandidateSource, 'previous_round_collected_titles');
+    assert.equal(firstWalk.randomWalksRemaining, 1);
+
+    state.roundNumber += 1;
+    state.randomWalkCandidates = ['Leica M6 TTL'];
+    const secondWalk = await chooseRoundQuery(db, state, options);
+    assert.equal(secondWalk.query, 'Leica M6 TTL');
+    assert.equal(secondWalk.querySource, 'round_random_walk');
+    assert.equal(secondWalk.randomWalksRemaining, 0);
+
+    state.roundNumber += 1;
+    state.randomWalkCandidates = ['Ignored until next walk'];
+    const secondSeed = await chooseRoundQuery(db, state, options);
+    assert.equal(secondSeed.query, 'nikon d850');
+    assert.equal(secondSeed.querySource, 'seed_round_robin');
+    assert.equal(secondSeed.seedIndex, 1);
+    assert.equal(secondSeed.nextSeedIndex, 0);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('chooseRoundQuery falls back to title bag when previous round has no random walk candidates', async () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+  const options = {
+    query: 'leica m6',
+    seedQueries: ['leica m6', 'nikon d850'],
+    keywordListProvided: true,
+    randomWalksBetweenSeedsMin: 1,
+    randomWalksBetweenSeedsMax: 1,
+    bagMinTimesSeen: 1,
+  };
+  const state = {
+    roundNumber: 2,
+    nextSeedRound: 1,
+    seedIndex: 1,
+    randomWalksRemaining: 1,
+    randomWalkCandidates: [],
+  };
+
+  try {
+    upsertSearchTitleBagKeyword(db, 'Contax G2 kit', {
+      sourceKeyword: 'contax',
+      seenAt: '2026-04-29T00:00:00.000Z',
+    });
+    const query = await chooseRoundQuery(db, state, options);
+    assert.equal(query.query, 'Contax G2 kit');
+    assert.equal(query.querySource, 'round_random_walk_bag_fallback');
+    assert.equal(query.randomWalkCandidateSource, 'title_bag_fallback');
+    assert.equal(query.randomWalksRemaining, 0);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

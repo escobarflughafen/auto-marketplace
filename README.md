@@ -6,15 +6,24 @@ Current command surface:
 
 - `marketplace`: interactive browser workflow, headed by default
 - `marketplace:doctor`: headless readiness and DB preflight check
+- `marketplace:help`: print the interactive Marketplace command help
 - `marketplace:collect`: deprecated legacy keyword collector, headless by default
 - `marketplace:poll`: deprecated legacy multi-keyword collector, headless by default
+- `marketplace:capture`: deprecated legacy listing-detail capture helper
+- `marketplace:auth:bootstrap`: refresh a persistent Facebook browser profile from credentials
+- `marketplace:auth:headless-onboard`: headless credential/profile onboarding helper
+- `marketplace:auth:profile-onboarder`: interactive dashboard-driven profile onboarding worker
+- `marketplace:credentials:import`: import or update credential profiles for the monitor
 - `marketplace:home:collect`: homepage collector backed by a SQLite queue
 - `marketplace:search:explore`: search collector that reseeds from discovered titles
 - `marketplace:home:process`: backlog worker that visits queued listings for details
+- `marketplace:home:index`: non-browser backlog indexer for derived resolved-listing metadata
 - `marketplace:home:backlog:indexes`: read-only backlog index/ordering preview tool
 - `marketplace:home:db:maintain`: SQLite optimize/checkpoint/report command for scheduled maintenance
+- `marketplace:home:db:merge`: merge another homepage SQLite database into the active store
 - `marketplace:home:tier3:dry-run`: local verdict dry-run over resolved detail artifacts
 - `marketplace:home:serve`: local Tabulator-based management UI for browsing rows and controlling workers
+- `history:normalize-inventory`: normalize purchase-history inventory rows from the CSV schema
 
 ## Requirements
 
@@ -129,6 +138,18 @@ Search-driven exploration with bounded results and configurable reseed cadence:
 npm run marketplace:search:explore -- --use-credentials --query "nikon d850" --max-items 100 --refresh-seconds 90 --reseed-round-min 10 --reseed-round-max 20
 ```
 
+Search-driven exploration from a round-robin seed list, with two random-walk
+queries between each seed:
+
+```bash
+npm run marketplace:search:explore -- --use-credentials --queries "leica m6, nikon d850, pentax 67" --random-walks-between-seeds 2 --collect-all
+```
+
+In round-robin mode, the worker searches one seed entry, collects listings,
+then chooses each random-walk query from a random title collected in the
+immediately previous round. If that round produced no usable title, it falls
+back to the existing global title bag, then back to the next seed.
+
 Search-driven exploration in Ottawa, using the Ottawa route slug and attempting the UI location picker when Facebook exposes it:
 
 ```bash
@@ -156,6 +177,21 @@ npm run marketplace:auth:bootstrap -- --auth-mode credentials --headless
 If Facebook requires notification approval, 2FA, or another checkpoint, run the
 bootstrap in a headed browser on the Ubuntu host or refresh the mounted
 `profiles/facebook-marketplace` profile before starting headless workers.
+
+Run the interactive profile onboarding worker when login needs operator input
+from the dashboard:
+
+```bash
+npm run marketplace:auth:profile-onboarder -- --credentials-profile default --headed --login-timeout-seconds 900
+```
+
+The profile onboarder is a managed worker type in the web monitor. It emits
+login-step events and worker screenshots, then accepts dashboard commands for
+verification-code submission, external checkpoint continuation, credential
+retry, and cancel. Commands are appended under
+`artifacts/marketplace-homepage/worker-commands/` for the worker to consume. It
+uses the same browser profile as other browser workers and is intentionally
+exclusive with collector/resolver runs while active.
 
 Run collection without requiring Facebook authentication:
 
@@ -208,6 +244,17 @@ Preview the installed backlog indexes and the rows a resolver would claim for a 
 npm run marketplace:home:backlog:indexes -- --backlog-order earliest --seen-time-field first_seen --status-filter pending --limit 20
 ```
 
+Run the non-browser backlog indexer that computes derived metadata for resolved
+listings:
+
+```bash
+npm run marketplace:home:index -- --once --limit 250
+```
+
+Without `--once`, the backlog indexer loops with jittered sleeps. The first
+implementation refreshes normalized listed-time fields from resolved listing
+detail text; it does not open Facebook or lease the browser profile.
+
 Run lightweight SQLite maintenance without starting any worker:
 
 ```bash
@@ -215,6 +262,13 @@ npm run marketplace:home:db:maintain
 ```
 
 Use `--dry-run` for a DB/WAL/row-count report, `--analyze` for a statistics refresh, and reserve `--vacuum` for quiet manual maintenance windows. See `docs/marketplace-db-maintenance.md` for cron and macOS LaunchAgent examples.
+
+Recover resolver claims left in `processing` after a deploy, crash, or manual
+restart:
+
+```bash
+npm run marketplace:home:db:maintain -- --recover-stale-processing --stale-processing-seconds 1800 --dry-run
+```
 
 Run a Tier 3-style verdict dry run over resolved detail artifacts:
 
@@ -275,7 +329,7 @@ npm run marketplace:home:serve
 ```
 
 The management UI is served from `frontend/marketplace-monitor/`; `scripts/serve-marketplace-homepage.js` provides the API, static file serving, Tabulator assets, and managed worker process controls.
-The UI keeps workflow drafts client-side, separates static workflow definitions from polling state, and exposes worker audit views from `listing_events`. Selecting a worker opens an exclusive detail view with a status table, grouped done/skipped/error/started event tables, text history, and the latest worker POV screenshot when available.
+The UI keeps workflow drafts client-side, separates static workflow definitions from polling state, and exposes worker audit views from `listing_events`. Selecting a worker opens an exclusive detail view with a status table, event-type picker, grouped done/skipped/error/started event tables, interactive profile-onboarder controls when applicable, text history, and the latest worker POV screenshot when available.
 
 At startup the monitor issues an admin URL and a read-only URL unless tokens are provided with `MARKETPLACE_MONITOR_ADMIN_TOKEN` and `MARKETPLACE_MONITOR_READONLY_TOKEN` or with `--admin-token` and `--read-only-token`. The frontend carries the `?token=...` query parameter into API calls. API clients may also use `X-API-Token` or `Authorization: Bearer <token>`.
 If the page is opened without `token` or `apiToken`, the monitor shows an access warning banner and does not load token-protected data.
@@ -295,6 +349,8 @@ npm run marketplace:home:export
 - `npm run marketplace:home:collect` is headless by default
 - `npm run marketplace:search:explore` is headless by default
 - `npm run marketplace:home:process` is headless by default
+- `npm run marketplace:home:index` does not launch a browser
+- `npm run marketplace:auth:profile-onboarder` is headless by default, but is commonly run headed from the dashboard when operator interaction is needed
 - `scripts/extract-marketplace-results.js` is headless by default
 - `scripts/capture-marketplace-posts.js` is headless by default
 
@@ -304,6 +360,7 @@ These commands are still available for compatibility, but they are now deprecate
 
 - `npm run marketplace:collect`
 - `npm run marketplace:poll`
+- `npm run marketplace:capture`
 - `node scripts/extract-marketplace-results.js`
 - `npm run marketplace:poll:mamiya-645af`
 
@@ -365,20 +422,25 @@ The homepage pipeline is split into two small pieces so detail capture can run a
 - detects sold/pending-sale detail pages and moves them out of the default backlog unless `--resolve-inactive` is set
 - records richer detail events including availability, seller rating, seller joined date, previous price, extraction completeness, screenshot paths, and snapshot paths
 - compares stable detail content instead of volatile raw page text before writing `content_changed` events
+- `marketplace:home:index` computes derived metadata from resolved rows, starting with normalized listed-time ranges
+- purchase-history matching scans resolved and recently discovered rows incrementally, queues candidate matches below the purchase-price threshold, and records save/dismiss decisions as events
 - collector sleep between polls is jittered by default between `25%` and `150%` of `--refresh-seconds`
-- `marketplace:home:serve` exposes the same SQLite DB in a local browser UI with KQL-style filtering, remote table sorting, worker controls, and per-worker audit views
+- `marketplace:home:serve` exposes the same SQLite DB in a local browser UI with KQL-lite filtering, remote table sorting, worker controls, recommendations, and per-worker audit views
 
 ## What The Search Explorer Does
 
 The search explorer uses the same SQLite DB and browser profile, but changes how discovery happens:
 
 - `marketplace:search:explore` starts from a required seed query via `--query`
+- can also start from a seed list via `--queries`, separated by commas, semicolons, or newlines
+- when `--queries` or `--random-walks-between-seeds` is used, seed entries run round-robin
+- `--random-walks-between-seeds <n>` controls how many collected-title random walks run before the next seed entry
 - collects visible Marketplace search-result cards into the shared SQLite DB with `source='search'`
 - stores the active search term on each row as `source_keyword`
 - records listing-to-keyword associations in a separate keyword index table
 - adds collected result titles into a reusable search-title bag
-- on later rounds, picks a random bag entry as the next query
-- automatically falls back to the seed query again every `--reseed-round-min` to `--reseed-round-max` rounds
+- in legacy single-query mode, later rounds still pick a random bag entry as the next query
+- in legacy single-query mode, it automatically falls back to the seed query again every `--reseed-round-min` to `--reseed-round-max` rounds
 - keeps all timing, scrolling, bag, and reseed behavior configurable through CLI arguments
 
 ## Location Behavior
@@ -441,6 +503,10 @@ Homepage pipeline files:
 - `search-explorer.log`
 - `homepage-backlog.log`
 - `details/`
+- `resolve-batches/`
+- `worker-screenshots/`
+- `worker-commands/`
+- `profile-onboarding/`
 
 ## Homepage Browser
 
@@ -464,30 +530,44 @@ Supported server flags:
 
 Current UI layout:
 
-- header summary with queue counts and refresh state
+- header summary with queue counts, refresh state, and one-row overview cells that navigate to matching panels
 - one compact workspace surface below the header
 - Listings view backed by Tabulator remote pagination and remote sorting over `/api/listings`
-- KQL/query-builder filters plus shortcut filters and row-count controls
+- Listings subtabs for result rows, resolve queue, and resolve queue audit
+- KQL/query-builder filters plus shortcut filters, row-count controls, and URL-backed query routing
 - backlog resolve actions from the Listings table: single-row Fetch, Resolve Selected, and Resolve All In View
-- snapshot POV panel for selected listing artifacts
+- consistent listing row/card/detail components with resolver status, fetch/update actions, artifacts, and Markdown snapshot rendering
+- Trade & Match view for purchase history plus a Recommendations subtab
+- Recommendations table with paging, row-click detail modal, save/dismiss actions, rejection reasons, resolved-only filter, and randomized Match Mode cards with a preloaded queue
+- Audit Logs view backed by Tabulator with paging plus detail modal output in JSON and syslog-style text
 - Worker Control split into two columns: workflow settings on the left, command preview and action buttons on the right
+- Worker type selector for collector, search explorer, resolver, backlog indexer, and profile onboarder
 - Worker Overview table that stays fully viewable below the control panel
 - centered worker inspector with current status, event category tables, text history, and latest screenshot preview
 
-Worker Control polling is intentionally split from form state. The frontend polls `/api/workflows` every few seconds for runtime status, but it only rebuilds workflow controls when workflow definitions change, so typing in fields should not jump the page or clear draft input.
+Worker Control polling is intentionally split from form state. The frontend loads static workflow definitions from `/api/workflows/config`, polls `/api/workflows?reconcile=0&stats=0` for lightweight runtime status, and only loads expensive per-worker stats/events when a worker detail pane is open. This keeps typing in fields from jumping the page and keeps the worker pane from doing full event/stat fetches before the operator asks for them.
 
 Query examples:
 
-- `nikon`
-- `status:pending leica`
-- `title:"m6 classic"`
-- `location:vancouver`
-- `price:>500`
-- `price:500-1500`
-- `rank:1`
-- `before:2026-04-27T09:00:00Z`
-- `after:2026-04-27T08:00:00Z`
-- `sort:rank`
+- `listings | where title contains "m6" and price >= 500 | sort by last_seen_at desc`
+- `listings | where status == "pending" and source == "search"`
+- `recommendations | where status == "queued" and score >= 80`
+- `events | where event_type contains "resolve" | sort by created_at desc`
+- Legacy shortcut syntax is still accepted for listings, such as `status:pending leica`, `title:"m6 classic"`, `price:500-1500`, `before:<iso>`, `after:<iso>`, and `sort:rank`.
+
+The query UI has a multiline KQL-lite editor with syntax highlighting and
+autocomplete plus a compact one-line mode for other panels. Universal
+suggestions, table names, operators, and table-specific fields are resolved in
+the browser first; `/api/query/complete` remains available as a backend assist
+for server-known fields. Query links can route directly to the relevant panel,
+for example Listings, Trade & Match Recommendations, or Audit Logs.
+
+Autocomplete currently knows these source schemas:
+
+- `listings`: `id`, `status`, `source`, `keyword`, `title`, `text`, `seller`, `location`, `condition`, `price`, `rank`, `attempts`, `last_seen_at`, `first_seen_at`, `completed_at`
+- `recommendations`: `status`, `score`, `created_at`
+- `workers`: `status`, `worker_type`, `started_at`
+- `events`: `worker_type`, `event_type`, `created_at`
 
 Supported query fields:
 
@@ -506,8 +586,31 @@ API endpoints used by the frontend:
 
 - `GET /api/summary`
 - `GET /api/query-fields`
+- `POST /api/query/complete`
 - `GET /api/listings?q=<query>&limit=<n>&offset=<n>&sort=<field>&sortDir=<asc|desc>`
+- `POST /api/listings/manual`
 - `POST /api/listings/resolve`
+- `GET /api/listings/resolver-status?listingId=<id>`
+- `GET /api/backlog`
+- `GET /api/resolve-queue`
+- `POST /api/resolve-queue`
+- `DELETE /api/resolve-queue`
+- `POST /api/resolve-queue/run`
+- `GET /api/purchase-history`
+- `POST /api/purchase-history`
+- `GET /api/purchase-history/documents`
+- `POST /api/purchase-history/documents`
+- `GET /api/purchase-history/export`
+- `POST /api/purchase-history/import`
+- `POST /api/purchase-history/merge`
+- `POST /api/purchase-history/listing-links`
+- `GET /api/purchase-history/events`
+- `GET /api/purchase-history-match-queue`
+- `GET /api/purchase-history-match-queue/matches`
+- `POST /api/purchase-history-match-queue/action`
+- `POST /api/purchase-history-match-queue/scan`
+- `GET /api/events`
+- `GET /api/workflows/config`
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
 - `POST /api/workflows/start`
@@ -515,6 +618,10 @@ API endpoints used by the frontend:
 - `POST /api/workflows/reconcile`
 - `GET /api/workflows/:id/stats`
 - `GET /api/workflows/:id/events?category=done|skipped|error|started|all&limit=50`
+- `POST /api/workflows/:id/commands`
+- `GET /api/credentials`
+- `POST /api/credentials`
+- `POST /api/credentials/active`
 - `GET /files/<artifact-path>`
 
 ## Data Format
@@ -641,6 +748,20 @@ For `marketplace:home:collect`:
 - `--login-timeout-seconds <secs>`
 - `--headed`
 
+For `marketplace:search:explore`:
+
+- `--query "<text>"`; can be repeated for a round-robin seed list
+- `--queries "<text1,text2,...>"`; accepts comma, semicolon, or newline separated seed entries
+- `--random-walks-between-seeds <n>`
+- `--random-walks-between-seeds-min <n>`
+- `--random-walks-between-seeds-max <n>`
+- `--reseed-round-min <n>` and `--reseed-round-max <n>` for legacy single-query reseeding
+- `--bag-min-keyword-length <n>`
+- `--bag-max-keyword-length <n>`
+- `--bag-min-times-seen <n>`
+- `--exclude-seed-from-bag`
+- plus the same location, auth, collection, refresh, screenshot, and headed/headless flags as `marketplace:home:collect`
+
 For `marketplace:home:process`:
 
 - `--once`
@@ -676,6 +797,58 @@ For `marketplace:home:serve`:
 - `--host <host>`
 - `--port <port>`
 - `--db-path <file>`
+- `--admin-token <token>`
+- `--read-only-token <token>`
+- `--readonly-token <token>`
+
+For `marketplace:auth:profile-onboarder`:
+
+- `--db-path <file>`
+- `--user-data-dir <dir>`
+- `--credentials-path <file>`
+- `--credentials-profile <id>`
+- `--start-url <url>`
+- `--worker-id <id>`
+- `--login-timeout-seconds <secs>`
+- `--poll-seconds <secs>`
+- `--max-elements <n>`
+- `--screenshot-dir <dir>`
+- `--headed`
+- `--headless`
+- `--json`
+
+For `marketplace:auth:headless-onboard`:
+
+- `--user-data-dir <dir>`
+- `--credentials-path <file>`
+- `--credentials-profile <id>`
+- `--start-url <url>`
+- `--login-timeout-seconds <secs>`
+- `--poll-seconds <secs>`
+- `--max-elements <n>`
+- `--no-interactive`
+- `--json-events`
+
+For `marketplace:credentials:import`:
+
+- `--credentials-path <file>`
+- `--source-file <file>`
+- `--id <profile-id>`
+- `--label <display-label>`
+- `--activate`
+- `--no-activate`
+
+For `marketplace:home:index`:
+
+- `--db-path <file>`
+- `--limit <n>`
+- `--all`
+- `--once`
+- `--poll-interval-seconds <secs>`
+- `--poll-jitter-min <n>`
+- `--poll-jitter-max <n>`
+- `--worker-id <id>`
+- `--json`
 
 For `marketplace:home:backlog:indexes`:
 
@@ -699,6 +872,24 @@ For `marketplace:home:db:maintain`:
 - `--optimize` / `--no-optimize`
 - `--analyze`
 - `--vacuum`
+- `--recover-stale-processing`
+- `--stale-processing-seconds <secs>`
+- `--stale-processing-status <pending|error>`
+
+For `marketplace:home:db:merge`:
+
+- `--source-db <file>`
+- `--target-db <file>` / `--db-path <file>`
+- `--statuses <done,sold,pending_sale>`
+- `--execute`
+- `--dry-run`
+- `--no-resolved-listings`
+- `--no-listing-events`
+- `--no-workflow-events`
+- `--preserve-media-paths`
+- `--clear-media-paths`
+- `--rewrite-prefix <from=to>`
+- `--json`
 
 For `marketplace:home:tier3:dry-run`:
 
@@ -727,6 +918,6 @@ For `marketplace:home:export`:
 
 ## More Detail
 
-For the longer workflow notes, see [WORKFLOW.md](WORKFLOW.md).
+For longer workflow notes, see [docs/marketplace-workflow-flowcharts.md](docs/marketplace-workflow-flowcharts.md) and [docs/marketplace-worker-scheduling-and-backlog-plan.md](docs/marketplace-worker-scheduling-and-backlog-plan.md).
 
 For a product and engineering overview of the homepage pipeline, see [docs/marketplace-homepage-pipeline-overview.md](docs/marketplace-homepage-pipeline-overview.md).

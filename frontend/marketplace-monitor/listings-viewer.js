@@ -1464,7 +1464,7 @@ export function createListingsViewer(config = {}) {
   async function pollResolveProcess() {
     const processId = state.resolveProcessId;
     if (!processId) return;
-    const payload = await fetchJson('/api/workflows?reconcile=0&stats=0');
+    const payload = await fetchJson('/api/workflows?reconcile=0&stats=0&config=0');
     if (state.resolveProcessId !== processId) return;
     const proc = (payload.processes || []).find((item) => item.id === processId);
     if (!proc) return;

@@ -156,6 +156,16 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_match_seen
+    ON homepage_listings (last_seen_at ASC, listing_id ASC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_homepage_listings_match_completed
+    ON homepage_listings (detail_completed_at ASC, listing_id ASC);
+  `);
+
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_homepage_listings_listed_latest
     ON homepage_listings (detail_listed_at_latest_unix DESC, last_seen_at DESC);
   `);
@@ -2005,6 +2015,58 @@ function matchPurchaseHistoryListing(historyRow, listing, options = {}) {
   };
 }
 
+function preparePurchaseHistoryMatchRow(historyRow) {
+  return {
+    row: historyRow,
+    purchasePrice: purchaseHistoryPriceCad(historyRow),
+    terms: purchaseHistoryMatchTerms(historyRow),
+  };
+}
+
+function prepareListingMatchRow(listing) {
+  return {
+    row: listing,
+    listingPrice: listingPriceCad(listing),
+    haystack: listingMatchHaystack(listing),
+  };
+}
+
+function matchPreparedPurchaseHistoryListing(history, listing, options = {}) {
+  const margin = Number.isFinite(options.margin) ? options.margin : 0.08;
+  if (
+    listing.listingPrice === null
+    || history.purchasePrice === null
+    || history.purchasePrice <= 0
+    || !listing.haystack
+  ) {
+    return null;
+  }
+  const threshold = history.purchasePrice * (1 + margin);
+  if (listing.listingPrice > threshold) {
+    return null;
+  }
+  const matchedTerms = history.terms.filter((term) => listing.haystack.includes(term));
+  const hasPhraseMatch = matchedTerms.some((term) => term.includes(' '));
+  const hasCompactModelCode = matchedTerms.some((term) => (
+    /[a-z]/.test(term)
+    && /\d/.test(term)
+    && /^[a-z0-9]{3,8}$/.test(term)
+    && !/^\d+mm$/.test(term)
+  ));
+  if (!matchedTerms.length || (!hasPhraseMatch && matchedTerms.length < 2 && !hasCompactModelCode)) {
+    return null;
+  }
+  return {
+    documentId: history.row.document_id,
+    recordId: history.row.record_id,
+    listingId: listing.row.listing_id,
+    listingPriceCad: listing.listingPrice,
+    purchasePriceCad: history.purchasePrice,
+    thresholdPriceCad: threshold,
+    matchedTerms: matchedTerms.slice(0, 12),
+  };
+}
+
 function upsertPurchaseHistoryMatchQueueItem(db, match, options = {}) {
   const now = options.matchedAt || new Date().toISOString();
   const listing = getHomepageListing(db, match.listingId) || {};
@@ -2374,14 +2436,22 @@ function scanPurchaseHistoryMatchesForListings(db, listingIds, options = {}) {
   }
   const historyRows = listPurchaseHistoryRowsForMatching(db, {
     limit: options.historyLimit,
-  });
+  }).map(preparePurchaseHistoryMatchRow).filter((row) => (
+    row.purchasePrice !== null
+    && row.purchasePrice > 0
+    && row.terms.length > 0
+  ));
   const matchedListingIds = new Set();
   let matched = 0;
   const matchedAt = options.matchedAt || new Date().toISOString();
   const margin = Number.isFinite(options.margin) ? options.margin : 0.08;
   for (const listing of listings) {
+    const preparedListing = prepareListingMatchRow(listing);
+    if (preparedListing.listingPrice === null || !preparedListing.haystack) {
+      continue;
+    }
     for (const historyRow of historyRows) {
-      const match = matchPurchaseHistoryListing(historyRow, listing, { margin });
+      const match = matchPreparedPurchaseHistoryListing(historyRow, preparedListing, { margin });
       if (!match) {
         continue;
       }
@@ -2459,7 +2529,7 @@ function listListingsForPurchaseHistoryMatchScan(db, stateKey, columnName, optio
   return {
     state,
     rows: db.prepare(`
-      SELECT *
+      SELECT listing_id, ${columnName}
       FROM homepage_listings
       WHERE COALESCE(${columnName}, '') != ''
         AND (

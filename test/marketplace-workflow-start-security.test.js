@@ -64,6 +64,20 @@ test('workflow start args allow declared fields and worker screenshot runtime se
   ]);
 });
 
+test('workflow start args allow search explorer round-robin keyword controls', () => {
+  const args = validateWorkflowStartArgs('search-explore', [
+    '--queries', 'leica m6, nikon d850, pentax 67',
+    '--random-walks-between-seeds', '2',
+    '--max-runtime-seconds', '30',
+  ]);
+
+  assert.deepEqual(args, [
+    '--queries', 'leica m6, nikon d850, pentax 67',
+    '--random-walks-between-seeds', '2',
+    '--max-runtime-seconds', '30',
+  ]);
+});
+
 test('workflow start args allow profile onboarder interactive flags', () => {
   const args = validateWorkflowStartArgs('profile-onboarder', [
     '--credentials-profile', 'default',

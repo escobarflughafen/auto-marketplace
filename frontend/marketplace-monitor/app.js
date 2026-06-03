@@ -2331,7 +2331,9 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
       args.push(...(option?.args || []));
       continue;
     }
-    const text = String(value ?? '').trim();
+    const text = field.kind === 'textarea'
+      ? String(value ?? '').split(/\r?\n/g).map((line) => line.trim()).filter(Boolean).join(', ')
+      : String(value ?? '').trim();
     if (text) args.push(field.flag, text);
   }
   if (workflow?.script === 'marketplace:home:process') {
@@ -2340,6 +2342,110 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
     args.push(...workerScreenshotSettingsArgs());
   }
   return args;
+}
+
+function listFieldItems(value) {
+  return String(value ?? '')
+    .split(/[\r\n,;]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function serializeListFieldItems(items) {
+  return (items || []).map((item) => String(item || '').trim()).filter(Boolean).join('\n');
+}
+
+function updateWorkflowArgsPreview(workflow = selectedWorkflow()) {
+  const text = workflow ? buildWorkflowArgs(workflow).join(' ') : '';
+  els.workflowArgsPreview.value = text;
+  const preview = document.getElementById('workerControlArgsPreview');
+  if (preview) {
+    preview.value = text;
+  }
+}
+
+function markWorkerConfigSaved(text = 'Saved for next run.') {
+  const saved = document.getElementById('workerConfigStatus');
+  if (saved) {
+    saved.textContent = text;
+  }
+}
+
+function workflowListInputs(fieldId) {
+  return [...(els.workerControl?.querySelectorAll('input[data-list-field-id]') || [])]
+    .filter((input) => input.dataset.listFieldId === fieldId);
+}
+
+function syncWorkflowListField(fieldId) {
+  const workflow = selectedWorkflow();
+  if (!workflow) {
+    return;
+  }
+  const draft = ensureWorkflowDraft(workflow);
+  const inputs = workflowListInputs(fieldId);
+  draft[fieldId] = serializeListFieldItems(inputs.map((input) => input.value));
+  persistWorkflowDrafts();
+  const hidden = document.getElementById(`workflowField-${fieldId}`);
+  if (hidden) {
+    hidden.value = draft[fieldId];
+  }
+  updateWorkflowArgsPreview(workflow);
+  markWorkerConfigSaved();
+}
+
+function bindWorkflowListRow(row) {
+  const input = row.querySelector('input[data-list-field-id]');
+  const remove = row.querySelector('.worker-list-remove');
+  if (input) {
+    input.addEventListener('input', () => syncWorkflowListField(input.dataset.listFieldId));
+    input.addEventListener('change', () => syncWorkflowListField(input.dataset.listFieldId));
+  }
+  if (remove) {
+    remove.addEventListener('click', () => {
+      const fieldId = remove.dataset.listFieldId;
+      const editor = remove.closest('.worker-list-editor');
+      row.remove();
+      if (editor && !editor.querySelector('input[data-list-field-id]')) {
+        const addButton = editor.querySelector('.worker-list-add');
+        editor.insertBefore(createWorkflowListRow(fieldId), addButton);
+      }
+      syncWorkflowListField(fieldId);
+    });
+  }
+}
+
+function createWorkflowListRow(fieldId, value = '') {
+  const row = document.createElement('div');
+  row.className = 'worker-list-row';
+  const input = document.createElement('input');
+  input.dataset.listFieldId = fieldId;
+  input.type = 'text';
+  input.value = value;
+  input.placeholder = 'Keyword';
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'secondary worker-list-remove';
+  remove.dataset.listFieldId = fieldId;
+  remove.title = 'Remove keyword';
+  remove.setAttribute('aria-label', 'Remove keyword');
+  remove.textContent = '-';
+  row.append(input, remove);
+  bindWorkflowListRow(row);
+  return row;
+}
+
+function bindWorkflowListEditors(root = els.workerControl) {
+  for (const row of root?.querySelectorAll('.worker-list-row') || []) {
+    bindWorkflowListRow(row);
+  }
+  for (const add of root?.querySelectorAll('.worker-list-add') || []) {
+    add.addEventListener('click', () => {
+      const fieldId = add.dataset.listFieldId;
+      const row = createWorkflowListRow(fieldId);
+      add.parentElement?.insertBefore(row, add);
+      row.querySelector('input')?.focus();
+    });
+  }
 }
 
 function renderSummary() {
@@ -2539,6 +2645,31 @@ function renderField(field, draft) {
       + `<td><select id="${html(id)}" data-field-id="${html(field.id)}">${options}</select></td>`
       + '</tr>';
   }
+  if (field.kind === 'textarea') {
+    if (field.editor === 'list') {
+      const items = listFieldItems(value);
+      const rows = (items.length ? items : ['']).map((item, index) => (
+        '<div class="worker-list-row">'
+        + `<input data-list-field-id="${html(field.id)}" data-list-index="${index}" type="text" value="${html(item)}" placeholder="Keyword">`
+        + `<button type="button" class="secondary worker-list-remove" data-list-field-id="${html(field.id)}" data-list-index="${index}" title="Remove keyword" aria-label="Remove keyword">&minus;</button>`
+        + '</div>'
+      )).join('');
+      return '<tr>'
+        + `<th><label for="${html(id)}">${html(field.label)}</label></th>`
+        + '<td>'
+        + `<input id="${html(id)}" data-field-id="${html(field.id)}" type="hidden" value="${html(value)}">`
+        + '<div class="worker-list-editor">'
+        + rows
+        + `<button type="button" class="secondary worker-list-add" data-list-field-id="${html(field.id)}" title="Add keyword" aria-label="Add keyword">+</button>`
+        + '</div>'
+        + '</td>'
+        + '</tr>';
+    }
+    return '<tr>'
+      + `<th><label for="${html(id)}">${html(field.label)}</label></th>`
+      + `<td><textarea id="${html(id)}" data-field-id="${html(field.id)}" rows="4">${html(value)}</textarea></td>`
+      + '</tr>';
+  }
   const type = field.kind === 'number' ? 'number' : 'text';
   const step = field.step !== undefined ? ` step="${html(field.step)}"` : '';
   const min = field.min !== undefined ? ` min="${html(field.min)}"` : '';
@@ -2674,11 +2805,7 @@ function bindCaptureSettings() {
     writeCaptureSettings(next);
     const workflow = selectedWorkflow();
     if (workflow?.script === 'marketplace:home:process') {
-      els.workflowArgsPreview.value = buildWorkflowArgs(workflow).join(' ');
-      const preview = document.getElementById('workerControlArgsPreview');
-      if (preview) {
-        preview.value = els.workflowArgsPreview.value;
-      }
+      updateWorkflowArgsPreview(workflow);
     }
   };
   for (const control of controls) {
@@ -2703,20 +2830,16 @@ function renderWorkflowForm() {
 
 function handleWorkflowFieldChange(event) {
   const workflow = selectedWorkflow();
-  const draft = ensureWorkflowDraft(workflow);
   const fieldId = event.target.dataset.fieldId;
+  if (!workflow || !fieldId) {
+    return;
+  }
+  const draft = ensureWorkflowDraft(workflow);
   const field = workflow.fields.find((item) => item.id === fieldId);
   draft[fieldId] = field?.kind === 'boolean' ? event.target.checked : event.target.value;
   persistWorkflowDrafts();
-  els.workflowArgsPreview.value = buildWorkflowArgs(workflow).join(' ');
-  const preview = document.getElementById('workerControlArgsPreview');
-  if (preview) {
-    preview.value = els.workflowArgsPreview.value;
-  }
-  const saved = document.getElementById('workerConfigStatus');
-  if (saved) {
-    saved.textContent = 'Saved for next run.';
-  }
+  updateWorkflowArgsPreview(workflow);
+  markWorkerConfigSaved();
 }
 
 async function refreshWorkerPanel(options = {}) {
@@ -2817,6 +2940,7 @@ function renderWorkerControl() {
     input.addEventListener('input', handleWorkflowFieldChange);
     input.addEventListener('change', handleWorkflowFieldChange);
   }
+  bindWorkflowListEditors(els.workerControl);
   document.getElementById('workerControlStartButton').addEventListener('click', () => document.getElementById('startWorkflowButton').click());
   document.getElementById('workerControlResetButton').addEventListener('click', () => {
     store.workflowDrafts[workflow.id] = defaultDraftForWorkflow(workflow);
@@ -3650,24 +3774,27 @@ async function loadWorkflows(options = {}) {
   const payload = await fetchJson(configOnly
     ? '/api/workflows/config'
     : light
-      ? '/api/workflows?reconcile=0&stats=0'
+      ? '/api/workflows?reconcile=0&stats=0&config=0'
       : '/api/workflows');
   if (requestSeq !== store.workflowRequestSeq) return;
-  const nextWorkflows = payload.workflows || [];
-  const nextWorkflowSignature = JSON.stringify(nextWorkflows.map((workflow) => ({
+  const hasWorkflowPayload = Array.isArray(payload.workflows);
+  const nextWorkflows = hasWorkflowPayload ? payload.workflows : store.workflows;
+  const nextWorkflowSignature = hasWorkflowPayload ? JSON.stringify(nextWorkflows.map((workflow) => ({
     id: workflow.id,
     label: workflow.label,
     workerType: workflow.workerType,
     strategy: workflow.strategy,
     fields: workflow.fields,
-  })));
-  const workflowDefinitionsChanged = nextWorkflowSignature !== store.workflowSignature;
+  }))) : store.workflowSignature;
+  const workflowDefinitionsChanged = hasWorkflowPayload && nextWorkflowSignature !== store.workflowSignature;
   const nextProcessSignature = processRenderSignature(payload.processes || []);
   const processDefinitionsChanged = nextProcessSignature !== store.processSignature;
-  store.workflows = nextWorkflows;
-  store.workflowsLoaded = true;
-  store.workflowSignature = nextWorkflowSignature;
-  for (const workflow of store.workflows) ensureWorkflowDraft(workflow);
+  if (hasWorkflowPayload) {
+    store.workflows = nextWorkflows;
+    store.workflowsLoaded = true;
+    store.workflowSignature = nextWorkflowSignature;
+    for (const workflow of store.workflows) ensureWorkflowDraft(workflow);
+  }
   if (!background && (workflowDefinitionsChanged || !els.workerControl.innerHTML.trim())) {
     renderWorkflowOptions();
     renderWorkflowForm();

@@ -68,9 +68,36 @@ function parseIntegerFlag(value, flagName, minimum = 0) {
   return parsed;
 }
 
+function parseKeywordList(value) {
+  return String(value || '')
+    .split(/[\r\n,;]+/g)
+    .map((item) => normalizeKeyword(item))
+    .filter(Boolean);
+}
+
+function uniqueKeywords(keywords) {
+  const seen = new Set();
+  const result = [];
+  for (const keyword of keywords.map((item) => normalizeKeyword(item)).filter(Boolean)) {
+    const key = keyword.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(keyword);
+  }
+  return result;
+}
+
 function parseArgs(argv) {
   const options = applyWorkerScreenshotDefaults({
     query: '',
+    queryInputs: [],
+    queriesRaw: '',
+    seedQueries: [],
+    keywordListProvided: false,
+    randomWalksBetweenSeedsMin: 0,
+    randomWalksBetweenSeedsMax: 0,
     area: DEFAULT_AREA,
     areaExplicit: false,
     location: '',
@@ -110,6 +137,26 @@ function parseArgs(argv) {
     switch (arg) {
       case '--query':
         options.query = readFlagValue(argv, index, arg);
+        options.queryInputs.push(options.query);
+        index += 1;
+        break;
+      case '--queries':
+      case '--seed-queries':
+        options.queriesRaw = readFlagValue(argv, index, arg);
+        options.keywordListProvided = true;
+        index += 1;
+        break;
+      case '--random-walks-between-seeds':
+        options.randomWalksBetweenSeedsMin = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        options.randomWalksBetweenSeedsMax = options.randomWalksBetweenSeedsMin;
+        index += 1;
+        break;
+      case '--random-walks-between-seeds-min':
+        options.randomWalksBetweenSeedsMin = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--random-walks-between-seeds-max':
+        options.randomWalksBetweenSeedsMax = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
         index += 1;
         break;
       case '--area':
@@ -272,6 +319,7 @@ function parseArgs(argv) {
       default:
         if (!arg.startsWith('--') && !options.query) {
           options.query = arg;
+          options.queryInputs.push(options.query);
           break;
         }
 
@@ -279,9 +327,15 @@ function parseArgs(argv) {
     }
   }
 
-  options.query = normalizeKeyword(options.query);
+  const explicitSeedQueries = parseKeywordList(options.queriesRaw);
+  const queryInputSeeds = uniqueKeywords(options.queryInputs);
+  options.seedQueries = uniqueKeywords(explicitSeedQueries.length ? explicitSeedQueries : queryInputSeeds);
+  options.query = normalizeKeyword(options.seedQueries[0] || options.query);
   if (!options.query) {
-    throw new Error('Missing required search keyword. Pass --query "<keyword>".');
+    throw new Error('Missing required search keyword. Pass --query "<keyword>" or --queries "<keyword1>,<keyword2>".');
+  }
+  if (!options.seedQueries.length) {
+    options.seedQueries = [options.query];
   }
 
   options.location = cleanText(options.location);
@@ -297,6 +351,9 @@ function parseArgs(argv) {
 
   if (options.reseedRoundMax < options.reseedRoundMin) {
     throw new Error('Expected --reseed-round-max to be >= --reseed-round-min');
+  }
+  if (options.randomWalksBetweenSeedsMax < options.randomWalksBetweenSeedsMin) {
+    throw new Error('Expected --random-walks-between-seeds-max to be >= --random-walks-between-seeds-min');
   }
 
   if (options.bagMaxKeywordLength < options.bagMinKeywordLength) {
@@ -554,8 +611,31 @@ function randomIntegerBetween(minimum, maximum) {
   return minimum + Math.floor(Math.random() * ((maximum - minimum) + 1));
 }
 
+function randomItem(items) {
+  if (!items.length) {
+    return null;
+  }
+  return items[Math.floor(Math.random() * items.length)];
+}
+
 function computeNextSeedRound(currentRound, reseedRoundMin, reseedRoundMax) {
   return currentRound + randomIntegerBetween(reseedRoundMin, reseedRoundMax);
+}
+
+function roundRobinSearchEnabled(options) {
+  return Boolean(
+    options.keywordListProvided
+    || (options.seedQueries || []).length > 1
+    || options.randomWalksBetweenSeedsMin > 0
+    || options.randomWalksBetweenSeedsMax > 0,
+  );
+}
+
+function computeRandomWalkCount(options) {
+  return randomIntegerBetween(
+    options.randomWalksBetweenSeedsMin || 0,
+    options.randomWalksBetweenSeedsMax || 0,
+  );
 }
 
 function computeJitteredRefreshMs(refreshSeconds, jitterMin, jitterMax) {
@@ -606,6 +686,68 @@ function renderCycleSummaryForConsole(cycleSummary) {
 }
 
 async function chooseRoundQuery(db, state, options) {
+  if (roundRobinSearchEnabled(options)) {
+    const seedQueries = (options.seedQueries && options.seedQueries.length)
+      ? options.seedQueries
+      : [options.query];
+    const randomWalksRemaining = Number.isFinite(state.randomWalksRemaining)
+      ? state.randomWalksRemaining
+      : 0;
+
+    if (randomWalksRemaining > 0) {
+      const candidate = randomItem(uniqueKeywords(state.randomWalkCandidates || []));
+      if (candidate) {
+        state.randomWalksRemaining = randomWalksRemaining - 1;
+        return {
+          query: candidate,
+          querySource: 'round_random_walk',
+          nextSeedRound: state.nextSeedRound,
+          bagKeyword: null,
+          seedIndex: state.seedIndex || 0,
+          randomWalksRemaining: state.randomWalksRemaining,
+          randomWalkCandidateSource: 'previous_round_collected_titles',
+        };
+      }
+
+      const bagKeyword = pickRandomSearchTitleBagKeyword(db, {
+        minTimesSeen: options.bagMinTimesSeen,
+      });
+      if (bagKeyword) {
+        state.randomWalksRemaining = randomWalksRemaining - 1;
+        return {
+          query: bagKeyword.keyword,
+          querySource: 'round_random_walk_bag_fallback',
+          nextSeedRound: state.nextSeedRound,
+          bagKeyword,
+          seedIndex: state.seedIndex || 0,
+          randomWalksRemaining: state.randomWalksRemaining,
+          randomWalkCandidateSource: 'title_bag_fallback',
+        };
+      }
+
+      state.randomWalksRemaining = 0;
+    }
+
+    const seedIndex = Number.isFinite(state.seedIndex) ? state.seedIndex : 0;
+    const normalizedSeedIndex = seedIndex % seedQueries.length;
+    const query = seedQueries[normalizedSeedIndex];
+    const nextSeedIndex = (normalizedSeedIndex + 1) % seedQueries.length;
+    const nextRandomWalks = computeRandomWalkCount(options);
+    state.seedIndex = nextSeedIndex;
+    state.randomWalksRemaining = nextRandomWalks;
+    state.currentSeedQuery = query;
+    return {
+      query,
+      querySource: 'seed_round_robin',
+      nextSeedRound: state.nextSeedRound,
+      bagKeyword: null,
+      seedIndex: normalizedSeedIndex,
+      nextSeedIndex,
+      randomWalksRemaining: nextRandomWalks,
+      randomWalkCandidateSource: 'seed_list',
+    };
+  }
+
   if (state.roundNumber === 1 || state.roundNumber >= state.nextSeedRound) {
     const reseedRound = computeNextSeedRound(
       state.roundNumber,
@@ -659,6 +801,10 @@ async function runRound(page, db, options, state, lifecycle = null) {
       querySource: queryPlan.querySource,
       roundNumber: state.roundNumber,
       nextSeedRound: queryPlan.nextSeedRound,
+      seedIndex: queryPlan.seedIndex,
+      nextSeedIndex: queryPlan.nextSeedIndex,
+      randomWalksRemaining: queryPlan.randomWalksRemaining,
+      randomWalkCandidateSource: queryPlan.randomWalkCandidateSource || '',
     },
   });
   appendCollectorWorkflowEvent(db, options, 'collector_cycle_started', {
@@ -674,7 +820,7 @@ async function runRound(page, db, options, state, lifecycle = null) {
   });
   await appendLog(
     options.logFile,
-    `round_start round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" next_seed_round=${queryPlan.nextSeedRound} area=${options.area} max_items=${targetLabel} collect_all=${options.collectAll} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} bag_keywords=${bagCountsBefore.totalKeywords} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
+    `round_start round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" next_seed_round=${queryPlan.nextSeedRound} seed_index=${queryPlan.seedIndex ?? ''} next_seed_index=${queryPlan.nextSeedIndex ?? ''} random_walks_remaining=${queryPlan.randomWalksRemaining ?? ''} random_walk_candidate_source=${queryPlan.randomWalkCandidateSource || ''} area=${options.area} max_items=${targetLabel} collect_all=${options.collectAll} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} bag_keywords=${bagCountsBefore.totalKeywords} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
   );
 
   const activePage = await safeGoto(page.context(), page, searchUrl);
@@ -709,7 +855,9 @@ async function runRound(page, db, options, state, lifecycle = null) {
     matchedAt: seenAt,
   });
 
-  const bagKeywords = filterBagKeywordsFromItems(items, options);
+  const collectedTitleKeywords = filterBagKeywordsFromItems(items, options);
+  state.randomWalkCandidates = uniqueKeywords(collectedTitleKeywords);
+  const bagKeywords = [...collectedTitleKeywords];
   if (options.includeSeedInBag) {
     bagKeywords.push(queryPlan.query);
   }
@@ -728,8 +876,14 @@ async function runRound(page, db, options, state, lifecycle = null) {
     source: 'search',
     sourceKeyword: queryPlan.query,
     querySource: queryPlan.querySource,
+    seedQueries: options.seedQueries,
     roundNumber: state.roundNumber,
     nextSeedRound: queryPlan.nextSeedRound,
+    seedIndex: queryPlan.seedIndex,
+    nextSeedIndex: queryPlan.nextSeedIndex,
+    randomWalksRemaining: queryPlan.randomWalksRemaining,
+    randomWalkCandidateSource: queryPlan.randomWalkCandidateSource || '',
+    randomWalkCandidateCount: state.randomWalkCandidates.length,
     area: options.area,
     collectAll: options.collectAll,
     session: sessionSummary,
@@ -757,7 +911,7 @@ async function runRound(page, db, options, state, lifecycle = null) {
   const snapshotPath = await writeCycleSnapshot(options.snapshotFile, cycleSummary);
   await appendLog(
     options.logFile,
-    `round_done round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" collected=${items.length} stop_reason=${collectionStats.stopReason} elapsed_seconds=${collectionStats.elapsedSeconds} scroll_passes=${collectionStats.scrollPasses} stable_passes=${collectionStats.stablePassesReached}/${collectionStats.stablePassesTarget} runtime_limit_reached=${collectionStats.runtimeLimitReached} bag_added=${bagKeywords.length} new=${outcomeCounts.new} existing_same=${outcomeCounts.existing_same} existing_updated=${outcomeCounts.existing_updated} bag_keywords=${bagCounts.totalKeywords} db_pending=${counts.pending} db_processing=${counts.processing} db_done=${counts.done} db_error=${counts.error} snapshot=${snapshotPath}`,
+    `round_done round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" collected=${items.length} random_walk_candidates=${state.randomWalkCandidates.length} random_walks_remaining=${state.randomWalksRemaining ?? ''} stop_reason=${collectionStats.stopReason} elapsed_seconds=${collectionStats.elapsedSeconds} scroll_passes=${collectionStats.scrollPasses} stable_passes=${collectionStats.stablePassesReached}/${collectionStats.stablePassesTarget} runtime_limit_reached=${collectionStats.runtimeLimitReached} bag_added=${bagKeywords.length} new=${outcomeCounts.new} existing_same=${outcomeCounts.existing_same} existing_updated=${outcomeCounts.existing_updated} bag_keywords=${bagCounts.totalKeywords} db_pending=${counts.pending} db_processing=${counts.processing} db_done=${counts.done} db_error=${counts.error} snapshot=${snapshotPath}`,
   );
   appendCollectorWorkflowEvent(db, options, 'collector_cycle_completed', {
     status: 'completed',
@@ -772,6 +926,10 @@ async function runRound(page, db, options, state, lifecycle = null) {
       query: queryPlan.query,
       querySource: queryPlan.querySource,
       roundNumber: state.roundNumber,
+      seedIndex: queryPlan.seedIndex,
+      nextSeedIndex: queryPlan.nextSeedIndex,
+      randomWalksRemaining: state.randomWalksRemaining,
+      randomWalkCandidateCount: state.randomWalkCandidates.length,
       dbCountsAfter: counts,
     },
   });
@@ -795,7 +953,7 @@ async function main() {
   await ensureDir(options.workerScreenshotDir);
   await appendLog(
     options.logFile,
-    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
+    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" seed_queries=${JSON.stringify(options.seedQueries)} keyword_rotation=${roundRobinSearchEnabled(options) ? 'round_robin' : 'legacy'} random_walks_between_seeds_min=${options.randomWalksBetweenSeedsMin} random_walks_between_seeds_max=${options.randomWalksBetweenSeedsMax} area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -810,6 +968,10 @@ async function main() {
       maxItems: options.collectAll ? 'all' : options.maxItems,
       collectAll: options.collectAll,
       query: options.query,
+      seedQueries: options.seedQueries,
+      keywordRotation: roundRobinSearchEnabled(options) ? 'round_robin' : 'legacy',
+      randomWalksBetweenSeedsMin: options.randomWalksBetweenSeedsMin,
+      randomWalksBetweenSeedsMax: options.randomWalksBetweenSeedsMax,
       area: options.area,
     },
   });
@@ -892,6 +1054,9 @@ async function main() {
       roundNumber: 1,
       nextSeedRound: 1,
       lastQuery: '',
+      seedIndex: 0,
+      randomWalksRemaining: 0,
+      randomWalkCandidates: [],
     };
 
     do {
@@ -974,6 +1139,7 @@ if (require.main === module) {
 
 module.exports = {
   parseArgs,
+  parseKeywordList,
   buildSearchUrl,
   pickSearchCardTitle,
   filterBagKeywordsFromItems,
