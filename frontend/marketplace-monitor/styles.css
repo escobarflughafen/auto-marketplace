@@ -75,6 +75,8 @@
 html {
   min-width: 0;
   background: #000000;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 body {
   margin: 0;
@@ -372,15 +374,19 @@ button.query-clear-button:not(:disabled):hover,
 }
 .query-highlight,
 .query-editor textarea {
+  box-sizing: border-box;
   min-height: 90px;
   margin: 0;
   padding: 8px 10px;
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.45;
+  letter-spacing: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   tab-size: 2;
+  font-variant-ligatures: none;
+  text-rendering: optimizeSpeed;
 }
 .query-highlight {
   position: absolute;
@@ -391,10 +397,13 @@ button.query-clear-button:not(:disabled):hover,
   background: #fff;
 }
 .query-editor textarea {
+  -webkit-appearance: none;
+  appearance: none;
   position: relative;
   z-index: 1;
   display: block;
   width: 100%;
+  border-radius: 0;
   resize: vertical;
   color: transparent;
   caret-color: var(--ink);
