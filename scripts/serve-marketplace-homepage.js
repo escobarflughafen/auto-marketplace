@@ -218,9 +218,19 @@ const WORKFLOWS = {
           { value: 'headed', label: 'Headed', args: ['--headed'] },
         ],
       },
-      { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax' },
-      { id: 'queries', label: 'Keyword list', kind: 'textarea', editor: 'list', flag: '--queries', defaultValue: '' },
-      { id: 'randomWalksBetweenSeeds', label: 'Random walks between entries', kind: 'number', flag: '--random-walks-between-seeds', defaultValue: '', min: 0 },
+      {
+        id: 'queryMode',
+        label: 'Query mode',
+        kind: 'choice',
+        defaultValue: 'single',
+        options: [
+          { value: 'single', label: 'Single query', args: [] },
+          { value: 'list', label: 'Keyword list', args: [] },
+        ],
+      },
+      { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax', activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'queries', label: 'Keyword list', kind: 'textarea', editor: 'list', flag: '--queries', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'randomWalksBetweenSeeds', label: 'Random walks between entries', kind: 'number', flag: '--random-walks-between-seeds', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'list' } },
       { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
       { id: 'radiusMiles', label: 'Radius miles', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
@@ -552,9 +562,45 @@ function buildWorkflowDefinitions() {
   });
 }
 
+function defaultDraftFromFields(fields = []) {
+  const draft = {};
+  for (const field of fields) {
+    if (field.kind === 'boolean') {
+      draft[field.id] = Boolean(field.defaultValue);
+    } else if (field.kind === 'choice') {
+      draft[field.id] = field.defaultValue ?? field.options?.[0]?.value ?? '';
+    } else {
+      draft[field.id] = field.defaultValue ?? '';
+    }
+  }
+  return draft;
+}
+
+function workflowFieldActive(field, draft = {}) {
+  const rule = field?.activeWhen;
+  if (!rule) {
+    return true;
+  }
+  const actual = draft[rule.field];
+  if (Object.prototype.hasOwnProperty.call(rule, 'equals')) {
+    return actual === rule.equals;
+  }
+  if (Array.isArray(rule.oneOf)) {
+    return rule.oneOf.includes(actual);
+  }
+  if (Object.prototype.hasOwnProperty.call(rule, 'notEquals')) {
+    return actual !== rule.notEquals;
+  }
+  return true;
+}
+
 function buildDefaultArgsFromFields(fields = []) {
   const args = [];
+  const draft = defaultDraftFromFields(fields);
   for (const field of fields) {
+    if (!workflowFieldActive(field, draft)) {
+      continue;
+    }
     if (field.kind === 'boolean') {
       if (field.defaultValue && field.flag) {
         args.push(field.flag);

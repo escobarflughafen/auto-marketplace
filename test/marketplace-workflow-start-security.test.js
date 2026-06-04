@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildDefaultArgsFromFields,
   isBrowserWorkerType,
   isExclusiveBrowserWorkerType,
   normalizeWorkflowArgs,
@@ -10,6 +11,29 @@ const {
   workflowConcurrencyLimit,
   workflowConcurrencyScope,
 } = require('../scripts/serve-marketplace-homepage');
+
+test('workflow default args honor active query mode fields', () => {
+  const fields = [
+    {
+      id: 'queryMode',
+      kind: 'choice',
+      defaultValue: 'single',
+      options: [
+        { value: 'single', label: 'Single query', args: [] },
+        { value: 'list', label: 'Keyword list', args: [] },
+      ],
+    },
+    { id: 'query', kind: 'text', flag: '--query', defaultValue: 'pentax', activeWhen: { field: 'queryMode', equals: 'single' } },
+    { id: 'queries', kind: 'textarea', flag: '--queries', defaultValue: 'leica, nikon', activeWhen: { field: 'queryMode', equals: 'list' } },
+  ];
+
+  assert.deepEqual(buildDefaultArgsFromFields(fields), ['--query', 'pentax']);
+  assert.deepEqual(buildDefaultArgsFromFields([
+    { ...fields[0], defaultValue: 'list' },
+    fields[1],
+    fields[2],
+  ]), ['--queries', 'leica, nikon']);
+});
 
 test('workflow worker type browser classification keeps only profile onboarding exclusive', () => {
   assert.equal(isBrowserWorkerType('collector'), true);

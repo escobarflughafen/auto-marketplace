@@ -2226,10 +2226,18 @@ function ensureWorkflowDraft(workflow) {
     store.workflowDrafts[workflow.id] = defaults;
     persistWorkflowDrafts();
   } else {
+    const hadQueryMode = Object.prototype.hasOwnProperty.call(store.workflowDrafts[workflow.id], 'queryMode');
     store.workflowDrafts[workflow.id] = {
       ...defaults,
       ...store.workflowDrafts[workflow.id],
     };
+    if (
+      workflow.id === 'search-explore'
+      && !hadQueryMode
+      && String(store.workflowDrafts[workflow.id].queries || '').trim()
+    ) {
+      store.workflowDrafts[workflow.id].queryMode = 'list';
+    }
   }
   return store.workflowDrafts[workflow.id];
 }
@@ -2321,6 +2329,9 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
   const draft = ensureWorkflowDraft(workflow);
   const args = [];
   for (const field of workflow?.fields || []) {
+    if (!workflowFieldActive(field, draft)) {
+      continue;
+    }
     const value = draft[field.id];
     if (field.kind === 'boolean') {
       if (value && field.flag) args.push(field.flag);
@@ -2342,6 +2353,24 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
     args.push(...workerScreenshotSettingsArgs());
   }
   return args;
+}
+
+function workflowFieldActive(field, draft = {}) {
+  const rule = field?.activeWhen;
+  if (!rule) {
+    return true;
+  }
+  const actual = draft[rule.field];
+  if (Object.prototype.hasOwnProperty.call(rule, 'equals')) {
+    return actual === rule.equals;
+  }
+  if (Array.isArray(rule.oneOf)) {
+    return rule.oneOf.includes(actual);
+  }
+  if (Object.prototype.hasOwnProperty.call(rule, 'notEquals')) {
+    return actual !== rule.notEquals;
+  }
+  return true;
 }
 
 function listFieldItems(value) {
@@ -2688,7 +2717,7 @@ function renderField(field, draft) {
 }
 
 function renderWorkflowRows(workflow, draft) {
-  const fields = workflow?.fields || [];
+  const fields = (workflow?.fields || []).filter((field) => workflowFieldActive(field, draft));
   if (!fields.length) {
     return '<tr><td colspan="2" class="empty-state">This workflow has no editable fields.</td></tr>';
   }
@@ -2837,9 +2866,23 @@ function handleWorkflowFieldChange(event) {
   const draft = ensureWorkflowDraft(workflow);
   const field = workflow.fields.find((item) => item.id === fieldId);
   draft[fieldId] = field?.kind === 'boolean' ? event.target.checked : event.target.value;
+  if (workflow.id === 'search-explore' && fieldId === 'queryMode') {
+    if (draft.queryMode === 'list' && !String(draft.queries || '').trim() && String(draft.query || '').trim()) {
+      draft.queries = String(draft.query).trim();
+    } else if (draft.queryMode === 'single' && !String(draft.query || '').trim()) {
+      const firstListItem = listFieldItems(draft.queries)[0];
+      if (firstListItem) {
+        draft.query = firstListItem;
+      }
+    }
+  }
   persistWorkflowDrafts();
   updateWorkflowArgsPreview(workflow);
   markWorkerConfigSaved();
+  if ((workflow.fields || []).some((item) => item.activeWhen?.field === fieldId)) {
+    renderWorkerControl();
+    markWorkerConfigSaved();
+  }
 }
 
 async function refreshWorkerPanel(options = {}) {
