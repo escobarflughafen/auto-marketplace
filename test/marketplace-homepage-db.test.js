@@ -219,6 +219,15 @@ test('worker event helpers group audit events by category', () => {
     assert.equal(auditStats.total, 4);
     assert.equal(auditStats.latestEvent.event_type, 'collector_cycle_started');
 
+    const cachedAuditStats = getWorkerAuditEventStats(db, 'workflow-run-1', { cacheOnly: true });
+    assert.equal(cachedAuditStats.source, 'cache');
+    assert.equal(cachedAuditStats.listingTotal, 3);
+    assert.equal(cachedAuditStats.workflow, 1);
+    assert.equal(cachedAuditStats.total, 4);
+    assert.equal(cachedAuditStats.started, 1);
+    assert.equal(cachedAuditStats.done, 1);
+    assert.equal(cachedAuditStats.skipped, 1);
+
     const allEvents = listWorkerAuditEvents(db, 'workflow-run-1', { category: 'all' });
     assert.equal(allEvents.length, 4);
     assert.equal(allEvents[0].event_scope, 'workflow');

@@ -21,6 +21,7 @@
     "marketplace:home:export": "node scripts/export-marketplace-homepage.js",
     "marketplace:home:serve": "node scripts/serve-marketplace-homepage.js",
     "history:normalize-inventory": "node scripts/normalize-inventory-trading-history.js",
+    "test:ui:mock": "node test/marketplace-monitor-ui-integration.test.js",
     "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh"
   },
   "dependencies": {

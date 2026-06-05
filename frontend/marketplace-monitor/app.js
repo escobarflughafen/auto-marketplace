@@ -13,6 +13,7 @@ const listingsViewer = createListingsViewer({ routeQuerySource });
 
 const WORKFLOW_DRAFTS_STORAGE_KEY = 'marketplace-monitor-workflow-drafts';
 const WORKFLOW_SELECTION_STORAGE_KEY = 'marketplace-monitor-selected-workflow';
+const WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY = 'marketplace-monitor-worker-continuous-refresh';
 const WORKFLOW_ACTIVE_POLL_MS = 5000;
 const WORKFLOW_IDLE_POLL_MS = 15000;
 const WORKFLOW_HIDDEN_POLL_MS = 30000;
@@ -81,6 +82,7 @@ const store = {
   purchaseHistoryLoaded: false,
   eventRegistryLoaded: false,
   workflowsLoaded: false,
+  workflowContinuousRefresh: localStorage.getItem(WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY) === 'true',
   historySort: { key: 'title', direction: 'asc' },
   summarySignature: '',
   workflowSignature: '',
@@ -2920,6 +2922,20 @@ async function reconcileWorkerPanel() {
   }
 }
 
+function setWorkerStartPending(pending, message = '') {
+  const hiddenStart = document.getElementById('startWorkflowButton');
+  const visibleStart = document.getElementById('workerControlStartButton');
+  const status = document.getElementById('workerConfigStatus');
+  if (hiddenStart) hiddenStart.disabled = pending;
+  if (visibleStart) {
+    visibleStart.disabled = pending;
+    visibleStart.textContent = pending ? 'Starting...' : 'Start';
+  }
+  if (status && message) {
+    status.textContent = message;
+  }
+}
+
 function renderWorkerControl() {
   const workflow = selectedWorkflow();
   if (!workflow || !els.workerControl) {
@@ -2964,6 +2980,9 @@ function renderWorkerControl() {
     + '<button type="button" class="secondary" id="workerControlRefreshButton">Refresh</button>'
     + '<button type="button" class="secondary" id="workerControlReconcileButton">Check OS</button>'
     + '</div></td></tr>'
+    + '<tr><th>Refresh</th><td><label class="inline-control worker-refresh-toggle">'
+    + `<input id="workerContinuousRefreshCheckbox" type="checkbox"${store.workflowContinuousRefresh ? ' checked' : ''}> Continuous refresh`
+    + '</label></td></tr>'
     + '<tr><th>Saved</th><td><div class="process-meta" id="workerConfigStatus">Using saved params for this mode.</div></td></tr>'
     + '</tbody></table></div>'
     + '</section>'
@@ -2999,6 +3018,20 @@ function renderWorkerControl() {
     reconcileWorkerPanel().catch((error) => {
       alert(error.message || 'Worker OS check failed.');
     });
+  });
+  document.getElementById('workerContinuousRefreshCheckbox')?.addEventListener('change', (event) => {
+    store.workflowContinuousRefresh = event.target.checked;
+    localStorage.setItem(WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY, String(store.workflowContinuousRefresh));
+    if (store.workflowContinuousRefresh) {
+      scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
+      markWorkerConfigSaved('Continuous refresh enabled.');
+    } else {
+      if (store.workflowPollTimer) {
+        clearTimeout(store.workflowPollTimer);
+        store.workflowPollTimer = null;
+      }
+      markWorkerConfigSaved('Continuous refresh disabled.');
+    }
   });
 }
 
@@ -3064,7 +3097,7 @@ function bindCredentialManager() {
       if (status) status.textContent = 'Credential profile saved.';
       await loadCredentials({ render: false });
       renderSettings();
-      await loadWorkflows();
+      await loadWorkflows({ light: true });
     } catch (error) {
       alert(error.message || 'Credential profile could not be saved.');
     } finally {
@@ -3084,7 +3117,7 @@ function bindCredentialManager() {
       if (status) status.textContent = 'Active credential profile updated.';
       await loadCredentials({ render: false });
       renderSettings();
-      await loadWorkflows();
+      await loadWorkflows({ light: true });
     } catch (error) {
       alert(error.message || 'Active credential profile could not be updated.');
     } finally {
@@ -3094,7 +3127,7 @@ function bindCredentialManager() {
 
   refreshButton.addEventListener('click', async () => {
     await loadCredentials();
-    await loadWorkflows();
+    await loadWorkflows({ light: true });
   });
 }
 
@@ -3389,7 +3422,7 @@ function renderProcesses(options = {}) {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ processId: button.dataset.id }),
         });
-        await loadWorkflows();
+        await loadWorkflows({ light: true });
       } catch (error) {
         alert(error.message || 'Worker stop request could not be sent.');
         button.disabled = false;
@@ -3861,6 +3894,13 @@ async function loadWorkflows(options = {}) {
 }
 
 function scheduleWorkflowSync(delay = workflowsPollDelayMs()) {
+  if (!store.workflowContinuousRefresh) {
+    if (store.workflowPollTimer) {
+      clearTimeout(store.workflowPollTimer);
+      store.workflowPollTimer = null;
+    }
+    return;
+  }
   if (store.workflowPollTimer) {
     clearTimeout(store.workflowPollTimer);
   }
@@ -3899,7 +3939,7 @@ async function syncWorkflowsInBackground() {
   try {
     await loadWorkflows({
       background: true,
-      light: !isPanelActive('opsPanel'),
+      light: true,
     });
   } catch (error) {
     console.warn('Background workflow sync failed:', error.message || error);
@@ -4250,16 +4290,25 @@ function bindEvents() {
     if (!workflow) return;
     persistWorkflowDrafts();
     persistSelectedWorkflow();
+    const args = buildWorkflowArgs(workflow);
+    const startedAt = performance.now();
+    setWorkerStartPending(true, `Starting ${workflowModeLabel(workflow)} worker...`);
     try {
       await fetchJson('/api/workflows/start', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ workflowId: workflow.id, args: buildWorkflowArgs(workflow) }),
+        body: JSON.stringify({ workflowId: workflow.id, args }),
       });
-      await loadWorkflows();
+      await loadWorkflows({ light: true });
       await loadSummary();
+      const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+      setWorkerStartPending(false, `Started ${workflowModeLabel(workflow)} in ${elapsedSeconds}s.`);
     } catch (error) {
+      const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+      setWorkerStartPending(false, `Start failed after ${elapsedSeconds}s: ${error.message || 'Workflow could not be started.'}`);
       alert(error.message || 'Workflow could not be started.');
+    } finally {
+      setWorkerStartPending(false);
     }
   });
   document.getElementById('refreshWorkflowsButton').addEventListener('click', () => {

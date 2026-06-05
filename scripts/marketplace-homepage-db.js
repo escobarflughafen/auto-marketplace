@@ -298,6 +298,23 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_event_stats_cache (
+      worker_id TEXT NOT NULL,
+      event_scope TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (worker_id, event_scope, event_type, status)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_worker_event_stats_cache_worker
+    ON worker_event_stats_cache (worker_id, event_scope);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS resolve_queue_items (
       listing_id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'queued',
@@ -950,6 +967,31 @@ function buildListingEventId(eventAt, listingId, eventType) {
   ].join('-');
 }
 
+function incrementWorkerEventStatsCache(db, options = {}) {
+  const workerId = String(options.workerId || options.worker_id || '').trim();
+  const eventScope = normalizeKeyword(options.eventScope || options.event_scope || '').toLowerCase();
+  const eventType = normalizeKeyword(options.eventType || options.event_type || '');
+  if (!workerId || !eventScope || !eventType) {
+    return;
+  }
+  const status = String(options.status || '').trim();
+  const count = Number.isFinite(options.count) ? Math.max(1, Math.floor(options.count)) : 1;
+  const updatedAt = options.updatedAt || options.updated_at || new Date().toISOString();
+  db.prepare(`
+    INSERT INTO worker_event_stats_cache (
+      worker_id,
+      event_scope,
+      event_type,
+      status,
+      count,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(worker_id, event_scope, event_type, status) DO UPDATE SET
+      count = count + excluded.count,
+      updated_at = excluded.updated_at
+  `).run(workerId, eventScope, eventType, status, count, updatedAt);
+}
+
 function appendListingEvent(db, event) {
   const eventAt = event.eventAt || new Date().toISOString();
   const listingId = String(event.listingId || event.listing_id || '').trim();
@@ -963,6 +1005,8 @@ function appendListingEvent(db, event) {
   const contentHash = String(event.contentHash || event.content_hash || hashContent(content)).trim();
   const eventId = String(event.eventId || event.event_id || buildListingEventId(eventAt, listingId, eventType));
   const workflowRunId = String(event.workflowRunId || event.workflow_run_id || '').trim();
+  const workerId = String(event.workerId || event.worker_id || '').trim();
+  const status = String(event.status || '').trim();
 
   db.prepare(`
     INSERT INTO listing_events (
@@ -987,16 +1031,24 @@ function appendListingEvent(db, event) {
     listingId,
     eventType,
     eventAt,
-    String(event.workerId || event.worker_id || '').trim(),
+    workerId,
     String(event.sourceUrl || event.source_url || '').trim(),
     Number.isFinite(event.attempt) ? event.attempt : 0,
-    String(event.status || '').trim(),
+    status,
     contentJson,
     contentHash,
     String(event.screenshotPath || event.screenshot_path || '').trim(),
     String(event.snapshotPath || event.snapshot_path || '').trim(),
     String(event.error || '').trim(),
   );
+
+  incrementWorkerEventStatsCache(db, {
+    workerId: workflowRunId || workerId,
+    eventScope: 'listing',
+    eventType,
+    status,
+    updatedAt: eventAt,
+  });
 
   return getListingEvent(db, eventId);
 }
@@ -3530,6 +3582,7 @@ function appendWorkflowEvent(db, event) {
   const eventType = normalizeKeyword(event.eventType || event.event_type || 'workflow_event');
   const content = event.content || event.contentJson || {};
   const eventId = String(event.eventId || event.event_id || buildWorkflowEventId(eventAt, workflowRunId, eventType));
+  const status = String(event.status || (event.error ? 'error' : '')).trim();
 
   db.prepare(`
     INSERT INTO workflow_events (
@@ -3546,10 +3599,18 @@ function appendWorkflowEvent(db, event) {
     workflowRunId,
     eventType,
     eventAt,
-    String(event.status || '').trim(),
+    status,
     serializeJson(content),
     String(event.error || '').trim(),
   );
+
+  incrementWorkerEventStatsCache(db, {
+    workerId: workflowRunId,
+    eventScope: 'workflow',
+    eventType,
+    status,
+    updatedAt: eventAt,
+  });
 
   return getWorkflowEvent(db, eventId);
 }
@@ -3969,7 +4030,115 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
   };
 }
 
+function getWorkerAuditEventStatsFromCache(db, workerId) {
+  const rows = db.prepare(`
+    SELECT event_scope, event_type, status, count
+    FROM worker_event_stats_cache
+    WHERE worker_id = ?
+  `).all(String(workerId || '').trim());
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const listingStats = {
+    total: 0,
+    done: 0,
+    skipped: 0,
+    error: 0,
+    started: 0,
+    workerIds: [String(workerId || '').trim()].filter(Boolean),
+    eventTypes: [],
+    statusTypes: [],
+    latestEvent: null,
+    latestPreviewEvent: null,
+  };
+  const listingEventTypeCounts = new Map();
+  const eventTypesByKey = new Map();
+  let workflowCount = 0;
+  let workflowReview = 0;
+
+  for (const row of rows) {
+    const count = Number(row.count) || 0;
+    if (row.event_scope === 'listing') {
+      listingStats.total += count;
+      listingEventTypeCounts.set(row.event_type, (listingEventTypeCounts.get(row.event_type) || 0) + count);
+      listingStats.statusTypes.push({
+        eventType: row.event_type,
+        eventScope: 'listing',
+        status: row.status || '',
+        count,
+      });
+      for (const bucket of listingEventSemanticBuckets(row.event_type, row.status || '')) {
+        if (bucket === 'done') listingStats.done += count;
+        if (bucket === 'skipped') listingStats.skipped += count;
+        if (bucket === 'error') listingStats.error += count;
+        if (bucket === 'started') listingStats.started += count;
+      }
+    } else if (row.event_scope === 'workflow') {
+      workflowCount += count;
+      if (
+        /failed|interrupted/i.test(row.event_type || '')
+        || ['error', 'failed', 'interrupted'].includes(row.status || '')
+      ) {
+        workflowReview += count;
+      }
+      eventTypesByKey.set(`workflow:${row.event_type}`, {
+        eventType: row.event_type,
+        eventScope: 'workflow',
+        count: (eventTypesByKey.get(`workflow:${row.event_type}`)?.count || 0) + count,
+      });
+    }
+  }
+
+  listingStats.eventTypes = [...listingEventTypeCounts.entries()].map(([eventType, count]) => ({
+    eventType,
+    eventScope: 'listing',
+    count,
+  }));
+  for (const item of listingStats.eventTypes) {
+    eventTypesByKey.set(`listing:${item.eventType}`, item);
+  }
+
+  return {
+    ...listingStats,
+    listingTotal: listingStats.total,
+    workflow: workflowCount,
+    workflowReview,
+    error: listingStats.error + workflowReview,
+    total: listingStats.total + workflowCount,
+    eventTypes: [...eventTypesByKey.values()]
+      .sort((left, right) => right.count - left.count || String(left.eventType).localeCompare(String(right.eventType))),
+    latestEvent: null,
+    latestPreviewEvent: null,
+    source: 'cache',
+  };
+}
+
 function getWorkerAuditEventStats(db, workerId, options = {}) {
+  if ((options.preferCache || options.cacheOnly) && !options.includeLatestEvents && !options.workerIds) {
+    const cached = getWorkerAuditEventStatsFromCache(db, workerId);
+    if (cached) {
+      return cached;
+    }
+    if (options.cacheOnly) {
+      return {
+        total: 0,
+        listingTotal: 0,
+        workflow: 0,
+        workflowReview: 0,
+        done: 0,
+        skipped: 0,
+        error: 0,
+        started: 0,
+        workerIds: [String(workerId || '').trim()].filter(Boolean),
+        eventTypes: [],
+        statusTypes: [],
+        latestEvent: null,
+        latestPreviewEvent: null,
+        source: 'cache_miss',
+      };
+    }
+  }
   const listingStats = getWorkerListingEventStats(db, workerId, options);
   const workflowRows = db.prepare(`
     SELECT event_type, COUNT(*) AS count

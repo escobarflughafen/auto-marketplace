@@ -69,6 +69,9 @@ const {
   upsertCredentialProfile,
 } = require('./marketplace-profile-auth');
 const {
+  createWorkerScheduler,
+} = require('./worker-scheduler');
+const {
   appendWorkerCommand,
 } = require('./marketplace-worker-command-channel');
 
@@ -78,7 +81,7 @@ const WORKER_SCREENSHOT_ROOT = path.join(process.cwd(), 'artifacts', 'marketplac
 const TRADING_HISTORY_SCHEMA_PATH = path.join(process.cwd(), 'schemas', 'trading-history.schema.csv');
 const PURCHASE_HISTORY_CSV_PATH = path.join(process.cwd(), 'output', 'trading-history.normalized.csv');
 const DEFAULT_PURCHASE_HISTORY_DOCUMENT_ID = 'inventory-import';
-const HISTORY_MATCH_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const HISTORY_MATCH_SCAN_INTERVAL_MS = 60 * 60 * 1000;
 const HISTORY_MATCH_SCAN_BATCH_SIZE = 250;
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
 const MARKETPLACE_LOCATION_OPTIONS = getMarketplaceLocationOptions();
@@ -625,6 +628,43 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function elapsedMsSince(startedAt) {
+  return Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6);
+}
+
+function logSlowSection(name, startedAt, details = {}) {
+  const elapsedMs = elapsedMsSince(startedAt);
+  if (elapsedMs < (details.thresholdMs || 250)) {
+    return elapsedMs;
+  }
+  const detailText = Object.entries(details)
+    .filter(([key]) => key !== 'thresholdMs')
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(' ');
+  process.stderr.write(`[${nowIso()}] slow_section name=${name} elapsed_ms=${elapsedMs}${detailText ? ` ${detailText}` : ''}\n`);
+  return elapsedMs;
+}
+
+function attachRequestTiming(request, response, requestUrl) {
+  const startedAt = process.hrtime.bigint();
+  response.on('finish', () => {
+    const elapsedMs = elapsedMsSince(startedAt);
+    const pathName = requestUrl.pathname;
+    const tracked = pathName === '/healthz'
+      || pathName === '/api/workflows'
+      || pathName === '/api/workflows/start';
+    if (!tracked && elapsedMs < 250) {
+      return;
+    }
+    if (pathName === '/healthz' && elapsedMs < 250) {
+      return;
+    }
+    process.stderr.write(
+      `[${nowIso()}] request_timing method=${request.method} path=${pathName} status=${response.statusCode} elapsed_ms=${elapsedMs}\n`,
+    );
+  });
+}
+
 function workflowTypeForId(workflowId) {
   return WORKFLOWS[workflowId]?.workerType || 'worker';
 }
@@ -686,6 +726,33 @@ function appendProcessLog(record, chunk) {
   }
 }
 
+function scheduleManagedProcessSync(db, record, options = {}) {
+  if (!record) {
+    return;
+  }
+  if (options.immediate) {
+    if (record.syncTimer) {
+      clearTimeout(record.syncTimer);
+      record.syncTimer = null;
+    }
+    record.syncPending = false;
+    syncWorkflowRun(db, record, options.changes || {});
+    return;
+  }
+  record.syncPending = true;
+  if (record.syncTimer) {
+    return;
+  }
+  record.syncTimer = setTimeout(() => {
+    record.syncTimer = null;
+    if (!record.syncPending) {
+      return;
+    }
+    record.syncPending = false;
+    syncWorkflowRun(db, record, options.changes || {});
+  }, options.delayMs ?? 750);
+}
+
 function buildManagedProcessRecord(workflowId, args) {
   const workflow = WORKFLOWS[workflowId];
   const id = `${workflowId}-${Date.now()}`;
@@ -704,6 +771,8 @@ function buildManagedProcessRecord(workflowId, args) {
     logs: [],
     child: null,
     stopRequested: false,
+    syncPending: false,
+    syncTimer: null,
   };
 }
 
@@ -777,10 +846,13 @@ function publicWorkflowRunRecord(run, options = {}) {
 
 function publicWorkflowRunRecordWithStats(db, run, options = {}) {
   const record = publicWorkflowRunRecord(run, options);
-  const workerIds = resolveWorkerEventIdsForRun(db, run.run_id);
-  const eventStats = getWorkerAuditEventStats(db, run.run_id, { workerIds });
+  const includeLatestEvents = options.includeLatestEvents === true;
+  const workerIds = includeLatestEvents ? resolveWorkerEventIdsForRun(db, run.run_id) : null;
+  const eventStats = includeLatestEvents
+    ? getWorkerAuditEventStats(db, run.run_id, { workerIds, includeLatestEvents: true })
+    : getWorkerAuditEventStats(db, run.run_id, { cacheOnly: true });
   record.runtimeStats = runtimeStatsFromEventStats(eventStats, record.runtimeStats);
-  record.eventStats = options.includeLatestEvents
+  record.eventStats = includeLatestEvents
     ? eventStats
     : {
       total: eventStats.total,
@@ -1458,17 +1530,17 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
 
   child.stdout.on('data', (chunk) => {
     appendProcessLog(record, chunk);
-    syncWorkflowRun(db, record);
+    scheduleManagedProcessSync(db, record);
   });
   child.stderr.on('data', (chunk) => {
     appendProcessLog(record, chunk);
-    syncWorkflowRun(db, record);
+    scheduleManagedProcessSync(db, record);
   });
   child.on('error', (error) => {
     record.status = 'error';
     record.exitedAt = nowIso();
     appendProcessLog(record, `process_error ${error.message}`);
-    syncWorkflowRun(db, record, { osAlive: false });
+    scheduleManagedProcessSync(db, record, { immediate: true, changes: { osAlive: false } });
   });
   child.on('exit', (code, signal) => {
     record.status = record.stopRequested || record.status === 'stopping'
@@ -1481,7 +1553,7 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
     record.signal = signal || '';
     record.child = null;
     appendProcessLog(record, `process_exit code=${code} signal=${signal || ''}`);
-    syncWorkflowRun(db, record, { osAlive: false, osCheckedAt: nowIso() });
+    scheduleManagedProcessSync(db, record, { immediate: true, changes: { osAlive: false, osCheckedAt: nowIso() } });
   });
 
   managedProcesses.set(record.id, record);
@@ -2290,29 +2362,27 @@ function startPurchaseHistoryMatchScanner(db, options = {}) {
   const intervalMs = Number.isFinite(options.intervalMs)
     ? Math.max(30_000, options.intervalMs)
     : HISTORY_MATCH_SCAN_INTERVAL_MS;
-  let timer = null;
-  let stopped = false;
-  let inFlight = false;
+  const scheduler = createWorkerScheduler({
+    logger: (event) => {
+      if (event.type === 'worker_scheduler_job_error') {
+        process.stderr.write(
+          `[${new Date().toISOString()}] ${event.type} job_id=${event.jobId} elapsed_ms=${event.elapsedMs} error=${JSON.stringify(event.error || '')}\n`,
+        );
+      }
+    },
+  });
 
-  const schedule = (delay = intervalMs) => {
-    if (stopped) return;
-    timer = setTimeout(tick, delay);
-    if (typeof timer.unref === 'function') {
-      timer.unref();
-    }
-  };
-
-  const tick = () => {
-    if (stopped) return;
-    if (inFlight) {
-      schedule(intervalMs);
-      return;
-    }
-    inFlight = true;
+  return scheduler.scheduleEvery('history-match-scan', intervalMs, async () => {
+    const startedAt = process.hrtime.bigint();
     try {
       const result = scanPurchaseHistoryListingMatches(db, {
         limit: HISTORY_MATCH_SCAN_BATCH_SIZE,
         actor: 'history-watch-scheduler',
+      });
+      logSlowSection('history_match_scan', startedAt, {
+        scanned: result.scanned,
+        matched: result.matched,
+        queued: result.queued,
       });
       if (result.matched > 0 || result.queued > 0) {
         process.stdout.write(
@@ -2323,19 +2393,10 @@ function startPurchaseHistoryMatchScanner(db, options = {}) {
       process.stderr.write(
         `[${new Date().toISOString()}] history_match_scan_error ${error instanceof Error ? error.message : String(error)}\n`,
       );
-    } finally {
-      inFlight = false;
-      schedule(intervalMs);
     }
-  };
-
-  schedule(Math.min(15_000, intervalMs));
-  return () => {
-    stopped = true;
-    if (timer) {
-      clearTimeout(timer);
-    }
-  };
+  }, {
+    initialDelayMs: Number.isFinite(options.initialDelayMs) ? options.initialDelayMs : intervalMs,
+  });
 }
 
 function createServer(options) {
@@ -2344,6 +2405,7 @@ function createServer(options) {
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+    attachRequestTiming(request, response, requestUrl);
     const access = accessForRequest(options, request, requestUrl);
 
     if (requestUrl.pathname === '/healthz') {
@@ -2960,6 +3022,7 @@ function createServer(options) {
     }
 
     if (requestUrl.pathname === '/api/workflows' && request.method === 'GET') {
+      const sectionStartedAt = process.hrtime.bigint();
       const reconcile = requestUrl.searchParams.get('reconcile') !== '0';
       const includeStats = requestUrl.searchParams.get('stats') !== '0';
       const includeConfig = requestUrl.searchParams.get('config') !== '0';
@@ -2974,6 +3037,7 @@ function createServer(options) {
       if (includeConfig) {
         payload.workflows = buildWorkflowDefinitions();
       }
+      logSlowSection('api_workflows_build', sectionStartedAt, { reconcile, includeStats, includeConfig });
       writeJson(response, 200, payload);
       return;
     }
@@ -3124,8 +3188,10 @@ function createServer(options) {
         return;
       }
       try {
+        const sectionStartedAt = process.hrtime.bigint();
         const body = await readRequestJson(request);
         const started = startManagedWorkflow(db, body.workflowId, body.args);
+        logSlowSection('api_workflows_start', sectionStartedAt, { workflowId: body.workflowId || '' });
         writeJson(response, 201, { process: started });
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });
