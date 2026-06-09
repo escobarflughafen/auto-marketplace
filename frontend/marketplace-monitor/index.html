@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#000000">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="color-scheme" content="light">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Marketplace Monitor</title>
   <script>
@@ -14,7 +16,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
-  <link rel="stylesheet" href="/app/styles.css?v=profile-onboarder-worker-20260601">
+  <link rel="stylesheet" href="/app/styles.css?v=modal-top-layer-20260608">
 </head>
 <body>
   <div class="shell">
@@ -79,18 +81,18 @@
       <div class="listings-toolbar">
         <div class="segmented" id="listingStatusTools">
           <button type="button" class="secondary" data-query="">All</button>
-          <button type="button" class="secondary" data-query="status == pending sort:rank">Pending</button>
-          <button type="button" class="secondary" data-query="status == error sort:recent">Review</button>
-          <button type="button" class="secondary" data-query="status == sold sort:recent">Sold</button>
-          <button type="button" class="secondary" data-query="status == pending_sale sort:recent">Pending sale</button>
-          <button type="button" class="secondary" data-query="status == done sort:completed">Done</button>
+          <button type="button" class="secondary" data-query='listings | where status == "pending" | sort by rank asc'>Pending</button>
+          <button type="button" class="secondary" data-query='listings | where status == "error" | sort by last_seen_at desc'>Review</button>
+          <button type="button" class="secondary" data-query='listings | where status == "sold" | sort by last_seen_at desc'>Sold</button>
+          <button type="button" class="secondary" data-query='listings | where status == "pending_sale" | sort by last_seen_at desc'>Pending sale</button>
+          <button type="button" class="secondary" data-query='listings | where status == "done" | sort by completed_at desc'>Done</button>
         </div>
         <div class="toolbar-spacer"></div>
         <label class="inline-control">
           Rows
           <select id="listingLimitSelect">
-            <option value="25">25</option>
-            <option value="50" selected>50</option>
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
             <option value="100">100</option>
             <option value="200">200</option>
           </select>
@@ -127,14 +129,14 @@
           <input id="manualListingUrl" class="manual-listing-url" type="url" placeholder="Paste Facebook Marketplace URL">
           <label class="inline-control manual-listing-fetch"><input id="manualListingFetchNow" type="checkbox"> Fetch</label>
           <button type="button" class="secondary" id="manualListingAddButton">Add URL</button>
-          <button type="button" class="secondary" id="queueSelectedButton" disabled>Add Selected</button>
+          <button type="button" class="secondary" id="queueSelectedButton" disabled hidden>Add Selected</button>
           <button type="button" class="secondary" id="resolveQueuedButton" disabled>Process Queue</button>
           <button type="button" class="secondary" id="clearResolveQueueButton" disabled>Clear</button>
           <label class="inline-control resolve-hide-control">
             <input id="hideQueuedResolveCheckbox" type="checkbox" checked>
             Hide queued
           </label>
-          <button type="button" class="secondary" id="resolveSelectedButton" disabled>Process Selected</button>
+          <button type="button" class="secondary" id="resolveSelectedButton" disabled hidden>Process Selected</button>
           <button type="button" class="secondary" id="resolveCurrentButton">Process View</button>
           <div class="process-meta" id="listingResolveMeta">Resolve queue is ready.</div>
         </div>
@@ -365,9 +367,10 @@
               <label class="inline-control">
                 Rows
                 <select id="eventRegistryLimitSelect">
+                  <option value="50">50</option>
+                  <option value="100" selected>100</option>
                   <option value="200">200</option>
-                  <option value="1000">1000</option>
-                  <option value="10000">All</option>
+                  <option value="500">500</option>
                 </select>
               </label>
             </div>
@@ -636,6 +639,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="/app/app.js?v=profile-onboarder-worker-20260601"></script>
+  <script type="module" src="/app/app.js?v=history-tabular-pagination-20260606"></script>
 </body>
 </html>

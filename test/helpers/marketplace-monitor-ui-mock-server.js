@@ -81,12 +81,36 @@ function mockWorkflowConfig() {
   };
 }
 
+function mockListings() {
+  return Array.from({ length: 18 }, (_item, index) => {
+    const listingNumber = index + 1;
+    return {
+      listing_id: `mock-listing-${String(listingNumber).padStart(2, '0')}`,
+      title: `Very long camera listing title ${listingNumber} with enough descriptive text to test two line row clamping in the table display`,
+      card_title: `Camera listing ${listingNumber}`,
+      detail_title: listingNumber === 1 ? 'Pentax 67 medium format kit with prism finder and lens in working condition' : '',
+      detail_status: listingNumber % 3 === 0 ? 'done' : 'pending',
+      source: 'search',
+      source_keyword: 'pentax 67 medium format camera lens kit',
+      last_seen_rank: listingNumber,
+      numeric_price: 1200 + listingNumber,
+      detail_price: `$${1200 + listingNumber}`,
+      detail_seller_name: 'Local seller with a long display name',
+      detail_condition: 'Used - good',
+      detail_attempts: 0,
+      last_seen_at: '2026-06-03T08:00:00.000Z',
+      href: `https://www.facebook.com/marketplace/item/${listingNumber}`,
+    };
+  });
+}
+
 function createMockMarketplaceMonitorServer() {
   const state = {
     startRequests: [],
     workflowRequests: 0,
   };
   const workflowConfig = mockWorkflowConfig();
+  const listings = mockListings();
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || '127.0.0.1'}`);
@@ -116,6 +140,34 @@ function createMockMarketplaceMonitorServer() {
     }
     if (requestUrl.pathname === '/api/query-fields') {
       sendJson(response, 200, { fields: [] });
+      return;
+    }
+    if (requestUrl.pathname === '/api/query/complete' && request.method === 'POST') {
+      sendJson(response, 200, { suggestions: [], diagnostics: [], warnings: [] });
+      return;
+    }
+    if (requestUrl.pathname === '/api/listings') {
+      const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '50', 10);
+      const offset = Number.parseInt(requestUrl.searchParams.get('offset') || '0', 10);
+      sendJson(response, 200, {
+        rows: listings.slice(offset, offset + limit),
+        total: listings.length,
+        stats: { offset, elapsedMs: 1 },
+        sort: '',
+        sortDirection: '',
+      });
+      return;
+    }
+    if (requestUrl.pathname === '/api/listings/resolver-status') {
+      sendJson(response, 200, { items: [] });
+      return;
+    }
+    if (requestUrl.pathname === '/api/resolve-queue') {
+      sendJson(response, 200, {
+        items: [],
+        events: [],
+        counts: { queued: 0, dispatched: 0, failed: 0, completed: 0 },
+      });
       return;
     }
     if (requestUrl.pathname === '/api/credentials') {

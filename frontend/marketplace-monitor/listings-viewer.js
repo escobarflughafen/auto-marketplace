@@ -116,38 +116,37 @@ const DEFAULT_SAVED_QUERIES = [
     query: 'listings | where status == "pending" | sort by rank asc',
     source: 'default',
   },
-  { id: 'default-needs-work', label: 'Needs work', query: 'status != done', source: 'default' },
-  { id: 'default-price-2000', label: 'Price over 2000', query: 'price >= 2000', source: 'default' },
-  { id: 'default-search-backlog', label: 'Search backlog', query: 'status != done and source == search', source: 'default' },
-  { id: 'default-pentax-2000', label: 'Pentax over 2000', query: 'title contains "pentax" and price >= 2000', source: 'default' },
+  { id: 'default-needs-work', label: 'Needs work', query: 'listings | where status != "done" | sort by last_seen_at desc', source: 'default' },
+  { id: 'default-price-2000', label: 'Price over 2000', query: 'listings | where price >= 2000 | sort by price desc', source: 'default' },
+  { id: 'default-search-backlog', label: 'Search backlog', query: 'listings | where status != "done" and source == "search" | sort by last_seen_at desc', source: 'default' },
+  { id: 'default-pentax-2000', label: 'Pentax over 2000', query: 'listings | where title contains "pentax" and price >= 2000 | sort by price desc', source: 'default' },
 ];
+function detailCellClick(_event, cell) {
+  cell.getTable()._marketplaceViewer?.showSnapshot(cell.getData());
+}
+
 const COLUMNS = [
   {
-    title: '',
-    formatter: 'rowSelection',
-    titleFormatter: 'rowSelection',
-    hozAlign: 'center',
-    headerHozAlign: 'center',
-    width: 44,
+    title: 'Title',
+    field: 'title',
+    width: 170,
+    minWidth: 150,
+    frozen: true,
     responsive: 0,
-    headerSort: false,
-    cellClick: (_event, cell) => {
-      cell.getTable()._marketplaceViewer?.suppressNextSelectionPreview();
-      cell.getRow().toggleSelect();
-    },
+    formatter: titleFormatter,
+    cellClick: detailCellClick,
   },
-  { title: 'ID', field: 'listing_id', width: 142, frozen: true, responsive: 0, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>` },
-  { title: 'Status', field: 'detail_status', width: 94, responsive: 0, formatter: (cell) => `<span class="status ${escapeHtml(cell.getValue())}">${escapeHtml(cell.getValue())}</span>` },
-  { title: 'Source', field: 'source', width: 88, responsive: 2 },
-  { title: 'Keyword', field: 'source_keyword', width: 104, responsive: 5, formatter: textFormatter },
-  { title: 'Rank', field: 'last_seen_rank', width: 72, hozAlign: 'right', sorter: 'number', responsive: 0 },
-  { title: 'Price', field: 'numeric_price', width: 82, hozAlign: 'right', sorter: 'number', formatter: priceFormatter, responsive: 0 },
-  { title: 'Title', field: 'title', minWidth: 260, widthGrow: 3, responsive: 0, formatter: titleFormatter },
-  { title: 'Seller', field: 'detail_seller_name', width: 116, responsive: 6, formatter: textFormatter },
-  { title: 'Condition', field: 'detail_condition', width: 104, responsive: 7, formatter: textFormatter },
-  { title: 'Attempts', field: 'detail_attempts', width: 78, hozAlign: 'right', sorter: 'number', responsive: 4 },
-  { title: 'Seen', field: 'last_seen_at', width: 132, formatter: dateFormatter, responsive: 3 },
-  { title: 'Completed', field: 'detail_completed_at', width: 132, formatter: dateFormatter, responsive: 8 },
+  { title: 'Price', field: 'numeric_price', width: 82, hozAlign: 'right', sorter: 'number', formatter: priceFormatter, responsive: 0, cellClick: detailCellClick },
+  { title: 'Status', field: 'detail_status', width: 94, responsive: 0, formatter: (cell) => `<span class="status ${escapeHtml(cell.getValue())}">${escapeHtml(cell.getValue())}</span>`, cellClick: detailCellClick },
+  { title: 'Source', field: 'source', width: 88, responsive: 2, cellClick: detailCellClick },
+  { title: 'Keyword', field: 'source_keyword', width: 104, responsive: 5, formatter: textFormatter, cellClick: detailCellClick },
+  { title: 'Rank', field: 'last_seen_rank', width: 72, hozAlign: 'right', sorter: 'number', responsive: 0, cellClick: detailCellClick },
+  { title: 'Seller', field: 'detail_seller_name', width: 116, responsive: 6, formatter: textFormatter, cellClick: detailCellClick },
+  { title: 'Condition', field: 'detail_condition', width: 104, responsive: 7, formatter: textFormatter, cellClick: detailCellClick },
+  { title: 'Attempts', field: 'detail_attempts', width: 78, hozAlign: 'right', sorter: 'number', responsive: 4, cellClick: detailCellClick },
+  { title: 'Seen', field: 'last_seen_at', width: 132, formatter: dateFormatter, responsive: 3, cellClick: detailCellClick },
+  { title: 'Completed', field: 'detail_completed_at', width: 132, formatter: dateFormatter, responsive: 8, cellClick: detailCellClick },
+  { title: 'Listing ID', field: 'listing_id', width: 142, responsive: 9, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>`, cellClick: detailCellClick },
   {
     title: 'Links',
     field: 'actions',
@@ -169,7 +168,6 @@ const COLUMNS = [
     },
   },
 ];
-
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;',
@@ -276,6 +274,10 @@ function actionsFormatter(cell) {
     actions.push(`<a class="button-link compact" href="${escapeHtml(apiUrl(row.snapshotUrl))}" target="_blank" rel="noreferrer">MD</a>`);
   }
   return `<div class="row-actions">${actions.join('')}</div>`;
+}
+
+function isInteractiveTableTarget(target) {
+  return Boolean(target?.closest?.('button, a, input, select, textarea, label, .row-actions'));
 }
 
 function operatorsForField(field) {
@@ -488,8 +490,8 @@ function completeQueryLocally(input = {}) {
 export function createListingsViewer(config = {}) {
   const state = {
     q: queryParamFromUrl(),
-    limit: 50,
-    currentLimit: 50,
+    limit: 25,
+    currentLimit: 25,
     total: 0,
     rows: [],
     queryFields: [],
@@ -855,11 +857,15 @@ export function createListingsViewer(config = {}) {
     }
   }
 
+  function resizeListingsTable() {
+    if (!state.table) return;
+    state.table.redraw?.(true);
+  }
+
   function renderHead() {
     if (state.table) return;
     state.table = new Tabulator('#listingsTable', {
       ajaxRequestFunc: requestListings,
-      height: 'min(58vh, 620px)',
       layout: 'fitColumns',
       responsiveLayout: 'hide',
       placeholder: 'Listings matching the current query appear here.',
@@ -869,43 +875,28 @@ export function createListingsViewer(config = {}) {
       paginationSizeSelector: [25, 50, 100, 200],
       paginationCounter: 'rows',
       sortMode: 'remote',
-      selectableRows: true,
+      selectableRows: false,
       columnHeaderSortMulti: false,
-      movableColumns: true,
+      movableColumns: false,
       resizableColumnFit: true,
+      rowFormatter: (row) => {
+        const listingId = row.getData()?.listing_id || '';
+        const element = row.getElement();
+        if (listingId) {
+          element.dataset.listingId = listingId;
+        } else {
+          delete element.dataset.listingId;
+        }
+        element.onclick = (event) => {
+          if (isInteractiveTableTarget(event.target)) return;
+          renderSnapshotPanel(row.getData() || null);
+        };
+      },
       columns: COLUMNS,
     });
-    state.table.on('rowSelected', (row) => {
-      const data = row.getData();
-      const listingId = data?.listing_id;
-      if (listingId) {
-        state.selectedPovOrderIds = state.selectedPovOrderIds.filter((id) => id !== listingId);
-        state.selectedPovOrderIds.push(listingId);
-      }
-      if (!state.suppressSelectionPreview || !els.snapshotPanel.hidden) {
-        renderSnapshotPanel(data || null);
-      }
-    });
-    state.table.on('rowDeselected', (row) => {
-      const listingId = row.getData()?.listing_id;
-      if (listingId) {
-        state.selectedPovOrderIds = state.selectedPovOrderIds.filter((id) => id !== listingId);
-      }
-      if (!state.suppressSelectionPreview || !els.snapshotPanel.hidden) {
-        renderLatestSelectedSnapshot();
-      }
-    });
-    state.table.on('rowSelectionChanged', (data) => {
-      state.selectedIds = data.map((row) => row.listing_id).filter(Boolean);
-      state.selectedBacklogIds = data
-        .filter((row) => isBacklogRow(row))
-        .map((row) => row.listing_id)
-        .filter(Boolean);
-      if (!state.suppressSelectionPreview || !els.snapshotPanel.hidden) {
-        renderLatestSelectedSnapshot(data);
-      }
-      state.suppressSelectionPreview = false;
-      renderResolveControls();
+    state.table.on('rowClick', (event, row) => {
+      if (isInteractiveTableTarget(event.target)) return;
+      renderSnapshotPanel(row.getData() || null);
     });
     state.table._marketplaceViewer = {
       showSnapshot: renderSnapshotPanel,
@@ -1898,7 +1889,7 @@ export function createListingsViewer(config = {}) {
       await applyQuery(button.dataset.query || '');
     });
     els.listingLimitSelect.addEventListener('change', async () => {
-      state.limit = Number.parseInt(els.listingLimitSelect.value, 10) || 50;
+      state.limit = Number.parseInt(els.listingLimitSelect.value, 10) || 25;
       await loadRows();
     });
     document.getElementById('refreshListingsButton').addEventListener('click', loadRows);
@@ -2050,7 +2041,11 @@ export function createListingsViewer(config = {}) {
       state.selectedSnapshotListingId = '';
       renderSnapshotPanel(null);
     });
-    window.addEventListener('resize', positionSnapshotPanel);
+    window.addEventListener('resize', () => {
+      positionSnapshotPanel();
+      resizeListingsTable();
+    });
+    window.visualViewport?.addEventListener?.('resize', resizeListingsTable);
     window.addEventListener('scroll', positionSnapshotPanel, { passive: true });
   }
 
@@ -2062,6 +2057,7 @@ export function createListingsViewer(config = {}) {
     loadResolveQueue,
     loadBacklogQueue,
     loadRows,
+    resize: resizeListingsTable,
     applyQuery,
     setListingView,
     activeListingView,

@@ -75,3 +75,40 @@ test('worker config query mode submits mutually exclusive search explorer args',
     await mockServer.close();
   }
 });
+
+test('listing table freezes title and opens detail from visible row content', async () => {
+  const mockServer = createMockMarketplaceMonitorServer();
+  const baseUrl = await mockServer.start();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+
+  try {
+    await page.goto(`${baseUrl}/?token=test-token`);
+    await page.locator('#listingsTable .tabulator-row').first().waitFor({ timeout: 10_000 });
+
+    const firstHeaderTitle = await page.locator('#listingsTable .tabulator-col-title').first().innerText();
+    assert.equal(firstHeaderTitle.trim().toLowerCase(), 'title');
+
+    const firstHeaderClasses = await page.locator('#listingsTable .tabulator-col').first().getAttribute('class');
+    assert.match(firstHeaderClasses || '', /tabulator-frozen/);
+
+    assert.equal(await page.locator('#listingsTable .tabulator-row input[type="checkbox"]').count(), 0);
+    assert.equal(await page.locator('#listingsTable .table-detail-link').count(), 0);
+
+    const firstTitle = page.locator('#listingsTable .title-cell').first();
+    const lineClamp = await firstTitle.evaluate((node) => getComputedStyle(node).webkitLineClamp);
+    assert.equal(lineClamp, '2');
+
+    await firstTitle.click();
+    await page.locator('#snapshotPanel:not([hidden])').waitFor({ timeout: 5_000 });
+    await expectTextIncludes(page, '#snapshotTitle', 'Pentax 67');
+  } finally {
+    await browser.close();
+    await mockServer.close();
+  }
+});
+
+async function expectTextIncludes(page, selector, expected) {
+  const text = await page.locator(selector).innerText();
+  assert.match(text, new RegExp(expected));
+}

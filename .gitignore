@@ -1,6 +1,7 @@
 .DS_Store
 
 # Secrets and local auth
+.marketplace-deploy.env
 credentials.json
 secrets/
 playwright/.auth/

@@ -78,6 +78,9 @@ const {
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
 const WORKER_SCREENSHOT_ROOT = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots');
+const EVENT_REGISTRY_DEFAULT_LIMIT = 100;
+const EVENT_REGISTRY_MAX_LIMIT = 500;
+const EVENT_REGISTRY_ALL_SOURCE_WINDOW = 2500;
 const TRADING_HISTORY_SCHEMA_PATH = path.join(process.cwd(), 'schemas', 'trading-history.schema.csv');
 const PURCHASE_HISTORY_CSV_PATH = path.join(process.cwd(), 'output', 'trading-history.normalized.csv');
 const DEFAULT_PURCHASE_HISTORY_DOCUMENT_ID = 'inventory-import';
@@ -1639,6 +1642,12 @@ function writeJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload, null, 2));
 }
 
+function normalizeBoundedInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(parsed, max));
+}
+
 function tokenFromRequest(request, requestUrl) {
   const queryToken = requestUrl.searchParams.get('token') || requestUrl.searchParams.get('apiToken');
   if (queryToken) {
@@ -2645,18 +2654,33 @@ function createServer(options) {
 
     if (requestUrl.pathname === '/api/events' && request.method === 'GET') {
       try {
-        const source = requestUrl.searchParams.get('source') || 'all';
-        const limit = Number.parseInt(requestUrl.searchParams.get('limit') || '200', 10);
-        const offset = Number.parseInt(requestUrl.searchParams.get('offset') || '0', 10);
+        const requestedSource = requestUrl.searchParams.get('source') || 'all';
+        const source = String(requestedSource || 'all').trim().toLowerCase();
+        const limit = normalizeBoundedInteger(
+          requestUrl.searchParams.get('limit'),
+          EVENT_REGISTRY_DEFAULT_LIMIT,
+          1,
+          EVENT_REGISTRY_MAX_LIMIT,
+        );
+        const offset = normalizeBoundedInteger(
+          requestUrl.searchParams.get('offset'),
+          0,
+          0,
+          source === 'all' ? Math.max(0, EVENT_REGISTRY_ALL_SOURCE_WINDOW - limit) : Number.MAX_SAFE_INTEGER,
+        );
+        const total = countEventRegistry(db, { source });
+        const effectiveTotal = source === 'all' ? Math.min(total, EVENT_REGISTRY_ALL_SOURCE_WINDOW) : total;
         writeJson(response, 200, {
           events: listEventRegistry(db, {
             source,
             limit,
             offset,
           }),
-          total: countEventRegistry(db, { source }),
+          total: effectiveTotal,
+          rawTotal: total,
           limit,
           offset,
+          bounded: source === 'all' && total > effectiveTotal,
           auth: authPayloadForAccess(access),
         });
       } catch (error) {

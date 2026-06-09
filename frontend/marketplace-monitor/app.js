@@ -1,5 +1,5 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js?v=backlog-indexer-worker-20260531';
+import { createListingsViewer } from './listings-viewer.js?v=sticky-tabs-auto-table-20260606';
 import {
   listingDisplayTitle,
   listingHasFetchedDetail,
@@ -101,6 +101,12 @@ const store = {
   recommendationsTablePendingSetData: false,
   eventRegistryTable: null,
 };
+
+function resizeTabularViews() {
+  store.historyTable?.redraw?.(true);
+  store.recommendationsTable?.redraw?.(true);
+  store.eventRegistryTable?.redraw?.(true);
+}
 
 const els = {
   summary: document.getElementById('summary'),
@@ -654,10 +660,6 @@ function historyItemFormatter(cell) {
   return `<div class="history-item-title">${html(title)}</div><div class="process-meta">${html(meta)}</div>`;
 }
 
-function historyEditFormatter(cell) {
-  return `<button type="button" class="secondary history-edit-button" data-record-id="${html(cell.getData().record_id)}">Edit</button>`;
-}
-
 function historyMetricFormatter(primaryValue, secondaryLabel, secondaryValue, options = {}) {
   const primary = options.percent ? formatPercent(primaryValue) : formatMoney(primaryValue);
   const secondaryFormatted = secondaryValue === null || secondaryValue === undefined || secondaryValue === ''
@@ -793,15 +795,6 @@ function historyTableColumns() {
       headerSort: false,
       headerClick: historyColumnHeaderClick('date'),
     },
-    {
-      title: '',
-      field: '_actions',
-      width: 96,
-      responsive: 0,
-      headerSort: false,
-      formatter: historyEditFormatter,
-      cellClick: (_event, cell) => openHistoryEditModal(cell.getData().record_id),
-    },
   ];
 }
 
@@ -834,17 +827,24 @@ function renderHistoryTable(rows) {
     els.historyTable.innerHTML = '';
     store.historyTable = new Tabulator(els.historyTable, {
       data,
-      height: 'min(68vh, 760px)',
       layout: 'fitColumns',
       responsiveLayout: 'hide',
       placeholder: 'History appears here.',
+      pagination: true,
+      paginationSize: 25,
+      paginationSizeSelector: [25, 50, 100, 200],
+      paginationCounter: 'rows',
       columnHeaderSortMulti: false,
       movableColumns: true,
       resizableColumnFit: true,
       columns,
     });
+    store.historyTable.on('rowClick', (_event, row) => {
+      openHistoryEditModal(row.getData().record_id);
+    });
     return;
   }
+  store.historyTable.redraw?.(true);
   store.historyTable.setColumns(columns);
   store.historyTable.setData(data);
 }
@@ -1007,7 +1007,6 @@ function renderRecommendationsTable(items) {
     els.recommendationsTable.innerHTML = '';
     store.recommendationsTable = new Tabulator(els.recommendationsTable, {
       data: [],
-      height: 'min(68vh, 760px)',
       layout: 'fitColumns',
       responsiveLayout: 'hide',
       placeholder: 'Recommendations appear here.',
@@ -1038,6 +1037,7 @@ function renderRecommendationsTable(items) {
     reloadTableData();
     return;
   }
+  store.recommendationsTable.redraw?.(true);
   reloadTableData();
 }
 
@@ -2053,7 +2053,8 @@ function eventRegistryTableData(events) {
 }
 
 async function requestAuditLogs(_url, _config, params = {}) {
-  const size = Math.max(1, Number.parseInt(params.size, 10) || Number.parseInt(els.eventRegistryLimitSelect?.value || '200', 10) || 200);
+  const requestedSize = Number.parseInt(params.size, 10) || Number.parseInt(els.eventRegistryLimitSelect?.value || '100', 10) || 100;
+  const size = Math.max(1, Math.min(requestedSize, 500));
   const page = Math.max(1, Number.parseInt(params.page, 10) || 1);
   const offset = (page - 1) * size;
   const source = els.eventRegistrySourceSelect?.value || 'all';
@@ -2062,7 +2063,12 @@ async function requestAuditLogs(_url, _config, params = {}) {
   store.eventRegistryLoaded = true;
   const total = payload.total || store.eventRegistry.length;
   if (els.eventRegistryMeta) {
-    els.eventRegistryMeta.textContent = `${total} ${source === 'all' ? '' : source} audit logs`;
+    const start = total > 0 ? Math.min(total, offset + 1) : 0;
+    const end = Math.min(total, offset + store.eventRegistry.length);
+    const boundedText = payload.bounded && payload.rawTotal
+      ? ` latest of ${payload.rawTotal}`
+      : '';
+    els.eventRegistryMeta.textContent = `${start}-${end} of ${total}${boundedText} ${source === 'all' ? '' : source} audit logs`;
   }
   return {
     data: eventRegistryTableData(store.eventRegistry),
@@ -2159,7 +2165,6 @@ function renderEventRegistry() {
   if (!store.eventRegistryTable) {
     store.eventRegistryTable = new Tabulator(els.eventRegistryTable, {
       data,
-      height: 'min(68vh, 760px)',
       layout: 'fitColumns',
       responsiveLayout: 'hide',
       placeholder: 'Audit logs appear here.',
@@ -2169,8 +2174,8 @@ function renderEventRegistry() {
       initialSort: [{ column: '_time', dir: 'desc' }],
       pagination: true,
       paginationMode: 'remote',
-      paginationSize: Number.parseInt(els.eventRegistryLimitSelect?.value || '200', 10) || 200,
-      paginationSizeSelector: [50, 200, 1000, 10000],
+      paginationSize: Number.parseInt(els.eventRegistryLimitSelect?.value || '100', 10) || 100,
+      paginationSizeSelector: [50, 100, 200, 500],
       ajaxURL: '/api/events',
       ajaxRequestFunc: requestAuditLogs,
       columns: eventRegistryColumns(),
@@ -2184,7 +2189,9 @@ function renderEventRegistry() {
     setTimeout(() => store.eventRegistryTable?.setData('/api/events'), 0);
     return;
   }
+  store.eventRegistryTable.redraw?.(true);
   store.eventRegistryTable.setColumns(eventRegistryColumns());
+  store.eventRegistryTable.setPageSize(Number.parseInt(els.eventRegistryLimitSelect?.value || '100', 10) || 100);
   store.eventRegistryTable.setData('/api/events');
 }
 
@@ -2485,12 +2492,12 @@ function renderSummary() {
   const workerStats = summary.workerStats || {};
   const cards = [
     { label: 'Total', value: summary.totalRows || 0, query: '' },
-    { label: 'Pending', value: counts.pending || 0, query: 'status == pending sort:rank' },
-    { label: 'Processing', value: counts.processing || 0, query: 'status == processing sort:recent' },
-    { label: 'Done', value: counts.done || 0, query: 'status == done sort:completed' },
-    { label: 'Needs review', value: counts.error || 0, query: 'status == error sort:recent' },
-    { label: 'Sold', value: counts.sold || 0, query: 'status == sold sort:recent' },
-    { label: 'Pending sale', value: counts.pending_sale || 0, query: 'status == pending_sale sort:recent' },
+    { label: 'Pending', value: counts.pending || 0, query: 'listings | where status == "pending" | sort by rank asc' },
+    { label: 'Processing', value: counts.processing || 0, query: 'listings | where status == "processing" | sort by last_seen_at desc' },
+    { label: 'Done', value: counts.done || 0, query: 'listings | where status == "done" | sort by completed_at desc' },
+    { label: 'Needs review', value: counts.error || 0, query: 'listings | where status == "error" | sort by last_seen_at desc' },
+    { label: 'Sold', value: counts.sold || 0, query: 'listings | where status == "sold" | sort by last_seen_at desc' },
+    { label: 'Pending sale', value: counts.pending_sale || 0, query: 'listings | where status == "pending_sale" | sort by last_seen_at desc' },
     { label: 'Working workers', value: workerStats.working || 0, route: '/workers' },
   ];
   els.summary.innerHTML = cards.map((card) => (
@@ -4278,6 +4285,8 @@ function bindEvents() {
     store.recommendationDetailItemKey = '';
     els.recommendationDetailDialog?.close();
   });
+  window.addEventListener('resize', resizeTabularViews);
+  window.visualViewport?.addEventListener?.('resize', resizeTabularViews);
   els.recommendationDetailDialog?.addEventListener('close', () => {
     store.recommendationDetailItemKey = '';
   });

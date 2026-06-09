@@ -251,6 +251,11 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_events_time
+    ON listing_events (event_at DESC);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS workflow_runs (
       run_id TEXT PRIMARY KEY,
       workflow_id TEXT NOT NULL,
@@ -295,6 +300,11 @@ function ensureSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_workflow_events_type_time
     ON workflow_events (event_type, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_workflow_events_time
+    ON workflow_events (event_at DESC);
   `);
 
   db.exec(`
@@ -365,6 +375,11 @@ function ensureSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_resolve_queue_events_run_time
     ON resolve_queue_events (workflow_run_id, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_resolve_queue_events_time
+    ON resolve_queue_events (event_at DESC);
   `);
 
   db.exec(`
@@ -439,6 +454,11 @@ function ensureSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_purchase_history_events_document_time
     ON purchase_history_events (document_id, event_at DESC, created_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_purchase_history_events_time
+    ON purchase_history_events (event_at DESC, created_at DESC);
   `);
 
   db.exec(`
@@ -2756,122 +2776,183 @@ function normalizeEventRegistryRow(row) {
   };
 }
 
+const EVENT_REGISTRY_SOURCES = ['inventory', 'listing', 'resolve', 'recommendation', 'workflow'];
+const EVENT_REGISTRY_DEFAULT_LIMIT = 100;
+const EVENT_REGISTRY_MAX_LIMIT = 500;
+const EVENT_REGISTRY_ALL_SOURCE_WINDOW = 2500;
+
+function normalizeEventRegistrySource(source) {
+  const normalized = String(source || 'all').trim().toLowerCase();
+  if (normalized === 'all') return 'all';
+  return EVENT_REGISTRY_SOURCES.includes(normalized) ? normalized : 'all';
+}
+
+function normalizeEventRegistryLimit(limit) {
+  const value = Number.parseInt(limit, 10);
+  return Number.isFinite(value)
+    ? Math.max(1, Math.min(value, EVENT_REGISTRY_MAX_LIMIT))
+    : EVENT_REGISTRY_DEFAULT_LIMIT;
+}
+
+function normalizeEventRegistryOffset(offset) {
+  const value = Number.parseInt(offset, 10);
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function listEventRegistrySourceRows(db, source, options = {}) {
+  const limit = normalizeEventRegistryLimit(options.limit);
+  const offset = normalizeEventRegistryOffset(options.offset);
+  switch (source) {
+    case 'inventory':
+      return db.prepare(`
+        SELECT
+          'inventory' AS source,
+          events.event_id,
+          events.event_type,
+          events.event_at,
+          COALESCE(rows.outcome, '') AS status,
+          events.record_id AS subject_id,
+          COALESCE(NULLIF(rows.title, ''), events.record_id) AS title,
+          events.data_json
+        FROM purchase_history_events events
+        LEFT JOIN purchase_history_rows rows
+          ON rows.document_id = events.document_id
+          AND rows.record_id = events.record_id
+        ORDER BY events.event_at DESC, events.created_at DESC
+        LIMIT ?
+        OFFSET ?
+      `).all(limit, offset);
+    case 'listing':
+      return db.prepare(`
+        SELECT
+          'listing' AS source,
+          events.event_id,
+          events.event_type,
+          events.event_at,
+          events.status,
+          events.listing_id AS subject_id,
+          COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), events.listing_id) AS title,
+          events.content_json AS data_json
+        FROM listing_events events
+        LEFT JOIN homepage_listings listings
+          ON listings.listing_id = events.listing_id
+        ORDER BY events.event_at DESC
+        LIMIT ?
+        OFFSET ?
+      `).all(limit, offset);
+    case 'resolve':
+      return db.prepare(`
+        SELECT
+          'resolve' AS source,
+          events.event_id,
+          events.event_type,
+          events.event_at,
+          events.status,
+          events.listing_id AS subject_id,
+          COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), events.listing_id) AS title,
+          json_patch(events.content_json, json_object(
+            'workflow_run_id', events.workflow_run_id,
+            'actor', events.actor,
+            'error', events.error
+          )) AS data_json
+        FROM resolve_queue_events events
+        LEFT JOIN homepage_listings listings
+          ON listings.listing_id = events.listing_id
+        ORDER BY events.event_at DESC
+        LIMIT ?
+        OFFSET ?
+      `).all(limit, offset);
+    case 'recommendation':
+      return db.prepare(`
+        SELECT
+          'recommendation' AS source,
+          events.event_id,
+          events.event_type,
+          events.event_at,
+          queue.status,
+          events.listing_id AS subject_id,
+          COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), rows.title, events.listing_id) AS title,
+          json_patch(events.content_json, json_object(
+            'document_id', events.document_id,
+            'record_id', events.record_id,
+            'listing_id', events.listing_id,
+            'actor', events.actor,
+            'reason', events.reason
+          )) AS data_json
+        FROM purchase_history_match_events events
+        LEFT JOIN purchase_history_match_queue queue
+          ON queue.document_id = events.document_id
+          AND queue.record_id = events.record_id
+          AND queue.listing_id = events.listing_id
+        LEFT JOIN purchase_history_rows rows
+          ON rows.document_id = events.document_id
+          AND rows.record_id = events.record_id
+        LEFT JOIN homepage_listings listings
+          ON listings.listing_id = events.listing_id
+        ORDER BY events.event_at DESC
+        LIMIT ?
+        OFFSET ?
+      `).all(limit, offset);
+    case 'workflow':
+      return db.prepare(`
+        SELECT
+          'workflow' AS source,
+          events.event_id,
+          events.event_type,
+          events.event_at,
+          events.status,
+          events.workflow_run_id AS subject_id,
+          COALESCE(NULLIF(runs.label, ''), events.workflow_run_id) AS title,
+          events.content_json AS data_json
+        FROM workflow_events events
+        LEFT JOIN workflow_runs runs
+          ON runs.run_id = events.workflow_run_id
+        ORDER BY events.event_at DESC
+        LIMIT ?
+        OFFSET ?
+      `).all(limit, offset);
+    default:
+      return [];
+  }
+}
+
 function listEventRegistry(db, options = {}) {
-  const source = String(options.source || 'all').trim().toLowerCase();
-  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 200;
-  const offset = Number.isFinite(options.offset) ? Math.max(0, options.offset) : 0;
-  const rows = db.prepare(`
-    SELECT *
-    FROM (
-      SELECT
-        'inventory' AS source,
-        events.event_id,
-        events.event_type,
-        events.event_at,
-        COALESCE(rows.outcome, '') AS status,
-        events.record_id AS subject_id,
-        COALESCE(NULLIF(rows.title, ''), events.record_id) AS title,
-        events.data_json
-      FROM purchase_history_events events
-      LEFT JOIN purchase_history_rows rows
-        ON rows.document_id = events.document_id
-        AND rows.record_id = events.record_id
-      UNION ALL
-      SELECT
-        'listing' AS source,
-        events.event_id,
-        events.event_type,
-        events.event_at,
-        events.status,
-        events.listing_id AS subject_id,
-        COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), events.listing_id) AS title,
-        events.content_json AS data_json
-      FROM listing_events events
-      LEFT JOIN homepage_listings listings
-        ON listings.listing_id = events.listing_id
-      UNION ALL
-      SELECT
-        'resolve' AS source,
-        events.event_id,
-        events.event_type,
-        events.event_at,
-        events.status,
-        events.listing_id AS subject_id,
-        COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), events.listing_id) AS title,
-        json_patch(events.content_json, json_object(
-          'workflow_run_id', events.workflow_run_id,
-          'actor', events.actor,
-          'error', events.error
-        )) AS data_json
-      FROM resolve_queue_events events
-      LEFT JOIN homepage_listings listings
-        ON listings.listing_id = events.listing_id
-      UNION ALL
-      SELECT
-        'recommendation' AS source,
-        events.event_id,
-        events.event_type,
-        events.event_at,
-        queue.status,
-        events.listing_id AS subject_id,
-        COALESCE(NULLIF(listings.detail_title, ''), NULLIF(listings.card_title, ''), rows.title, events.listing_id) AS title,
-        json_patch(events.content_json, json_object(
-          'document_id', events.document_id,
-          'record_id', events.record_id,
-          'listing_id', events.listing_id,
-          'actor', events.actor,
-          'reason', events.reason
-        )) AS data_json
-      FROM purchase_history_match_events events
-      LEFT JOIN purchase_history_match_queue queue
-        ON queue.document_id = events.document_id
-        AND queue.record_id = events.record_id
-        AND queue.listing_id = events.listing_id
-      LEFT JOIN purchase_history_rows rows
-        ON rows.document_id = events.document_id
-        AND rows.record_id = events.record_id
-      LEFT JOIN homepage_listings listings
-        ON listings.listing_id = events.listing_id
-      UNION ALL
-      SELECT
-        'workflow' AS source,
-        events.event_id,
-        events.event_type,
-        events.event_at,
-        events.status,
-        events.workflow_run_id AS subject_id,
-        COALESCE(NULLIF(runs.label, ''), events.workflow_run_id) AS title,
-        events.content_json AS data_json
-      FROM workflow_events events
-      LEFT JOIN workflow_runs runs
-        ON runs.run_id = events.workflow_run_id
-    )
-    WHERE (? = 'all' OR source = ?)
-    ORDER BY event_at DESC
-    LIMIT ?
-    OFFSET ?
-  `).all(source, source, limit, offset);
+  const source = normalizeEventRegistrySource(options.source);
+  const limit = normalizeEventRegistryLimit(options.limit);
+  const offset = normalizeEventRegistryOffset(options.offset);
+  if (source !== 'all') {
+    return listEventRegistrySourceRows(db, source, { limit, offset }).map(normalizeEventRegistryRow);
+  }
+  const perSourceLimit = Math.min(EVENT_REGISTRY_ALL_SOURCE_WINDOW, offset + limit);
+  const rows = EVENT_REGISTRY_SOURCES.flatMap((eventSource) => (
+    listEventRegistrySourceRows(db, eventSource, { limit: perSourceLimit, offset: 0 })
+  )).sort((left, right) => (
+    String(right.event_at || '').localeCompare(String(left.event_at || ''))
+    || String(right.event_id || '').localeCompare(String(left.event_id || ''))
+  )).slice(offset, offset + limit);
   return rows.map(normalizeEventRegistryRow);
 }
 
 function countEventRegistry(db, options = {}) {
-  const source = String(options.source || 'all').trim().toLowerCase();
-  const row = db.prepare(`
-    SELECT COUNT(*) AS total
-    FROM (
-      SELECT 'inventory' AS source FROM purchase_history_events
-      UNION ALL
-      SELECT 'listing' AS source FROM listing_events
-      UNION ALL
-      SELECT 'resolve' AS source FROM resolve_queue_events
-      UNION ALL
-      SELECT 'recommendation' AS source FROM purchase_history_match_events
-      UNION ALL
-      SELECT 'workflow' AS source FROM workflow_events
-    )
-    WHERE (? = 'all' OR source = ?)
-  `).get(source, source);
-  return row?.total || 0;
+  const source = normalizeEventRegistrySource(options.source);
+  const countSource = (eventSource) => {
+    switch (eventSource) {
+      case 'inventory':
+        return db.prepare('SELECT COUNT(*) AS total FROM purchase_history_events').get().total || 0;
+      case 'listing':
+        return db.prepare('SELECT COUNT(*) AS total FROM listing_events').get().total || 0;
+      case 'resolve':
+        return db.prepare('SELECT COUNT(*) AS total FROM resolve_queue_events').get().total || 0;
+      case 'recommendation':
+        return db.prepare('SELECT COUNT(*) AS total FROM purchase_history_match_events').get().total || 0;
+      case 'workflow':
+        return db.prepare('SELECT COUNT(*) AS total FROM workflow_events').get().total || 0;
+      default:
+        return 0;
+    }
+  };
+  if (source !== 'all') return countSource(source);
+  return EVENT_REGISTRY_SOURCES.reduce((total, eventSource) => total + countSource(eventSource), 0);
 }
 
 function mergePurchaseHistoryDocuments(db, options = {}) {
