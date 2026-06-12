@@ -16,7 +16,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">
-  <link rel="stylesheet" href="/app/styles.css?v=modal-top-layer-20260608">
+  <link rel="stylesheet" href="/app/styles.css?v=query-price-buckets-20260612">
 </head>
 <body>
   <div class="shell">
@@ -648,15 +648,18 @@
       <div class="history-actions">
         <button type="button" id="queryResultCopyButton">Copy Query</button>
       </div>
-      <div class="tablewrap compact-tablewrap">
-        <table class="compact-kv-table">
-          <tbody id="queryResultDetailTableBody"></tbody>
-        </table>
+      <div class="query-result-stats-scroll" aria-label="Result statistics">
+        <div class="query-result-chart" id="queryResultChart" aria-label="Result statistics graph"></div>
+        <div class="tablewrap compact-tablewrap">
+          <table class="compact-kv-table">
+            <tbody id="queryResultDetailTableBody"></tbody>
+          </table>
+        </div>
       </div>
       <div class="process-meta" id="queryResultDetailWarning"></div>
     </div>
   </dialog>
 
-  <script type="module" src="/app/app.js?v=query-result-highlight-20260612"></script>
+  <script type="module" src="/app/app.js?v=query-price-buckets-20260612"></script>
 </body>
 </html>

@@ -252,6 +252,172 @@ function priceFormatter(cell) {
   return escapeHtml(row.detail_price || row.numeric_price || '');
 }
 
+function parseListingPrice(row) {
+  if (!row) return null;
+  const candidates = [
+    row.numeric_price,
+    row.price,
+    row.price_cad,
+    row.detail_price,
+    row.card_price,
+    row.card_text,
+  ];
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined || candidate === '') continue;
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
+    const text = String(candidate).replace(/,/g, '');
+    const match = text.match(/(?:CA\$|\$)?\s*(-?\d+(?:\.\d+)?)/i);
+    if (!match) continue;
+    const parsed = Number.parseFloat(match[1]);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function formatListingMoney(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'CAD',
+    maximumFractionDigits: value % 1 === 0 ? 0 : 2,
+  }).format(value);
+}
+
+function formatQueryNumber(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '0';
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
+}
+
+function average(values) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function buildHistogram(values, requestedBins = 6) {
+  const numbers = (values || []).filter((value) => typeof value === 'number' && Number.isFinite(value));
+  if (!numbers.length) return [];
+  const min = Math.min(...numbers);
+  const max = Math.max(...numbers);
+  if (min === max) {
+    return [{ min, max, count: numbers.length }];
+  }
+  const binCount = Math.max(2, Math.min(requestedBins, numbers.length));
+  const width = (max - min) / binCount;
+  const bins = Array.from({ length: binCount }, (_item, index) => ({
+    min: min + width * index,
+    max: index === binCount - 1 ? max : min + width * (index + 1),
+    count: 0,
+  }));
+  for (const value of numbers) {
+    const index = Math.min(binCount - 1, Math.floor((value - min) / width));
+    bins[index].count += 1;
+  }
+  return bins;
+}
+
+function countBy(rows, field) {
+  const counts = new Map();
+  for (const row of rows || []) {
+    const value = String(row?.[field] || '').trim();
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+}
+
+function formatTopCounts(counts, limit = 4) {
+  if (!counts.length) return '-';
+  const shown = counts.slice(0, limit).map(([label, count]) => `${label}: ${count}`);
+  const rest = counts.slice(limit).reduce((sum, item) => sum + item[1], 0);
+  return rest ? `${shown.join(', ')}, other: ${rest}` : shown.join(', ');
+}
+
+function renderBarRows(items) {
+  const rows = (items || []).filter((item) => item && item.value > 0);
+  if (!rows.length) {
+    return '<div class="query-chart-empty">No data</div>';
+  }
+  const max = Math.max(...rows.map((item) => item.value), 1);
+  return rows.map((item) => {
+    const width = Math.max(4, Math.round((item.value / max) * 100));
+    const tag = typeof item.min === 'number' && typeof item.max === 'number' ? 'button' : 'div';
+    const buttonAttrs = tag === 'button'
+      ? ' type="button" class="query-chart-row query-chart-row-button"'
+        + ` data-query-price-min="${escapeHtml(formatQueryNumber(item.min))}"`
+        + ` data-query-price-max="${escapeHtml(formatQueryNumber(item.max))}"`
+        + ` aria-label="Filter to ${escapeHtml(item.label)}"`
+      : ' class="query-chart-row"';
+    return `<${tag}${buttonAttrs}>`
+      + `<div class="query-chart-label">${escapeHtml(item.label)}</div>`
+      + '<div class="query-chart-track">'
+        + `<div class="query-chart-bar" style="width:${width}%"></div>`
+      + '</div>'
+      + `<div class="query-chart-value">${escapeHtml(item.value)}</div>`
+    + `</${tag}>`;
+  }).join('');
+}
+
+function renderQueryResultChartHtml(stats = {}) {
+  const histogram = (stats.priceHistogram || []).map((bin) => ({
+    label: bin.min === bin.max
+      ? formatListingMoney(bin.min)
+      : `${formatListingMoney(bin.min)} - ${formatListingMoney(bin.max)}`,
+    value: bin.count,
+    min: bin.min,
+    max: bin.max,
+  }));
+  const statusRows = (stats.statusCounts || []).slice(0, 5).map(([label, count]) => ({ label, value: count }));
+  const sourceRows = (stats.sourceCounts || []).slice(0, 5).map(([label, count]) => ({ label, value: count }));
+  return '<div class="query-chart-section query-chart-section-wide">'
+      + '<div class="query-chart-title">Price distribution</div>'
+      + renderBarRows(histogram)
+    + '</div>'
+    + '<div class="query-chart-section">'
+      + '<div class="query-chart-title">Status</div>'
+      + renderBarRows(statusRows)
+    + '</div>'
+    + '<div class="query-chart-section">'
+      + '<div class="query-chart-title">Source</div>'
+      + renderBarRows(sourceRows)
+    + '</div>';
+}
+
+function renderCompactPriceDistributionHtml(stats = {}) {
+  const histogram = (stats.priceHistogram || []).filter((bin) => bin && bin.count > 0);
+  if (!histogram.length) {
+    return '<span class="results-price-plot results-price-plot-empty" aria-label="No priced rows">'
+      + '<span class="results-price-plot-label">Price</span>'
+      + '<span class="results-price-empty">No prices</span>'
+    + '</span>';
+  }
+  const maxCount = Math.max(...histogram.map((bin) => bin.count), 1);
+  const priceSpan = typeof stats.priceMin === 'number' && typeof stats.priceMax === 'number'
+    ? `${formatListingMoney(stats.priceMin)}-${formatListingMoney(stats.priceMax)}`
+    : '';
+  const bars = histogram.map((bin) => {
+    const height = Math.max(16, Math.round((bin.count / maxCount) * 100));
+    const label = bin.min === bin.max
+      ? formatListingMoney(bin.min)
+      : `${formatListingMoney(bin.min)} - ${formatListingMoney(bin.max)}`;
+    return '<span class="results-price-bar"'
+      + ` style="height:${height}%" title="${escapeHtml(`${label}: ${bin.count}`)}"></span>`;
+  }).join('');
+  return '<span class="results-price-plot" aria-label="Price distribution">'
+    + '<span class="results-price-plot-label">Price</span>'
+    + `<span class="results-price-bars" aria-hidden="true">${bars}</span>`
+    + `<span class="results-price-span">${escapeHtml(priceSpan)}</span>`
+  + '</span>';
+}
+
 function dateFormatter(cell) {
   return escapeHtml(formatDate(cell.getValue()));
 }
@@ -312,6 +478,25 @@ function querySourceFromText(query) {
   const firstStage = String(query || '').trim().split('|')[0]?.trim() || '';
   const firstWord = firstStage.match(/^([A-Za-z_][\w]*)\b/)?.[1]?.toLowerCase() || '';
   return QUERY_SOURCES.has(firstWord) ? firstWord : 'listings';
+}
+
+function queryWithPriceRange(query, min, max) {
+  const rangeClause = `where price >= ${formatQueryNumber(min)} and price <= ${formatQueryNumber(max)}`;
+  const text = String(query || '').trim();
+  if (!text) return `listings | ${rangeClause}`;
+  const parts = text.split('|').map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 1 && !/^(listings|where|sort|order|take|limit|skip|offset|summarize|count)\b/i.test(parts[0])) {
+    return `listings | where text contains ${quoteQueryValue(parts[0])} and price >= ${formatQueryNumber(min)} and price <= ${formatQueryNumber(max)}`;
+  }
+  const insertBefore = parts.findIndex((part) => /^(sort|order|take|limit|skip|offset|summarize|count)\b/i.test(part));
+  if (insertBefore >= 0) {
+    return [
+      ...parts.slice(0, insertBefore),
+      rangeClause,
+      ...parts.slice(insertBefore),
+    ].join(' | ');
+  }
+  return [...parts, rangeClause].join(' | ');
 }
 
 function withQueryReplacement(suggestion, start, end) {
@@ -536,6 +721,7 @@ export function createListingsViewer(config = {}) {
     queryResultDetailMeta: document.getElementById('queryResultDetailMeta'),
     queryResultDetailQuery: document.getElementById('queryResultDetailQuery'),
     queryResultDetailHighlight: document.getElementById('queryResultDetailHighlight'),
+    queryResultChart: document.getElementById('queryResultChart'),
     queryResultDetailTableBody: document.getElementById('queryResultDetailTableBody'),
     queryResultDetailWarning: document.getElementById('queryResultDetailWarning'),
     queryResultCopyButton: document.getElementById('queryResultCopyButton'),
@@ -983,6 +1169,22 @@ export function createListingsViewer(config = {}) {
     const offset = stats.offset ?? 0;
     const warnings = payload.parsedQuery?.warnings || [];
     const hiddenQueued = queuedExclusionIds().length;
+    const pricedRows = state.rows
+      .map(parseListingPrice)
+      .filter((value) => typeof value === 'number' && Number.isFinite(value));
+    const priceMin = pricedRows.length ? Math.min(...pricedRows) : null;
+    const priceMax = pricedRows.length ? Math.max(...pricedRows) : null;
+    const resultStats = {
+      pricedCount: pricedRows.length,
+      unpricedCount: Math.max(0, state.rows.length - pricedRows.length),
+      priceMin,
+      priceMax,
+      priceAverage: average(pricedRows),
+      priceMedian: median(pricedRows),
+      priceHistogram: buildHistogram(pricedRows),
+      statusCounts: countBy(state.rows, 'detail_status'),
+      sourceCounts: countBy(state.rows, 'source'),
+    };
     state.lastResultMeta = {
       shown: state.rows.length,
       total: state.total,
@@ -992,6 +1194,7 @@ export function createListingsViewer(config = {}) {
       elapsedMs: stats.elapsedMs ?? 0,
       window: `${offset}-${offset + state.rows.length}`,
       warnings,
+      resultStats,
     };
     const compact = [
       `Showing ${state.rows.length} of ${state.total}`,
@@ -999,8 +1202,11 @@ export function createListingsViewer(config = {}) {
       warnings.length ? 'warning' : '',
     ].filter(Boolean).join(' · ');
     els.resultsMeta.innerHTML = '<button type="button" class="results-meta-button" id="queryResultMetaButton">'
-      + `${escapeHtml(compact)}`
-      + (state.q ? '<span class="results-meta-hint">View query</span>' : '<span class="results-meta-hint">View details</span>')
+      + '<span class="results-meta-main">'
+        + `<span class="results-meta-text">${escapeHtml(compact)}</span>`
+        + (state.q ? '<span class="results-meta-hint">View query</span>' : '<span class="results-meta-hint">View details</span>')
+      + '</span>'
+      + renderCompactPriceDistributionHtml(resultStats)
       + '</button>';
     document.getElementById('queryResultMetaButton')?.addEventListener('click', openQueryResultDetail);
   }
@@ -1020,16 +1226,29 @@ export function createListingsViewer(config = {}) {
         : '<span class="query-result-empty">No query</span>';
     }
     if (els.queryResultDetailTableBody) {
+      const resultStats = meta.resultStats || {};
+      const priceSpan = typeof resultStats.priceMin === 'number' && typeof resultStats.priceMax === 'number'
+        ? `${formatListingMoney(resultStats.priceMin)} - ${formatListingMoney(resultStats.priceMax)}`
+        : '-';
       const rows = [
         ['Rows', `${meta.shown || 0} of ${meta.total || 0}`],
         ['Hidden queued', meta.hiddenQueued || 0],
         ['Sort', meta.sort || '-'],
         ['Query time', `${meta.elapsedMs || 0}ms`],
         ['Window', meta.window || '-'],
+        ['Priced rows', `${resultStats.pricedCount || 0} priced / ${resultStats.unpricedCount || 0} unpriced`],
+        ['Price span', priceSpan],
+        ['Average price', formatListingMoney(resultStats.priceAverage)],
+        ['Median price', formatListingMoney(resultStats.priceMedian)],
+        ['Status mix', formatTopCounts(resultStats.statusCounts || [])],
+        ['Source mix', formatTopCounts(resultStats.sourceCounts || [])],
       ];
       els.queryResultDetailTableBody.innerHTML = rows.map(([key, value]) => (
         `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(value)}</td></tr>`
       )).join('');
+    }
+    if (els.queryResultChart) {
+      els.queryResultChart.innerHTML = renderQueryResultChartHtml(meta.resultStats || {});
     }
     if (els.queryResultDetailWarning) {
       els.queryResultDetailWarning.textContent = (meta.warnings || []).join(' ');
@@ -1996,6 +2215,19 @@ export function createListingsViewer(config = {}) {
       copyText(els.queryResultDetailQuery?.value || '').catch((error) => {
         alert(error.message || 'Query could not be copied.');
       });
+    });
+    els.queryResultChart?.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-query-price-min][data-query-price-max]');
+      if (!button) return;
+      const min = Number.parseFloat(button.dataset.queryPriceMin);
+      const max = Number.parseFloat(button.dataset.queryPriceMax);
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return;
+      els.queryResultDetailDialog?.close();
+      try {
+        await applyQuery(queryWithPriceRange(state.q, min, max));
+      } catch (error) {
+        alert(error.message || 'Price range query could not be applied.');
+      }
     });
     els.queryFieldSelect?.addEventListener('change', updateQueryOperatorOptions);
     document.getElementById('addClauseButton')?.addEventListener('click', addQueryClause);

@@ -1,5 +1,5 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js?v=saved-query-summary-20260611';
+import { createListingsViewer } from './listings-viewer.js?v=query-price-buckets-20260612';
 import {
   listingDisplayTitle,
   listingHasFetchedDetail,
