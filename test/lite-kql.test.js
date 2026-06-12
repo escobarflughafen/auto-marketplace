@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const { parseLiteKql } = require('../scripts/lite-kql-parser');
 const { planLiteKql } = require('../scripts/lite-kql-planner');
-const { buildLiteListingsQuery } = require('../scripts/lite-kql-sqlite');
+const { buildLiteCountQuery, buildLiteListingsQuery } = require('../scripts/lite-kql-sqlite');
 const { completeLiteKql } = require('../scripts/lite-kql-authoring');
 
 test('parseLiteKql reads source, where, sort, and take stages', () => {
@@ -39,6 +39,19 @@ test('buildLiteListingsQuery compiles a parameterized SQLite query', () => {
   assert.match(query.sql, /LIMIT \? OFFSET \?/);
   assert.equal(query.limit, 25);
   assert.deepEqual(query.params.slice(0, 5), [2000, '%pentax 67%', '%pentax 67%', 'nikon', 'leica']);
+});
+
+test('lite KQL supports summarize count and count pipeline stages', () => {
+  const summarized = parseLiteKql('listings | where status == "pending" | summarize count()');
+  assert.equal(summarized.diagnostics.length, 0);
+  assert.equal(summarized.stages.at(-1).type, 'summarize');
+  assert.equal(planLiteKql(summarized).aggregate.type, 'count');
+
+  const countQuery = buildLiteCountQuery({
+    query: 'listings | where status == "pending" | count',
+  });
+  assert.match(countQuery.sql, /SELECT COUNT\(\*\) AS total/);
+  assert.deepEqual(countQuery.params, ['pending']);
 });
 
 test('completeLiteKql suggests fields, operators, and enum values from cursor context', () => {

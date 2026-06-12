@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  argsWithoutManagedWorkerId,
   buildDefaultArgsFromFields,
   isBrowserWorkerType,
   isExclusiveBrowserWorkerType,
@@ -175,5 +176,18 @@ test('normalizeWorkflowArgs keeps quoted values as one argument', () => {
   assert.deepEqual(
     normalizeWorkflowArgs('--query "leica m6" --headless'),
     ['--query', 'leica m6', '--headless'],
+  );
+});
+
+test('workflow restart args drop the previous managed worker id', () => {
+  assert.deepEqual(
+    argsWithoutManagedWorkerId([
+      '--query',
+      'pentax 67',
+      '--worker-id',
+      'search-explore-old',
+      '--collect-all',
+    ]),
+    ['--query', 'pentax 67', '--collect-all'],
   );
 });

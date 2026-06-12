@@ -23,6 +23,26 @@ You can also point at another config file with `--config` or
 `MARKETPLACE_DEPLOY_CONFIG`, export the same variables in the environment, or
 override values with CLI flags.
 
+For the staging site, copy the staging example instead:
+
+```bash
+cp .marketplace-deploy.staging.env.example .marketplace-deploy.staging.env
+```
+
+The staging compose service is `auto-browser-staging` on port `21436`. It uses
+separate runtime directories:
+
+- `artifacts-staging/`
+- `profiles-staging/`
+- `secrets-staging/`
+
+Keep staging tokens separate in the remote `.env`:
+
+```bash
+MARKETPLACE_STAGING_MONITOR_ADMIN_TOKEN=...
+MARKETPLACE_STAGING_MONITOR_READONLY_TOKEN=...
+```
+
 ## Static
 
 ```bash
@@ -82,6 +102,18 @@ Behavior:
 - syncs source;
 - runs `docker compose up -d --build --force-recreate`;
 - verifies health after recreate.
+
+To deploy only staging without touching the production container:
+
+```bash
+npm run marketplace:deploy -- full --config .marketplace-deploy.staging.env --allow-dirty
+```
+
+For server-only staging updates after the service exists:
+
+```bash
+npm run marketplace:deploy -- app --config .marketplace-deploy.staging.env --allow-dirty
+```
 
 ## Preflight
 

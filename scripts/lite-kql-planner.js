@@ -140,6 +140,7 @@ function planLiteKql(astOrQuery, options = {}) {
   let sort = source?.defaultSort || { field: 'last_seen_at', direction: 'desc' };
   let limit = clampLimit(options.limit);
   let offset = Math.max(0, Number.parseInt(options.offset, 10) || 0);
+  let aggregate = null;
 
   for (const stage of ast.stages || []) {
     if (stage.type === 'where') {
@@ -156,6 +157,12 @@ function planLiteKql(astOrQuery, options = {}) {
       limit = clampLimit(stage.value);
     } else if (stage.type === 'skip') {
       offset = Math.max(0, Number.parseInt(stage.value, 10) || 0);
+    } else if (stage.type === 'summarize') {
+      if (stage.aggregate === 'count') {
+        aggregate = { type: 'count' };
+      } else {
+        addDiagnostic(diagnostics, 'Only summarize count() is supported.');
+      }
     }
   }
 
@@ -170,6 +177,7 @@ function planLiteKql(astOrQuery, options = {}) {
     sort,
     limit,
     offset,
+    aggregate,
     diagnostics,
     warnings,
     ast,

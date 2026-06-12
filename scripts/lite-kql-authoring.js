@@ -17,6 +17,8 @@ const STAGE_SUGGESTIONS = [
   { label: 'sort by', kind: 'keyword', insertText: 'sort by ', detail: 'Sort rows', score: 95 },
   { label: 'take', kind: 'keyword', insertText: 'take 50', detail: 'Limit rows', score: 90 },
   { label: 'skip', kind: 'keyword', insertText: 'skip ', detail: 'Offset rows', score: 70 },
+  { label: 'summarize count()', kind: 'keyword', insertText: 'summarize count()', detail: 'Count matching rows', score: 85 },
+  { label: 'count', kind: 'keyword', insertText: 'count', detail: 'Count matching rows', score: 80 },
 ];
 
 const LOGICAL_SUGGESTIONS = [

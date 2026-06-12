@@ -25,10 +25,23 @@ const {
   listEventRegistry,
   countEventRegistry,
   appendListingEvent,
+  appendWorkflowEvent,
   insertWorkflowRun,
+  runTransaction,
   updateWorkflowRun,
   getWorkflowRun,
   listWorkflowRuns,
+  listWorkerParameterProfiles,
+  getWorkerParameterProfile,
+  upsertWorkerParameterProfile,
+  deleteWorkerParameterProfile,
+  listSummaryQueryCards,
+  upsertSummaryQueryCard,
+  deleteSummaryQueryCard,
+  listSavedQueries,
+  upsertSavedQuery,
+  setSavedQueryOverview,
+  deleteSavedQuery,
   resolveWorkerEventIdsForRun,
   listWorkerAuditEvents,
   getWorkerAuditEventStats,
@@ -198,11 +211,11 @@ const WORKFLOWS = {
       },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
       { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
-      { id: 'radiusMiles', label: 'Radius miles', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
-      { id: 'refreshSeconds', label: 'Refresh seconds', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
-      { id: 'refreshJitterMin', label: 'Refresh jitter min', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
-      { id: 'refreshJitterMax', label: 'Refresh jitter max', kind: 'number', flag: '--refresh-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
-      { id: 'maxRuntimeSeconds', label: 'Max runtime seconds', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
+      { id: 'radiusMiles', label: 'Radius (miles)', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
+      { id: 'refreshSeconds', label: 'Refresh every (seconds)', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
+      { id: 'refreshJitterMin', label: 'Refresh jitter low', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'refreshJitterMax', label: 'Refresh jitter high', kind: 'number', flag: '--refresh-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'maxRuntimeSeconds', label: 'Run window (seconds)', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
@@ -238,12 +251,12 @@ const WORKFLOWS = {
       { id: 'queries', label: 'Keyword list', kind: 'textarea', editor: 'list', flag: '--queries', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
       { id: 'randomWalksBetweenSeeds', label: 'Random walks between entries', kind: 'number', flag: '--random-walks-between-seeds', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'list' } },
       { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
-      { id: 'radiusMiles', label: 'Radius miles', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
+      { id: 'radiusMiles', label: 'Radius (miles)', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
-      { id: 'refreshSeconds', label: 'Refresh seconds', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
-      { id: 'refreshJitterMin', label: 'Refresh jitter min', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
-      { id: 'refreshJitterMax', label: 'Refresh jitter max', kind: 'number', flag: '--refresh-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
-      { id: 'maxRuntimeSeconds', label: 'Max runtime seconds', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
+      { id: 'refreshSeconds', label: 'Refresh every (seconds)', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
+      { id: 'refreshJitterMin', label: 'Refresh jitter low', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'refreshJitterMax', label: 'Refresh jitter high', kind: 'number', flag: '--refresh-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'maxRuntimeSeconds', label: 'Run window (seconds)', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
@@ -319,12 +332,12 @@ const WORKFLOWS = {
       { id: 'seenAfter', label: 'Seen after', kind: 'text', flag: '--seen-after', defaultValue: '' },
       { id: 'seenBefore', label: 'Seen before', kind: 'text', flag: '--seen-before', defaultValue: '' },
       { id: 'maxAttempts', label: 'Max attempts', kind: 'number', flag: '--max-attempts', defaultValue: 5, min: 1 },
-      { id: 'retryDelaySeconds', label: 'Retry delay seconds', kind: 'number', flag: '--retry-delay-seconds', defaultValue: 300, min: 0 },
+      { id: 'retryDelaySeconds', label: 'Retry after (seconds)', kind: 'number', flag: '--retry-delay-seconds', defaultValue: 300, min: 0 },
       { id: 'itemDelaySeconds', label: 'Delay between items', kind: 'number', flag: '--item-delay-seconds', defaultValue: 8, min: 0, step: 0.5 },
-      { id: 'itemJitterMin', label: 'Item jitter min', kind: 'number', flag: '--item-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
-      { id: 'itemJitterMax', label: 'Item jitter max', kind: 'number', flag: '--item-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'itemJitterMin', label: 'Item delay jitter low', kind: 'number', flag: '--item-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'itemJitterMax', label: 'Item delay jitter high', kind: 'number', flag: '--item-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
       { id: 'resolveInactive', label: 'Resolve sold/pending signals', kind: 'boolean', flag: '--resolve-inactive', defaultValue: false },
-      { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
+      { id: 'workerId', label: 'Worker id', kind: 'text', flag: '--worker-id', defaultValue: '' },
     ],
   },
   'backlog-worker': {
@@ -346,10 +359,10 @@ const WORKFLOWS = {
         ],
       },
       { id: 'batchSize', label: 'Batch size', kind: 'number', flag: '--batch-size', defaultValue: 1, min: 1 },
-      { id: 'pollIntervalSeconds', label: 'Poll interval seconds', kind: 'number', flag: '--poll-interval-seconds', defaultValue: 30, min: 1 },
-      { id: 'pollJitterMin', label: 'Poll jitter min', kind: 'number', flag: '--poll-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
-      { id: 'pollJitterMax', label: 'Poll jitter max', kind: 'number', flag: '--poll-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
-      { id: 'limit', label: 'Limit', kind: 'number', flag: '--limit', defaultValue: '', min: 0 },
+      { id: 'pollIntervalSeconds', label: 'Check for work every (seconds)', kind: 'number', flag: '--poll-interval-seconds', defaultValue: 30, min: 1 },
+      { id: 'pollJitterMin', label: 'Poll jitter low', kind: 'number', flag: '--poll-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'pollJitterMax', label: 'Poll jitter high', kind: 'number', flag: '--poll-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'limit', label: 'Max items per cycle', kind: 'number', flag: '--limit', defaultValue: '', min: 0 },
       {
         id: 'statusFilter',
         label: 'Queue status',
@@ -401,12 +414,12 @@ const WORKFLOWS = {
       { id: 'seenAfter', label: 'Seen after', kind: 'text', flag: '--seen-after', defaultValue: '' },
       { id: 'seenBefore', label: 'Seen before', kind: 'text', flag: '--seen-before', defaultValue: '' },
       { id: 'maxAttempts', label: 'Max attempts', kind: 'number', flag: '--max-attempts', defaultValue: 5, min: 1 },
-      { id: 'retryDelaySeconds', label: 'Retry delay seconds', kind: 'number', flag: '--retry-delay-seconds', defaultValue: 300, min: 0 },
+      { id: 'retryDelaySeconds', label: 'Retry after (seconds)', kind: 'number', flag: '--retry-delay-seconds', defaultValue: 300, min: 0 },
       { id: 'itemDelaySeconds', label: 'Delay between items', kind: 'number', flag: '--item-delay-seconds', defaultValue: 8, min: 0, step: 0.5 },
-      { id: 'itemJitterMin', label: 'Item jitter min', kind: 'number', flag: '--item-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
-      { id: 'itemJitterMax', label: 'Item jitter max', kind: 'number', flag: '--item-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'itemJitterMin', label: 'Item delay jitter low', kind: 'number', flag: '--item-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'itemJitterMax', label: 'Item delay jitter high', kind: 'number', flag: '--item-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
       { id: 'resolveInactive', label: 'Resolve sold/pending signals', kind: 'boolean', flag: '--resolve-inactive', defaultValue: false },
-      { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
+      { id: 'workerId', label: 'Worker id', kind: 'text', flag: '--worker-id', defaultValue: '' },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
@@ -417,12 +430,12 @@ const WORKFLOWS = {
     strategy: 'resolved_metadata',
     fields: [
       { id: 'limit', label: 'Batch size', kind: 'number', flag: '--limit', defaultValue: 250, min: 1 },
-      { id: 'pollIntervalSeconds', label: 'Poll interval seconds', kind: 'number', flag: '--poll-interval-seconds', defaultValue: 300, min: 1 },
-      { id: 'pollJitterMin', label: 'Poll jitter min', kind: 'number', flag: '--poll-jitter-min', defaultValue: 0.8, min: 0, step: 0.1 },
-      { id: 'pollJitterMax', label: 'Poll jitter max', kind: 'number', flag: '--poll-jitter-max', defaultValue: 1.2, min: 0, step: 0.1 },
+      { id: 'pollIntervalSeconds', label: 'Check for work every (seconds)', kind: 'number', flag: '--poll-interval-seconds', defaultValue: 300, min: 1 },
+      { id: 'pollJitterMin', label: 'Poll jitter low', kind: 'number', flag: '--poll-jitter-min', defaultValue: 0.8, min: 0, step: 0.1 },
+      { id: 'pollJitterMax', label: 'Poll jitter high', kind: 'number', flag: '--poll-jitter-max', defaultValue: 1.2, min: 0, step: 0.1 },
       { id: 'allRows', label: 'Re-index all resolved rows', kind: 'boolean', flag: '--all', defaultValue: false },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
-      { id: 'workerId', label: 'Worker ID', kind: 'text', flag: '--worker-id', defaultValue: '' },
+      { id: 'workerId', label: 'Worker id', kind: 'text', flag: '--worker-id', defaultValue: '' },
     ],
   },
   'profile-onboarder': {
@@ -442,8 +455,8 @@ const WORKFLOWS = {
           { value: 'headed', label: 'Headed', args: ['--headed'] },
         ],
       },
-      { id: 'loginTimeoutSeconds', label: 'Login timeout seconds', kind: 'number', flag: '--login-timeout-seconds', defaultValue: 900, min: 30 },
-      { id: 'pollSeconds', label: 'Poll seconds', kind: 'number', flag: '--poll-seconds', defaultValue: 3, min: 1 },
+      { id: 'loginTimeoutSeconds', label: 'Login timeout (seconds)', kind: 'number', flag: '--login-timeout-seconds', defaultValue: 900, min: 30 },
+      { id: 'pollSeconds', label: 'Check login every (seconds)', kind: 'number', flag: '--poll-seconds', defaultValue: 3, min: 1 },
     ],
   },
 };
@@ -796,6 +809,150 @@ function syncWorkflowRun(db, record, changes = {}) {
   });
 }
 
+function syncWorkflowRunWithLifecycleEvent(db, record, changes = {}, eventOptions = {}) {
+  return updateWorkflowRunWithLifecycleEvent(db, record.id, {
+    workflowId: record.workflowId,
+    label: record.label,
+    script: record.script,
+    args: record.args,
+    pid: record.pid,
+    status: record.status,
+    exitedAt: record.exitedAt,
+    exitCode: record.exitCode,
+    signal: record.signal,
+    osAlive: pidIsAlive(record.pid),
+    logs: record.logs,
+    ...changes,
+  }, eventOptions);
+}
+
+function workflowLifecycleEventForStatus(status, options = {}) {
+  const normalizedStatus = String(status || '').trim();
+  const workflowId = String(options.workflowId || '').trim();
+  const workflow = WORKFLOWS[workflowId] || {};
+  const workerType = workflow.workerType || workflowTypeForId(workflowId);
+  const strategy = workflow.strategy || '';
+  const baseContent = {
+    workerType,
+    strategy,
+    workflowId,
+    ...(options.pid ? { pid: options.pid } : {}),
+    ...(options.script ? { script: options.script } : {}),
+    ...(options.reason ? { reason: options.reason } : {}),
+  };
+
+  switch (normalizedStatus) {
+    case 'running':
+      return {
+        eventType: 'worker_started',
+        status: 'running',
+        content: {
+          ...baseContent,
+          ...(Array.isArray(options.args) ? { args: options.args } : {}),
+        },
+      };
+    case 'stopping':
+      return {
+        eventType: 'shutdown_requested',
+        status: 'stopping',
+        content: {
+          ...baseContent,
+          signal: options.signal || 'SIGTERM',
+        },
+      };
+    case 'exited':
+      return {
+        eventType: 'worker_completed',
+        status: 'exited',
+        content: {
+          ...baseContent,
+          reason: options.reason || 'process_exited',
+          ...(Number.isFinite(options.exitCode) ? { exitCode: options.exitCode } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+      };
+    case 'terminated':
+      return {
+        eventType: 'worker_completed',
+        status: 'terminated',
+        content: {
+          ...baseContent,
+          reason: options.reason || 'shutdown',
+          ...(Number.isFinite(options.exitCode) ? { exitCode: options.exitCode } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+      };
+    case 'failed':
+    case 'error':
+    case 'lost':
+    case 'stop_failed':
+      return {
+        eventType: 'worker_failed',
+        status: normalizedStatus,
+        content: {
+          ...baseContent,
+          reason: options.reason || normalizedStatus,
+          ...(Number.isFinite(options.exitCode) ? { exitCode: options.exitCode } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+        error: options.error || '',
+      };
+    default:
+      return null;
+  }
+}
+
+function appendWorkflowLifecycleEvent(db, runId, lifecycleEvent, options = {}) {
+  if (!lifecycleEvent) {
+    return null;
+  }
+  return appendWorkflowEvent(db, {
+    workflowRunId: runId,
+    eventType: lifecycleEvent.eventType,
+    eventAt: options.eventAt || nowIso(),
+    status: lifecycleEvent.status,
+    content: lifecycleEvent.content,
+    error: lifecycleEvent.error || '',
+  });
+}
+
+function insertWorkflowRunWithLifecycleEvent(db, run, options = {}) {
+  return runTransaction(db, () => {
+    const inserted = insertWorkflowRun(db, run);
+    const lifecycleEvent = workflowLifecycleEventForStatus(inserted.status, {
+      workflowId: inserted.workflow_id,
+      args: inserted.args,
+      pid: inserted.pid,
+      script: inserted.script,
+      reason: options.reason,
+      eventAt: options.eventAt,
+    });
+    appendWorkflowLifecycleEvent(db, inserted.run_id, lifecycleEvent, options);
+    return inserted;
+  });
+}
+
+function updateWorkflowRunWithLifecycleEvent(db, runId, changes = {}, options = {}) {
+  return runTransaction(db, () => {
+    const updated = updateWorkflowRun(db, runId, changes);
+    if (!updated) {
+      return null;
+    }
+    const lifecycleEvent = workflowLifecycleEventForStatus(updated.status, {
+      workflowId: updated.workflow_id,
+      args: updated.args,
+      pid: updated.pid,
+      script: updated.script,
+      signal: updated.signal || changes.signal || options.signal,
+      exitCode: updated.exit_code,
+      reason: options.reason,
+      error: options.error,
+    });
+    appendWorkflowLifecycleEvent(db, updated.run_id, lifecycleEvent, options);
+    return updated;
+  });
+}
+
 function publicProcessRecord(record) {
   const logs = record.logs || [];
   return {
@@ -983,7 +1140,7 @@ function reconcileWorkflowRuns(db, options = {}) {
 
     if (active && !alive) {
       const nextStatus = run.status === 'stopping' ? 'terminated' : 'lost';
-      updateWorkflowRun(db, run.run_id, {
+      updateWorkflowRunWithLifecycleEvent(db, run.run_id, {
         status: nextStatus,
         exitedAt: now,
         osCheckedAt: now,
@@ -992,6 +1149,9 @@ function reconcileWorkflowRuns(db, options = {}) {
           ...(run.logs || []),
           `[${now}] workflow_reconciled status=${nextStatus} reason=process_missing previous_status=${run.status || ''} pid=${run.pid || ''}`,
         ],
+      }, {
+        eventAt: now,
+        reason: 'process_missing',
       });
     } else {
       updateWorkflowRun(db, run.run_id, {
@@ -1040,6 +1200,33 @@ function getWorkflowRuntimeSummary(db, options = {}) {
   };
 }
 
+function countListingsForSummaryQuery(db, query) {
+  const countQuery = buildCountQuery({ query });
+  return {
+    total: db.prepare(countQuery.sql).get(...countQuery.params).total || 0,
+    parsedQuery: countQuery.parsedQuery,
+  };
+}
+
+function listSummaryQueryCardsWithCounts(db) {
+  return listSummaryQueryCards(db).map((card) => {
+    try {
+      const result = countListingsForSummaryQuery(db, card.query);
+      return {
+        ...card,
+        value: result.total,
+        error: '',
+      };
+    } catch (error) {
+      return {
+        ...card,
+        value: 0,
+        error: error.message || 'Summary query could not be counted.',
+      };
+    }
+  });
+}
+
 function ensureManagedWorkerIdArg(args, runId, workflow) {
   const supportsWorkerId = WORKFLOW_SCRIPTS_WITH_WORKER_ID.has(workflow.script)
     || fieldsForWorkflow(workflow)
@@ -1055,6 +1242,18 @@ function ensureManagedWorkerIdArg(args, runId, workflow) {
   }
 
   return [...args, '--worker-id', runId];
+}
+
+function argsWithoutManagedWorkerId(args) {
+  const cleaned = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--worker-id') {
+      index += 1;
+      continue;
+    }
+    cleaned.push(args[index]);
+  }
+  return cleaned;
 }
 
 function normalizeWorkflowArgs(value) {
@@ -1517,7 +1716,7 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
   record.osAlive = pidIsAlive(record.pid);
   record.osCheckedAt = nowIso();
 
-  insertWorkflowRun(db, {
+  insertWorkflowRunWithLifecycleEvent(db, {
     runId: record.id,
     workflowId: record.workflowId,
     label: record.label,
@@ -1543,7 +1742,23 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
     record.status = 'error';
     record.exitedAt = nowIso();
     appendProcessLog(record, `process_error ${error.message}`);
-    scheduleManagedProcessSync(db, record, { immediate: true, changes: { osAlive: false } });
+    updateWorkflowRunWithLifecycleEvent(db, record.id, {
+      workflowId: record.workflowId,
+      label: record.label,
+      script: record.script,
+      args: record.args,
+      pid: record.pid,
+      status: record.status,
+      exitedAt: record.exitedAt,
+      exitCode: record.exitCode,
+      signal: record.signal,
+      osAlive: false,
+      osCheckedAt: nowIso(),
+      logs: record.logs,
+    }, {
+      reason: 'process_error',
+      error: error.message,
+    });
   });
   child.on('exit', (code, signal) => {
     record.status = record.stopRequested || record.status === 'stopping'
@@ -1556,7 +1771,22 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
     record.signal = signal || '';
     record.child = null;
     appendProcessLog(record, `process_exit code=${code} signal=${signal || ''}`);
-    scheduleManagedProcessSync(db, record, { immediate: true, changes: { osAlive: false, osCheckedAt: nowIso() } });
+    updateWorkflowRunWithLifecycleEvent(db, record.id, {
+      workflowId: record.workflowId,
+      label: record.label,
+      script: record.script,
+      args: record.args,
+      pid: record.pid,
+      status: record.status,
+      exitedAt: record.exitedAt,
+      exitCode: record.exitCode,
+      signal: record.signal,
+      osAlive: false,
+      osCheckedAt: nowIso(),
+      logs: record.logs,
+    }, {
+      reason: record.status === 'terminated' ? 'shutdown' : 'process_exit',
+    });
   });
 
   managedProcesses.set(record.id, record);
@@ -1575,6 +1805,17 @@ function stopManagedWorkflow(db, processId) {
   if (!record) {
     const alive = pidIsAlive(run.pid);
     if (alive && isManagedStatusActive(run.status)) {
+      const stopRequestedAt = nowIso();
+      updateWorkflowRunWithLifecycleEvent(db, processId, {
+        status: 'stopping',
+        osCheckedAt: stopRequestedAt,
+        osAlive: true,
+        logs: [...run.logs, `[${stopRequestedAt}] stop requested`],
+      }, {
+        eventAt: stopRequestedAt,
+        reason: 'stop_requested',
+        signal: 'SIGTERM',
+      });
       try {
         if (process.platform === 'win32') {
           process.kill(run.pid, 'SIGTERM');
@@ -1582,26 +1823,38 @@ function stopManagedWorkflow(db, processId) {
           process.kill(-run.pid, 'SIGTERM');
         }
       } catch (error) {
-        updateWorkflowRun(db, processId, {
+        const stopFailedAt = nowIso();
+        updateWorkflowRunWithLifecycleEvent(db, processId, {
           status: 'stop_failed',
-          osCheckedAt: nowIso(),
+          osCheckedAt: stopFailedAt,
           osAlive: pidIsAlive(run.pid),
-          logs: [...run.logs, `[${nowIso()}] stop_signal_error ${error.message}`],
+          logs: [...run.logs, `[${stopRequestedAt}] stop requested`, `[${stopFailedAt}] stop_signal_error ${error.message}`],
+        }, {
+          eventAt: stopFailedAt,
+          reason: 'stop_signal_error',
+          error: error.message,
         });
         return publicWorkflowRunRecord(getWorkflowRun(db, processId));
       }
+      return publicWorkflowRunRecord(getWorkflowRun(db, processId));
     }
     const nextStatus = alive
       ? 'stopping'
       : run.status === 'stopping'
         ? 'terminated'
         : 'lost';
-    updateWorkflowRun(db, processId, {
+    updateWorkflowRunWithLifecycleEvent(db, processId, {
       status: nextStatus,
       exitedAt: nextStatus === 'terminated' || nextStatus === 'lost' ? nowIso() : run.exited_at,
       osCheckedAt: nowIso(),
       osAlive: alive,
       logs: alive ? [...run.logs, `[${nowIso()}] stop requested`] : run.logs,
+    }, {
+      reason: alive
+        ? 'stop_requested'
+        : nextStatus === 'terminated'
+          ? 'shutdown'
+          : 'process_missing',
     });
     return publicWorkflowRunRecord(getWorkflowRun(db, processId));
   }
@@ -1614,6 +1867,7 @@ function stopManagedWorkflow(db, processId) {
   record.status = 'stopping';
   record.stopRequested = true;
   appendProcessLog(record, 'stop requested');
+  syncWorkflowRunWithLifecycleEvent(db, record, {}, { reason: 'stop_requested', signal: 'SIGTERM' });
   try {
     if (process.platform === 'win32') {
       record.child.kill('SIGTERM');
@@ -1622,9 +1876,42 @@ function stopManagedWorkflow(db, processId) {
     }
   } catch (error) {
     appendProcessLog(record, `stop_signal_error ${error.message}`);
+    record.status = 'stop_failed';
+    syncWorkflowRunWithLifecycleEvent(db, record, {
+      osCheckedAt: nowIso(),
+      osAlive: pidIsAlive(record.pid),
+    }, {
+      reason: 'stop_signal_error',
+      error: error.message,
+    });
+    return publicProcessRecord(record);
   }
-  syncWorkflowRun(db, record);
   return publicProcessRecord(record);
+}
+
+function restartManagedWorkflow(db, processId) {
+  const run = getWorkflowRun(db, processId);
+  if (!run) {
+    const error = new Error(`Unknown process: ${processId}`);
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const workflow = WORKFLOWS[run.workflow_id];
+  if (!workflow) {
+    const error = new Error(`Unknown workflow: ${run.workflow_id}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const restartArgs = argsWithoutManagedWorkerId(run.args || []);
+  const restarted = startManagedWorkflow(db, run.workflow_id, restartArgs, {
+    allowInternalArgs: true,
+  });
+  return {
+    ...restarted,
+    restartedFrom: run.run_id,
+  };
 }
 
 async function readRequestJson(request) {
@@ -2466,8 +2753,54 @@ function createServer(options) {
         queueCounts: getHomepageListingCounts(db),
         resolveQueueCounts: getResolveQueueCounts(db),
         workerStats: getWorkflowRuntimeSummary(db, { reconcile: access.canWrite }),
+        summaryCards: listSummaryQueryCardsWithCounts(db),
         auth: authPayloadForAccess(access),
       });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/summary/cards' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const label = String(body.label || body.name || '').trim();
+        const query = String(body.query || '').trim();
+        const counted = countListingsForSummaryQuery(db, query);
+        const card = upsertSummaryQueryCard(db, {
+          cardId: body.cardId || body.card_id,
+          label,
+          query,
+          position: Number.isFinite(body.position) ? body.position : undefined,
+        });
+        writeJson(response, 200, {
+          card: {
+            ...card,
+            value: counted.total,
+            error: '',
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    const summaryCardMatch = requestUrl.pathname.match(/^\/api\/summary\/cards\/([^/]+)$/);
+    if (summaryCardMatch && request.method === 'DELETE') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      const cardId = decodeURIComponent(summaryCardMatch[1]);
+      const deleted = deleteSummaryQueryCard(db, cardId);
+      if (!deleted) {
+        writeJson(response, 404, { error: `Unknown summary card: ${cardId}` });
+        return;
+      }
+      writeJson(response, 200, { deleted });
       return;
     }
 
@@ -2492,6 +2825,106 @@ function createServer(options) {
           diagnostics: error.diagnostics || [],
         });
       }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/query/counts' && request.method === 'POST') {
+      try {
+        const body = await readRequestJson(request);
+        const queries = Array.isArray(body.queries) ? body.queries.slice(0, 40) : [];
+        writeJson(response, 200, {
+          cards: queries.map((item) => {
+            const query = String(item.query || '').trim();
+            try {
+              const counted = countListingsForSummaryQuery(db, query);
+              return {
+                id: String(item.id || '').trim(),
+                label: String(item.label || '').trim(),
+                query,
+                value: counted.total,
+                showInOverview: item.showInOverview === true,
+                source: item.source || '',
+                error: '',
+              };
+            } catch (error) {
+              return {
+                id: String(item.id || '').trim(),
+                label: String(item.label || '').trim(),
+                query,
+                value: 0,
+                showInOverview: item.showInOverview === true,
+                source: item.source || '',
+                error: error.message || 'Query could not be counted.',
+              };
+            }
+          }),
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/saved-queries' && request.method === 'GET') {
+      writeJson(response, 200, {
+        queries: listSavedQueries(db),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/saved-queries' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const savedQuery = upsertSavedQuery(db, {
+          id: body.id || body.queryId || body.query_id,
+          label: body.label || body.name,
+          query: body.query,
+          showInOverview: body.showInOverview ?? body.show_in_overview,
+        });
+        writeJson(response, 200, { query: savedQuery });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    const savedQueryMatch = requestUrl.pathname.match(/^\/api\/saved-queries\/([^/]+)$/);
+    if (savedQueryMatch && request.method === 'PATCH') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const queryId = decodeURIComponent(savedQueryMatch[1]);
+        const updated = setSavedQueryOverview(db, queryId, body.showInOverview ?? body.show_in_overview);
+        if (!updated) {
+          writeJson(response, 404, { error: `Unknown saved query: ${queryId}` });
+          return;
+        }
+        writeJson(response, 200, { query: updated });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (savedQueryMatch && request.method === 'DELETE') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      const queryId = decodeURIComponent(savedQueryMatch[1]);
+      const deleted = deleteSavedQuery(db, queryId);
+      if (!deleted) {
+        writeJson(response, 404, { error: `Unknown saved query: ${queryId}` });
+        return;
+      }
+      writeJson(response, 200, { deleted });
       return;
     }
 
@@ -3120,6 +3553,64 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/workflows/profiles' && request.method === 'GET') {
+      if (!requireReadAccess(response, access)) {
+        return;
+      }
+      const workflowId = requestUrl.searchParams.get('workflowId') || '';
+      writeJson(response, 200, {
+        profiles: listWorkerParameterProfiles(db, { workflowId }),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/workflows/profiles' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const workflow = WORKFLOWS[body.workflowId || body.workflow_id];
+        if (!workflow) {
+          const error = new Error(`Unknown workflow: ${body.workflowId || body.workflow_id || ''}`);
+          error.statusCode = 400;
+          throw error;
+        }
+        const args = Array.isArray(body.args)
+          ? validateWorkflowArgs(workflow, body.args)
+          : validateWorkflowArgs(workflow, buildDefaultArgsFromFields(fieldsForWorkflow(workflow)));
+        const profile = upsertWorkerParameterProfile(db, {
+          profileId: body.profileId || body.profile_id,
+          workflowId: body.workflowId || body.workflow_id,
+          workerType: workflow.workerType || '',
+          label: body.label || body.name,
+          params: body.params || {},
+          args,
+        });
+        writeJson(response, 200, { profile });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, { error: error.message });
+      }
+      return;
+    }
+
+    const workerProfileMatch = requestUrl.pathname.match(/^\/api\/workflows\/profiles\/([^/]+)$/);
+    if (workerProfileMatch && request.method === 'DELETE') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      const profileId = decodeURIComponent(workerProfileMatch[1]);
+      const deleted = deleteWorkerParameterProfile(db, profileId);
+      if (!deleted) {
+        writeJson(response, 404, { error: `Unknown worker parameter profile: ${profileId}` });
+        return;
+      }
+      writeJson(response, 200, { deleted });
+      return;
+    }
+
     const workerDetailMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)$/);
     if (workerDetailMatch && request.method === 'GET') {
       const workerId = decodeURIComponent(workerDetailMatch[1]);
@@ -3223,6 +3714,27 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/workflows/restart' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const sectionStartedAt = process.hrtime.bigint();
+        const body = await readRequestJson(request);
+        const restarted = restartManagedWorkflow(db, body.processId);
+        logSlowSection('api_workflows_restart', sectionStartedAt, {
+          processId: body.processId || '',
+          restartedProcessId: restarted.id || '',
+          workflowId: restarted.workflowId || '',
+        });
+        writeJson(response, 201, { process: restarted });
+      } catch (error) {
+        writeJson(response, error.statusCode || 500, { error: error.message });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/workflows/stop' && request.method === 'POST') {
       if (!access.canWrite) {
         writeAuthError(response, access);
@@ -3295,11 +3807,15 @@ if (require.main === module) {
 module.exports = {
   parseArgs,
   normalizeWorkflowArgs,
+  argsWithoutManagedWorkerId,
   validateWorkflowStartArgs,
   buildDefaultArgsFromFields,
   fieldsForWorkflow,
   workflowConcurrencyLimit,
   workflowConcurrencyScope,
+  workflowLifecycleEventForStatus,
+  insertWorkflowRunWithLifecycleEvent,
+  updateWorkflowRunWithLifecycleEvent,
   isBrowserWorkerType,
   isExclusiveBrowserWorkerType,
 };

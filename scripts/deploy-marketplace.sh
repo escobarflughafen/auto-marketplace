@@ -151,10 +151,13 @@ sync_source() {
     --exclude .git \
     --exclude node_modules \
     --exclude artifacts \
+    --exclude artifacts-staging \
     --exclude profiles \
+    --exclude profiles-staging \
     --exclude output \
     --exclude credentials.json \
     --exclude secrets \
+    --exclude secrets-staging \
     --exclude .env \
     --exclude .DS_Store \
     --exclude raw \

@@ -178,6 +178,10 @@ function createMockMarketplaceMonitorServer() {
       sendJson(response, 200, workflowConfig);
       return;
     }
+    if (requestUrl.pathname === '/api/workflows/profiles') {
+      sendJson(response, 200, { profiles: [] });
+      return;
+    }
     if (requestUrl.pathname === '/api/workflows') {
       state.workflowRequests += 1;
       sendJson(response, 200, { ...workflowConfig, processes: [] });

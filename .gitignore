@@ -2,13 +2,17 @@
 
 # Secrets and local auth
 .marketplace-deploy.env
+.marketplace-deploy.staging.env
 credentials.json
 secrets/
+secrets-staging/
 playwright/.auth/
 profiles/
+profiles-staging/
 
 # Generated runtime data
 artifacts/
+artifacts-staging/
 reviews/
 facebook-marketplace.png
 .playwright-cli/

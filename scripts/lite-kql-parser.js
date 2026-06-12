@@ -233,6 +233,22 @@ function parseNumberStage(type, tokens, diagnostics) {
   return { type, value };
 }
 
+function parseSummarizeStage(tokens, diagnostics) {
+  const functionToken = tokens.find((token) => token.lower !== 'by');
+  if (functionToken?.lower === 'count') {
+    if (tokens.some((token) => token.lower === 'by')) {
+      diagnostics.push(diagnostic('Grouped summarize by is not supported.', functionToken));
+      return null;
+    }
+    return {
+      type: 'summarize',
+      aggregate: 'count',
+    };
+  }
+  diagnostics.push(diagnostic('Only summarize count() is supported.', functionToken || tokens[0]));
+  return null;
+}
+
 function splitPipeline(tokens) {
   const segments = [];
   let current = [];
@@ -300,6 +316,15 @@ function parseLiteKql(query = '', options = {}) {
     if (command === 'skip' || command === 'offset') {
       const skip = parseNumberStage('skip', rest, diagnostics);
       if (skip) stages.push(skip);
+      continue;
+    }
+    if (command === 'summarize') {
+      const summarize = parseSummarizeStage(rest, diagnostics);
+      if (summarize) stages.push(summarize);
+      continue;
+    }
+    if (command === 'count') {
+      stages.push({ type: 'summarize', aggregate: 'count' });
       continue;
     }
     diagnostics.push(diagnostic(`Unsupported pipeline stage "${segment[0].text}".`, segment[0]));

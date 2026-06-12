@@ -80,6 +80,8 @@ const LOCAL_STAGE_SUGGESTIONS = [
   { label: 'sort by', kind: 'keyword', insertText: 'sort by ', detail: 'Sort rows', score: 95 },
   { label: 'take', kind: 'keyword', insertText: 'take 50', detail: 'Limit rows', score: 90 },
   { label: 'skip', kind: 'keyword', insertText: 'skip ', detail: 'Offset rows', score: 70 },
+  { label: 'summarize count()', kind: 'keyword', insertText: 'summarize count()', detail: 'Count matching rows', score: 85 },
+  { label: 'count', kind: 'keyword', insertText: 'count', detail: 'Count matching rows', score: 80 },
 ];
 const LOCAL_LOGICAL_SUGGESTIONS = [
   { label: 'and', kind: 'keyword', insertText: 'and ', detail: 'Both conditions must match', score: 70 },
@@ -109,6 +111,7 @@ const LOCAL_SNIPPET_SUGGESTIONS = [
   },
 ];
 const SAVED_QUERY_STORAGE_KEY = 'marketplace-monitor-saved-queries';
+const SAVED_QUERY_OVERVIEW_STORAGE_KEY = 'marketplace-monitor-saved-query-overview';
 const DEFAULT_SAVED_QUERIES = [
   {
     id: 'default-pending-rank',
@@ -515,7 +518,6 @@ export function createListingsViewer(config = {}) {
     selectedBacklogQueueIds: [],
     suppressSelectionPreview: false,
     savedQueries: [],
-    savedQuerySelectionId: '',
     hideQueuedResolve: true,
     resolving: false,
     resolveMessage: 'Resolve queue is ready.',
@@ -523,17 +525,26 @@ export function createListingsViewer(config = {}) {
     resolvePollTimer: null,
     resolvePollInFlight: false,
     resolveControlsSignature: '',
+    lastResultMeta: null,
+    savedQueriesLoaded: false,
     table: null,
   };
 
   const els = {
     resultsMeta: document.getElementById('resultsMeta'),
+    queryResultDetailDialog: document.getElementById('queryResultDetailDialog'),
+    queryResultDetailMeta: document.getElementById('queryResultDetailMeta'),
+    queryResultDetailQuery: document.getElementById('queryResultDetailQuery'),
+    queryResultDetailHighlight: document.getElementById('queryResultDetailHighlight'),
+    queryResultDetailTableBody: document.getElementById('queryResultDetailTableBody'),
+    queryResultDetailWarning: document.getElementById('queryResultDetailWarning'),
+    queryResultCopyButton: document.getElementById('queryResultCopyButton'),
+    queryResultDetailCloseButton: document.getElementById('queryResultDetailCloseButton'),
     queryEditor: document.getElementById('queryEditor'),
     queryHighlight: document.getElementById('queryHighlight'),
     queryAutocomplete: document.getElementById('queryAutocomplete'),
     queryDiagnostics: document.getElementById('queryDiagnostics'),
     queryAssistMessage: document.getElementById('queryAssistMessage'),
-    savedQuerySelect: document.getElementById('savedQuerySelect'),
     queryModeButtons: Array.from(document.querySelectorAll('[data-query-mode]')),
     queryModePanes: Array.from(document.querySelectorAll('[data-query-pane]')),
     queryFieldSelect: document.getElementById('queryFieldSelect'),
@@ -586,7 +597,6 @@ export function createListingsViewer(config = {}) {
     selectAllBacklogRows: document.getElementById('selectAllBacklogRows'),
   };
   state.savedQueries = loadSavedQueries();
-  renderSavedQueryOptions();
   setQueryControlValue(state.q);
   setQueryMode(state.queryMode);
   syncSavedQuerySelect(state.q);
@@ -599,31 +609,32 @@ export function createListingsViewer(config = {}) {
     return activeQueryControl()?.value || '';
   }
 
-  function renderQueryHighlight() {
-    if (!els.queryHighlight) return;
-    const value = els.queryEditor?.value || '';
-    if (!value) {
-      els.queryHighlight.innerHTML = '';
-      return;
-    }
-    const pattern = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|(==|!=|<=|>=|=~|!~|\.\.|\||[(),<>])|\b(where|sort|by|take|skip|and|or|not|in|between|contains|startswith|endswith|has|listings|events|workers|recommendations|asc|desc)\b|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*/gi;
+  function highlightQueryText(value) {
+    const pattern = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|(==|!=|<=|>=|=~|!~|\.\.|\||[(),<>])|\b(where|sort|by|take|skip|summarize|count|and|or|not|in|between|contains|startswith|endswith|has|listings|events|workers|recommendations|asc|desc)\b|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*/gi;
     let cursor = 0;
     let output = '';
-    for (const match of value.matchAll(pattern)) {
-      output += escapeHtml(value.slice(cursor, match.index));
+    const text = String(value || '');
+    for (const match of text.matchAll(pattern)) {
+      output += escapeHtml(text.slice(cursor, match.index));
       const token = match[0];
       const lower = token.toLowerCase();
       const klass = token.startsWith('"') || token.startsWith("'") ? 'string'
         : /^-?\d/.test(token) ? 'number'
           : ['|', '==', '!=', '<=', '>=', '=~', '!~', '..', '(', ')', ',', '<', '>'].includes(token) ? 'operator'
-            : ['where', 'sort', 'by', 'take', 'skip', 'and', 'or', 'not', 'in', 'between', 'contains', 'startswith', 'endswith', 'has', 'asc', 'desc'].includes(lower) ? 'keyword'
+            : ['where', 'sort', 'by', 'take', 'skip', 'summarize', 'count', 'and', 'or', 'not', 'in', 'between', 'contains', 'startswith', 'endswith', 'has', 'asc', 'desc'].includes(lower) ? 'keyword'
               : ['listings', 'events', 'workers', 'recommendations'].includes(lower) ? 'source'
                 : 'field';
       output += `<span class="query-token-${klass}">${escapeHtml(token)}</span>`;
       cursor = match.index + token.length;
     }
-    output += escapeHtml(value.slice(cursor));
-    els.queryHighlight.innerHTML = output + (value.endsWith('\n') ? ' ' : '');
+    output += escapeHtml(text.slice(cursor));
+    return output + (text.endsWith('\n') ? ' ' : '');
+  }
+
+  function renderQueryHighlight() {
+    if (!els.queryHighlight) return;
+    const value = els.queryEditor?.value || '';
+    els.queryHighlight.innerHTML = value ? highlightQueryText(value) : '';
   }
 
   function setQueryControlValue(value, source = null) {
@@ -660,7 +671,8 @@ export function createListingsViewer(config = {}) {
       id: String(item?.id || fallbackId || `custom-${Date.now()}`).trim(),
       label,
       query,
-      source: item?.source === 'default' ? 'default' : 'custom',
+      source: item?.source === 'default' ? 'default' : item?.source === 'server' ? 'server' : 'custom',
+      showInOverview: item?.showInOverview === true,
     };
   }
 
@@ -678,17 +690,68 @@ export function createListingsViewer(config = {}) {
   }
 
   function loadSavedQueries() {
+    let overview = {};
+    try {
+      overview = JSON.parse(localStorage.getItem(SAVED_QUERY_OVERVIEW_STORAGE_KEY) || '{}') || {};
+    } catch (_error) {
+      overview = {};
+    }
     return [
-      ...DEFAULT_SAVED_QUERIES,
+      ...DEFAULT_SAVED_QUERIES.map((item) => ({
+        ...item,
+        showInOverview: overview[item.id] === true,
+      })),
       ...loadCustomSavedQueries(),
     ];
+  }
+
+  function mergeSavedQueries(nextQueries) {
+    const byId = new Map();
+    for (const item of state.savedQueries) byId.set(item.id, item);
+    for (const item of nextQueries.map((query, index) => normalizeSavedQuery(query, `server-${index}`)).filter(Boolean)) {
+      byId.set(item.id, { ...item, source: 'server' });
+    }
+    state.savedQueries = [...byId.values()];
+    state.savedQueriesLoaded = true;
+    renderSavedQueryOptions();
+  }
+
+  async function ensureSavedQueriesLoaded() {
+    if (state.savedQueriesLoaded) return state.savedQueries;
+    const payload = await fetchJson('/api/saved-queries');
+    mergeSavedQueries(payload.queries || []);
+    return state.savedQueries;
+  }
+
+  function upsertSavedQueryInState(query) {
+    const item = normalizeSavedQuery(query, query?.id || query?.query_id);
+    if (!item) return null;
+    const serverItem = { ...item, source: 'server' };
+    state.savedQueries = [
+      serverItem,
+      ...state.savedQueries.filter((candidate) => candidate.id !== serverItem.id),
+    ];
+    state.savedQueriesLoaded = true;
+    renderSavedQueryOptions();
+    return serverItem;
+  }
+
+  function persistDefaultSavedQueryOverview() {
+    try {
+      const overview = Object.fromEntries(state.savedQueries
+        .filter((item) => item.source === 'default' && item.showInOverview === true)
+        .map((item) => [item.id, true]));
+      localStorage.setItem(SAVED_QUERY_OVERVIEW_STORAGE_KEY, JSON.stringify(overview));
+    } catch (_error) {
+      alert('Saved query display settings could not be updated in this browser.');
+    }
   }
 
   function persistCustomSavedQueries() {
     try {
       const customQueries = state.savedQueries
         .filter((item) => item.source === 'custom')
-        .map(({ id, label, query }) => ({ id, label, query }));
+        .map(({ id, label, query, showInOverview }) => ({ id, label, query, showInOverview: showInOverview === true }));
       localStorage.setItem(SAVED_QUERY_STORAGE_KEY, JSON.stringify(customQueries));
     } catch (_error) {
       alert('Saved queries could not be updated in this browser.');
@@ -696,75 +759,55 @@ export function createListingsViewer(config = {}) {
   }
 
   function renderSavedQueryOptions() {
-    if (!els.savedQuerySelect) return;
-    const selectedId = els.savedQuerySelect.value;
-    els.savedQuerySelect.innerHTML = '<option value="">Choose query</option>'
-      + '<option value="__save_current__">Save current query...</option>'
-      + '<option value="__delete_selected__">Delete selected query...</option>'
-      + state.savedQueries.map((item) => (
-        `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`
-      )).join('');
-    if (state.savedQueries.some((item) => item.id === selectedId)) {
-      els.savedQuerySelect.value = selectedId;
-      state.savedQuerySelectionId = selectedId;
-    }
+    config.onSavedQueriesChanged?.();
   }
 
   function selectedSavedQuery() {
-    const selectedValue = els.savedQuerySelect?.value || '';
-    const selectedId = selectedValue.startsWith('__') ? state.savedQuerySelectionId : selectedValue;
-    if (!selectedId) return null;
-    return state.savedQueries.find((item) => item.id === selectedId) || null;
+    const query = getQueryControlValue().trim();
+    return state.savedQueries.find((item) => item.query.trim() === query && item.source === 'custom')
+      || state.savedQueries.find((item) => item.query.trim() === query)
+      || null;
   }
 
   function syncSavedQuerySelect(query) {
-    if (!els.savedQuerySelect) return;
-    const text = String(query || '').trim();
-    const matchingOption = Array.from(els.savedQuerySelect.options)
-      .find((option) => {
-        const item = state.savedQueries.find((savedQuery) => savedQuery.id === option.value);
-        return item?.query.trim() === text;
-      });
-    els.savedQuerySelect.value = matchingOption?.value || '';
-    state.savedQuerySelectionId = els.savedQuerySelect.value;
+    void query;
   }
 
-  async function saveCurrentQuery() {
+  async function saveCurrentQuery(options = {}) {
     const query = getQueryControlValue().trim();
     if (!query) {
       alert('Enter a query before saving it.');
-      return;
+      return null;
     }
     const selected = selectedSavedQuery();
     const defaultName = selected?.source === 'custom'
       ? selected.label
       : query.slice(0, 48);
     const label = window.prompt('Name this saved query:', defaultName)?.trim();
-    if (!label) return;
+    if (!label) return null;
     if (state.savedQueries.some((item) => item.source === 'default' && item.label.toLowerCase() === label.toLowerCase())) {
       alert('Built-in saved query names are reserved. Choose another name.');
-      return;
+      return null;
     }
-    const existing = state.savedQueries.find((item) => item.source === 'custom' && item.label.toLowerCase() === label.toLowerCase());
-    if (existing && !window.confirm(`Replace saved query "${label}"?`)) return;
-    if (!existing && !window.confirm(`Save query "${label}"?`)) return;
-
-    if (existing) {
-      existing.query = query;
-      els.savedQuerySelect.value = existing.id;
-    } else {
-      const item = {
-        id: `custom-${Date.now()}`,
+    const existing = state.savedQueries.find((item) => item.source !== 'default' && item.label.toLowerCase() === label.toLowerCase());
+    if (existing && !window.confirm(`Replace saved query "${label}"?`)) return null;
+    if (!existing && !window.confirm(`Save query "${label}"?`)) return null;
+    const showInOverview = options.defaultShowInOverview === true
+      ? true
+      : existing?.showInOverview === true;
+    const payload = await fetchJson('/api/saved-queries', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: existing?.source === 'server' ? existing.id : '',
         label,
         query,
-        source: 'custom',
-      };
-      state.savedQueries.push(item);
-      els.savedQuerySelect.value = item.id;
-    }
-    persistCustomSavedQueries();
-    renderSavedQueryOptions();
+        showInOverview,
+      }),
+    });
+    const saved = upsertSavedQueryInState(payload.query);
     syncSavedQuerySelect(query);
+    return saved;
   }
 
   function deleteSelectedSavedQuery() {
@@ -780,14 +823,42 @@ export function createListingsViewer(config = {}) {
     if (!window.confirm(`Delete saved query "${selected.label}"?`)) return;
     state.savedQueries = state.savedQueries.filter((item) => item.id !== selected.id);
     persistCustomSavedQueries();
-    state.savedQuerySelectionId = '';
     renderSavedQueryOptions();
-    els.savedQuerySelect.value = '';
   }
 
   function syncQueryFromControl(control) {
     setQueryControlValue(control?.value || '', control);
     renderQueryHighlight();
+  }
+
+  function formatQueryText(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const compact = text.replace(/\s+/g, ' ');
+    const parts = compact.split('|').map((part) => part.trim()).filter(Boolean);
+    if (parts.length <= 1) return compact;
+    return [parts[0], ...parts.slice(1).map((part) => `| ${part}`)].join('\n');
+  }
+
+  async function copyCurrentQuery() {
+    const query = getQueryControlValue().trim();
+    if (!query) return;
+    await copyText(query);
+    state.queryDiagnostics = [{ severity: 'info', message: 'Query copied.' }];
+    renderQueryAssist();
+  }
+
+  async function copyText(text) {
+    const value = String(text || '');
+    if (!value) return;
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const control = activeQueryControl();
+      control?.focus();
+      control?.select();
+      document.execCommand('copy');
+    }
   }
 
   function queuedExclusionIds() {
@@ -911,13 +982,63 @@ export function createListingsViewer(config = {}) {
     const stats = payload.stats || {};
     const offset = stats.offset ?? 0;
     const warnings = payload.parsedQuery?.warnings || [];
-    els.resultsMeta.textContent = 'Showing ' + state.rows.length + ' of ' + state.total + ' rows'
-      + (state.q ? ' for query: ' + state.q : '')
-      + (queuedExclusionIds().length ? ` · hiding ${queuedExclusionIds().length} queued` : '')
-      + ' · sort: ' + (payload.sort || '') + ' ' + (payload.sortDirection || '')
-      + ' · query: ' + (stats.elapsedMs ?? 0) + 'ms'
-      + ' · window: ' + offset + '-' + (offset + state.rows.length)
-      + (warnings.length ? ` · ${warnings[0]}` : '');
+    const hiddenQueued = queuedExclusionIds().length;
+    state.lastResultMeta = {
+      shown: state.rows.length,
+      total: state.total,
+      query: state.q || '',
+      hiddenQueued,
+      sort: [payload.sort, payload.sortDirection].filter(Boolean).join(' '),
+      elapsedMs: stats.elapsedMs ?? 0,
+      window: `${offset}-${offset + state.rows.length}`,
+      warnings,
+    };
+    const compact = [
+      `Showing ${state.rows.length} of ${state.total}`,
+      `${stats.elapsedMs ?? 0}ms`,
+      warnings.length ? 'warning' : '',
+    ].filter(Boolean).join(' · ');
+    els.resultsMeta.innerHTML = '<button type="button" class="results-meta-button" id="queryResultMetaButton">'
+      + `${escapeHtml(compact)}`
+      + (state.q ? '<span class="results-meta-hint">View query</span>' : '<span class="results-meta-hint">View details</span>')
+      + '</button>';
+    document.getElementById('queryResultMetaButton')?.addEventListener('click', openQueryResultDetail);
+  }
+
+  function renderQueryResultDetail() {
+    const meta = state.lastResultMeta || {};
+    if (els.queryResultDetailMeta) {
+      els.queryResultDetailMeta.textContent = `${meta.shown || 0} of ${meta.total || 0} rows`;
+    }
+    if (els.queryResultDetailQuery) {
+      els.queryResultDetailQuery.value = formatQueryText(meta.query || '');
+    }
+    if (els.queryResultDetailHighlight) {
+      const formattedQuery = formatQueryText(meta.query || '');
+      els.queryResultDetailHighlight.innerHTML = formattedQuery
+        ? highlightQueryText(formattedQuery)
+        : '<span class="query-result-empty">No query</span>';
+    }
+    if (els.queryResultDetailTableBody) {
+      const rows = [
+        ['Rows', `${meta.shown || 0} of ${meta.total || 0}`],
+        ['Hidden queued', meta.hiddenQueued || 0],
+        ['Sort', meta.sort || '-'],
+        ['Query time', `${meta.elapsedMs || 0}ms`],
+        ['Window', meta.window || '-'],
+      ];
+      els.queryResultDetailTableBody.innerHTML = rows.map(([key, value]) => (
+        `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(value)}</td></tr>`
+      )).join('');
+    }
+    if (els.queryResultDetailWarning) {
+      els.queryResultDetailWarning.textContent = (meta.warnings || []).join(' ');
+    }
+  }
+
+  function openQueryResultDetail() {
+    renderQueryResultDetail();
+    els.queryResultDetailDialog?.showModal();
   }
 
   function renderQueryAssist() {
@@ -1852,25 +1973,29 @@ export function createListingsViewer(config = {}) {
       applyQuerySuggestion(state.querySuggestions[index]);
     });
     document.getElementById('clearButton').addEventListener('click', async () => {
-      if (els.savedQuerySelect) els.savedQuerySelect.value = '';
-      state.savedQuerySelectionId = '';
       await applyQuery('');
     });
-    els.savedQuerySelect?.addEventListener('change', async () => {
-      if (els.savedQuerySelect.value === '__save_current__') {
-        const previousId = state.savedQuerySelectionId;
-        await saveCurrentQuery();
-        if (els.savedQuerySelect.value.startsWith('__')) els.savedQuerySelect.value = previousId || '';
-        return;
-      }
-      if (els.savedQuerySelect.value === '__delete_selected__') {
-        deleteSelectedSavedQuery();
-        return;
-      }
-      const selected = selectedSavedQuery();
-      if (!selected) return;
-      state.savedQuerySelectionId = selected.id;
-      await applyQuery(selected.query);
+    document.getElementById('saveQueryButton')?.addEventListener('click', () => {
+      saveCurrentQuery({ defaultShowInOverview: true }).catch((error) => {
+        alert(error.message || 'Query could not be saved.');
+      });
+    });
+    document.getElementById('copyQueryButton')?.addEventListener('click', () => {
+      copyCurrentQuery().catch((error) => {
+        alert(error.message || 'Query could not be copied.');
+      });
+    });
+    document.getElementById('formatQueryButton')?.addEventListener('click', () => {
+      const formatted = formatQueryText(getQueryControlValue());
+      setQueryControlValue(formatted);
+      activeQueryControl()?.focus();
+      renderQueryAssist();
+    });
+    els.queryResultDetailCloseButton?.addEventListener('click', () => els.queryResultDetailDialog?.close());
+    els.queryResultCopyButton?.addEventListener('click', () => {
+      copyText(els.queryResultDetailQuery?.value || '').catch((error) => {
+        alert(error.message || 'Query could not be copied.');
+      });
     });
     els.queryFieldSelect?.addEventListener('change', updateQueryOperatorOptions);
     document.getElementById('addClauseButton')?.addEventListener('click', addQueryClause);
@@ -1883,16 +2008,16 @@ export function createListingsViewer(config = {}) {
         await applyQuery(button.dataset.query || '');
       });
     }
-    els.listingStatusTools.addEventListener('click', async (event) => {
+    els.listingStatusTools?.addEventListener('click', async (event) => {
       const button = event.target.closest('button[data-query]');
       if (!button) return;
       await applyQuery(button.dataset.query || '');
     });
-    els.listingLimitSelect.addEventListener('change', async () => {
+    els.listingLimitSelect?.addEventListener('change', async () => {
       state.limit = Number.parseInt(els.listingLimitSelect.value, 10) || 25;
       await loadRows();
     });
-    document.getElementById('refreshListingsButton').addEventListener('click', loadRows);
+    document.getElementById('refreshListingsButton')?.addEventListener('click', loadRows);
     els.queueSelectedButton.addEventListener('click', () => {
       queueSelectedForResolve().catch((error) => {
         renderResolveControls(`Queue update issue: ${error.message}`);
@@ -2049,6 +2174,59 @@ export function createListingsViewer(config = {}) {
     window.addEventListener('scroll', positionSnapshotPanel, { passive: true });
   }
 
+  function savedQueriesForOverview(options = {}) {
+    const includeAll = options.includeAll === true;
+    return state.savedQueries
+      .filter((item) => includeAll || item.showInOverview === true)
+      .map((item) => ({
+        id: item.id,
+        label: item.label,
+        query: item.query,
+        source: item.source,
+        showInOverview: item.showInOverview === true,
+      }));
+  }
+
+  function toggleSavedQueryOverview(id) {
+    return toggleSavedQueryOverviewAsync(id);
+  }
+
+  async function toggleSavedQueryOverviewAsync(id) {
+    const item = state.savedQueries.find((candidate) => candidate.id === id);
+    if (!item) return null;
+    if (item.source === 'default') {
+      const payload = await fetchJson('/api/saved-queries', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: item.id,
+          label: item.label,
+          query: item.query,
+          showInOverview: item.showInOverview !== true,
+        }),
+      });
+      return upsertSavedQueryInState(payload.query);
+    }
+    if (item.source !== 'server') {
+      const payload = await fetchJson('/api/saved-queries', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          label: item.label,
+          query: item.query,
+          showInOverview: item.showInOverview !== true,
+        }),
+      });
+      return upsertSavedQueryInState(payload.query);
+    }
+    const payload = await fetchJson(`/api/saved-queries/${encodeURIComponent(item.id)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ showInOverview: item.showInOverview !== true }),
+    });
+    return upsertSavedQueryInState(payload.query);
+  }
+
   return {
     bindEvents,
     renderHead,
@@ -2059,6 +2237,10 @@ export function createListingsViewer(config = {}) {
     loadRows,
     resize: resizeListingsTable,
     applyQuery,
+    saveCurrentQuery,
+    ensureSavedQueriesLoaded,
+    savedQueriesForOverview,
+    toggleSavedQueryOverview,
     setListingView,
     activeListingView,
   };

@@ -325,6 +325,56 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_parameter_profiles (
+      profile_id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      worker_type TEXT NOT NULL DEFAULT '',
+      label TEXT NOT NULL,
+      params_json TEXT NOT NULL DEFAULT '{}',
+      args_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_worker_parameter_profiles_workflow_updated
+    ON worker_parameter_profiles (workflow_id, updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS summary_query_cards (
+      card_id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      query TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_summary_query_cards_position_updated
+    ON summary_query_cards (position ASC, updated_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS saved_queries (
+      query_id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      query TEXT NOT NULL,
+      show_in_overview INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_saved_queries_overview_updated
+    ON saved_queries (show_in_overview, updated_at DESC);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS resolve_queue_items (
       listing_id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'queued',
@@ -3551,6 +3601,56 @@ function parseJsonObject(value) {
   }
 }
 
+function normalizeWorkerParameterProfileRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    profile_id: row.profile_id,
+    workflow_id: row.workflow_id,
+    worker_type: row.worker_type || '',
+    label: row.label,
+    params: parseJsonObject(row.params_json),
+    args: parseJsonArray(row.args_json),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function normalizeSummaryQueryCardRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    card_id: row.card_id,
+    label: row.label,
+    query: row.query,
+    position: Number.isFinite(row.position) ? row.position : 0,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function normalizeSavedQueryRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.query_id,
+    query_id: row.query_id,
+    label: row.label,
+    query: row.query,
+    showInOverview: row.show_in_overview === 1,
+    show_in_overview: row.show_in_overview === 1,
+    source: 'server',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function normalizeWorkflowRunRow(row) {
   if (!row) {
     return null;
@@ -3641,6 +3741,285 @@ function normalizeWorkflowEventRow(row) {
       snapshot_path: '',
     },
   };
+}
+
+function normalizeWorkerParameterProfileId(value, fallback = '') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  if (normalized) {
+    return normalized;
+  }
+  return fallback || `worker-profile-${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function listWorkerParameterProfiles(db, options = {}) {
+  const workflowId = String(options.workflowId || options.workflow_id || '').trim();
+  if (workflowId) {
+    return db.prepare(`
+      SELECT *
+      FROM worker_parameter_profiles
+      WHERE workflow_id = ?
+      ORDER BY updated_at DESC, label ASC
+    `).all(workflowId).map(normalizeWorkerParameterProfileRow);
+  }
+  return db.prepare(`
+    SELECT *
+    FROM worker_parameter_profiles
+    ORDER BY updated_at DESC, label ASC
+  `).all().map(normalizeWorkerParameterProfileRow);
+}
+
+function getWorkerParameterProfile(db, profileId) {
+  return normalizeWorkerParameterProfileRow(db.prepare(`
+    SELECT *
+    FROM worker_parameter_profiles
+    WHERE profile_id = ?
+  `).get(String(profileId || '').trim()));
+}
+
+function upsertWorkerParameterProfile(db, profile) {
+  const now = profile.updatedAt || profile.updated_at || new Date().toISOString();
+  const workflowId = String(profile.workflowId || profile.workflow_id || '').trim();
+  if (!workflowId) {
+    throw new Error('upsertWorkerParameterProfile requires workflowId');
+  }
+  const label = normalizeKeyword(profile.label || profile.name || '');
+  if (!label) {
+    throw new Error('upsertWorkerParameterProfile requires label');
+  }
+  const profileId = normalizeWorkerParameterProfileId(
+    profile.profileId || profile.profile_id,
+    normalizeWorkerParameterProfileId(`${workflowId}-${label}`),
+  );
+  const previous = getWorkerParameterProfile(db, profileId);
+  const params = profile.params && typeof profile.params === 'object' && !Array.isArray(profile.params)
+    ? profile.params
+    : {};
+  const args = Array.isArray(profile.args) ? profile.args : [];
+
+  db.prepare(`
+    INSERT INTO worker_parameter_profiles (
+      profile_id,
+      workflow_id,
+      worker_type,
+      label,
+      params_json,
+      args_json,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id) DO UPDATE SET
+      workflow_id = excluded.workflow_id,
+      worker_type = excluded.worker_type,
+      label = excluded.label,
+      params_json = excluded.params_json,
+      args_json = excluded.args_json,
+      updated_at = excluded.updated_at
+  `).run(
+    profileId,
+    workflowId,
+    String(profile.workerType || profile.worker_type || '').trim(),
+    label,
+    serializeJson(params),
+    serializeArray(args),
+    previous?.created_at || profile.createdAt || profile.created_at || now,
+    now,
+  );
+
+  return getWorkerParameterProfile(db, profileId);
+}
+
+function deleteWorkerParameterProfile(db, profileId) {
+  const id = String(profileId || '').trim();
+  const previous = getWorkerParameterProfile(db, id);
+  if (!previous) {
+    return null;
+  }
+  db.prepare(`
+    DELETE FROM worker_parameter_profiles
+    WHERE profile_id = ?
+  `).run(id);
+  return previous;
+}
+
+function normalizeSummaryQueryCardId(value, fallback = '') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  if (normalized) {
+    return normalized;
+  }
+  return fallback || `summary-card-${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function listSummaryQueryCards(db) {
+  return db.prepare(`
+    SELECT *
+    FROM summary_query_cards
+    ORDER BY position ASC, updated_at DESC, label ASC
+  `).all().map(normalizeSummaryQueryCardRow);
+}
+
+function getSummaryQueryCard(db, cardId) {
+  return normalizeSummaryQueryCardRow(db.prepare(`
+    SELECT *
+    FROM summary_query_cards
+    WHERE card_id = ?
+  `).get(String(cardId || '').trim()));
+}
+
+function upsertSummaryQueryCard(db, card) {
+  const now = card.updatedAt || card.updated_at || new Date().toISOString();
+  const label = normalizeKeyword(card.label || card.name || '');
+  if (!label) {
+    throw new Error('upsertSummaryQueryCard requires label');
+  }
+  const query = String(card.query || '').trim();
+  if (!query) {
+    throw new Error('upsertSummaryQueryCard requires query');
+  }
+  const cardId = normalizeSummaryQueryCardId(
+    card.cardId || card.card_id,
+    normalizeSummaryQueryCardId(`summary-${label}`),
+  );
+  const previous = getSummaryQueryCard(db, cardId);
+  const position = Number.isFinite(card.position)
+    ? Math.max(0, Math.trunc(card.position))
+    : previous?.position ?? 100;
+
+  db.prepare(`
+    INSERT INTO summary_query_cards (
+      card_id,
+      label,
+      query,
+      position,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(card_id) DO UPDATE SET
+      label = excluded.label,
+      query = excluded.query,
+      position = excluded.position,
+      updated_at = excluded.updated_at
+  `).run(
+    cardId,
+    label,
+    query,
+    position,
+    previous?.created_at || card.createdAt || card.created_at || now,
+    now,
+  );
+
+  return getSummaryQueryCard(db, cardId);
+}
+
+function deleteSummaryQueryCard(db, cardId) {
+  const id = String(cardId || '').trim();
+  const previous = getSummaryQueryCard(db, id);
+  if (!previous) {
+    return null;
+  }
+  db.prepare(`
+    DELETE FROM summary_query_cards
+    WHERE card_id = ?
+  `).run(id);
+  return previous;
+}
+
+function normalizeSavedQueryId(value, fallback = '') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  if (normalized) return normalized;
+  return fallback || `saved-query-${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function listSavedQueries(db) {
+  return db.prepare(`
+    SELECT *
+    FROM saved_queries
+    ORDER BY updated_at DESC, label ASC
+  `).all().map(normalizeSavedQueryRow);
+}
+
+function getSavedQuery(db, queryId) {
+  return normalizeSavedQueryRow(db.prepare(`
+    SELECT *
+    FROM saved_queries
+    WHERE query_id = ?
+  `).get(String(queryId || '').trim()));
+}
+
+function upsertSavedQuery(db, query) {
+  const now = query.updatedAt || query.updated_at || new Date().toISOString();
+  const label = normalizeKeyword(query.label || query.name || '');
+  if (!label) {
+    throw new Error('upsertSavedQuery requires label');
+  }
+  const queryText = String(query.query || '').trim();
+  if (!queryText) {
+    throw new Error('upsertSavedQuery requires query');
+  }
+  const queryId = normalizeSavedQueryId(
+    query.id || query.queryId || query.query_id,
+    normalizeSavedQueryId(`saved-${label}`),
+  );
+  const previous = getSavedQuery(db, queryId);
+  const showInOverview = query.showInOverview ?? query.show_in_overview ?? previous?.showInOverview ?? false;
+
+  db.prepare(`
+    INSERT INTO saved_queries (
+      query_id,
+      label,
+      query,
+      show_in_overview,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(query_id) DO UPDATE SET
+      label = excluded.label,
+      query = excluded.query,
+      show_in_overview = excluded.show_in_overview,
+      updated_at = excluded.updated_at
+  `).run(
+    queryId,
+    label,
+    queryText,
+    showInOverview ? 1 : 0,
+    previous?.created_at || query.createdAt || query.created_at || now,
+    now,
+  );
+
+  return getSavedQuery(db, queryId);
+}
+
+function setSavedQueryOverview(db, queryId, showInOverview) {
+  const previous = getSavedQuery(db, queryId);
+  if (!previous) return null;
+  db.prepare(`
+    UPDATE saved_queries
+    SET show_in_overview = ?, updated_at = ?
+    WHERE query_id = ?
+  `).run(showInOverview ? 1 : 0, new Date().toISOString(), previous.query_id);
+  return getSavedQuery(db, previous.query_id);
+}
+
+function deleteSavedQuery(db, queryId) {
+  const id = String(queryId || '').trim();
+  const previous = getSavedQuery(db, id);
+  if (!previous) return null;
+  db.prepare('DELETE FROM saved_queries WHERE query_id = ?').run(id);
+  return previous;
 }
 
 function buildWorkflowEventId(eventAt, runId, eventType) {
@@ -4537,6 +4916,19 @@ module.exports = {
   updateWorkflowRun,
   getWorkflowRun,
   listWorkflowRuns,
+  listWorkerParameterProfiles,
+  getWorkerParameterProfile,
+  upsertWorkerParameterProfile,
+  deleteWorkerParameterProfile,
+  listSummaryQueryCards,
+  getSummaryQueryCard,
+  upsertSummaryQueryCard,
+  deleteSummaryQueryCard,
+  listSavedQueries,
+  getSavedQuery,
+  upsertSavedQuery,
+  setSavedQueryOverview,
+  deleteSavedQuery,
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
   listWorkerAuditEvents,

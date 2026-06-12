@@ -41,7 +41,6 @@
         <form class="querybar" id="queryForm">
           <div class="query-input-shell">
             <div class="query-editor query-mode-pane active" data-query-pane="editor">
-              <button type="button" class="query-clear-button" id="clearButton" aria-label="Clear query">X</button>
               <pre class="query-highlight" id="queryHighlight" aria-hidden="true"></pre>
               <textarea id="queryEditor" rows="3" spellcheck="false" autocomplete="off" placeholder='listings | where title contains "pentax 67" and price >= 2000&#10;| sort by last_seen_at desc'></textarea>
             </div>
@@ -49,11 +48,23 @@
           </div>
         </form>
         <div class="tips query-diagnostics" id="queryDiagnostics">
-          <div class="query-examples">
-            <label for="savedQuerySelect">Saved query</label>
-            <select id="savedQuerySelect" class="query-saved-select">
-              <option value="">Choose query</option>
-            </select>
+          <div class="query-toolbar">
+            <div class="query-tool-group" role="group" aria-label="Query actions">
+              <button type="button" class="query-tool-button" id="clearButton">Clear</button>
+              <button type="button" class="query-tool-button" id="saveQueryButton">Save</button>
+              <button type="button" class="query-tool-button" id="copyQueryButton">Copy</button>
+              <button type="button" class="query-tool-button" id="formatQueryButton">Format</button>
+            </div>
+            <label class="query-row-control" for="listingLimitSelect">
+              Rows
+              <select id="listingLimitSelect">
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+              </select>
+            </label>
+            <button type="button" class="query-tool-button query-refresh-button" id="refreshListingsButton">Refresh</button>
             <span class="query-assist-message" id="queryAssistMessage" aria-live="polite"></span>
           </div>
           <button type="submit" class="secondary query-action-button" form="queryForm">Search</button>
@@ -78,27 +89,6 @@
         <button type="button" class="subtab" data-listing-view="backlogQueueView">Backlog</button>
       </nav>
       <section class="listing-view active" id="queryResultsView">
-      <div class="listings-toolbar">
-        <div class="segmented" id="listingStatusTools">
-          <button type="button" class="secondary" data-query="">All</button>
-          <button type="button" class="secondary" data-query='listings | where status == "pending" | sort by rank asc'>Pending</button>
-          <button type="button" class="secondary" data-query='listings | where status == "error" | sort by last_seen_at desc'>Review</button>
-          <button type="button" class="secondary" data-query='listings | where status == "sold" | sort by last_seen_at desc'>Sold</button>
-          <button type="button" class="secondary" data-query='listings | where status == "pending_sale" | sort by last_seen_at desc'>Pending sale</button>
-          <button type="button" class="secondary" data-query='listings | where status == "done" | sort by completed_at desc'>Done</button>
-        </div>
-        <div class="toolbar-spacer"></div>
-        <label class="inline-control">
-          Rows
-          <select id="listingLimitSelect">
-            <option value="25" selected>25</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-            <option value="200">200</option>
-          </select>
-        </label>
-        <button type="button" class="secondary" id="refreshListingsButton">Refresh</button>
-      </div>
       <div class="listings-main" id="listingsMain">
         <div class="listings-table-pane">
           <div class="results-meta" id="resultsMeta"></div>
@@ -639,6 +629,34 @@
     </div>
   </dialog>
 
-  <script type="module" src="/app/app.js?v=history-tabular-pagination-20260606"></script>
+  <dialog class="history-edit-dialog history-compact-dialog" id="queryResultDetailDialog">
+    <div class="history-dialog-body">
+      <div class="history-edit-title">
+        <div>
+          <div class="worker-control-section-title">Result Query</div>
+          <div class="process-meta" id="queryResultDetailMeta"></div>
+        </div>
+        <button type="button" class="secondary" id="queryResultDetailCloseButton">Close</button>
+      </div>
+      <div class="history-notes-field query-result-field">
+        <div>Query</div>
+        <div class="query-editor query-result-editor" tabindex="0" aria-label="Formatted query">
+          <pre class="query-highlight query-result-highlight" id="queryResultDetailHighlight" aria-hidden="true"></pre>
+        </div>
+        <textarea id="queryResultDetailQuery" rows="5" readonly hidden></textarea>
+      </div>
+      <div class="history-actions">
+        <button type="button" id="queryResultCopyButton">Copy Query</button>
+      </div>
+      <div class="tablewrap compact-tablewrap">
+        <table class="compact-kv-table">
+          <tbody id="queryResultDetailTableBody"></tbody>
+        </table>
+      </div>
+      <div class="process-meta" id="queryResultDetailWarning"></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="/app/app.js?v=query-result-highlight-20260612"></script>
 </body>
 </html>

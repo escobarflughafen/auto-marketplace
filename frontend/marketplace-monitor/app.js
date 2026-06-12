@@ -1,5 +1,5 @@
 import { TabulatorFull as Tabulator } from '/vendor/tabulator/js/tabulator_esm.min.mjs';
-import { createListingsViewer } from './listings-viewer.js?v=sticky-tabs-auto-table-20260606';
+import { createListingsViewer } from './listings-viewer.js?v=saved-query-summary-20260611';
 import {
   listingDisplayTitle,
   listingHasFetchedDetail,
@@ -9,11 +9,10 @@ import {
   mergeResolverStatuses,
 } from './listing-components.js?v=resolver-status-20260528';
 
-const listingsViewer = createListingsViewer({ routeQuerySource });
-
 const WORKFLOW_DRAFTS_STORAGE_KEY = 'marketplace-monitor-workflow-drafts';
 const WORKFLOW_SELECTION_STORAGE_KEY = 'marketplace-monitor-selected-workflow';
 const WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY = 'marketplace-monitor-worker-continuous-refresh';
+const SAVED_QUERY_OVERVIEW_MODE_STORAGE_KEY = 'marketplace-monitor-saved-query-overview-mode';
 const WORKFLOW_ACTIVE_POLL_MS = 5000;
 const WORKFLOW_IDLE_POLL_MS = 15000;
 const WORKFLOW_HIDDEN_POLL_MS = 30000;
@@ -34,6 +33,11 @@ const ROUTES = {
   '/settings': { panel: 'settingsPanel' },
 };
 
+const listingsViewer = createListingsViewer({
+  routeQuerySource,
+  onSavedQueriesChanged: handleSavedQueriesChanged,
+});
+
 function readJsonStorage(key, fallback) {
   try {
     const parsed = JSON.parse(localStorage.getItem(key) || '');
@@ -47,6 +51,8 @@ const store = {
   summary: null,
   workflows: [],
   workflowDrafts: readJsonStorage(WORKFLOW_DRAFTS_STORAGE_KEY, {}),
+  workerProfiles: [],
+  workerProfilesLoaded: false,
   selectedWorkflowId: localStorage.getItem(WORKFLOW_SELECTION_STORAGE_KEY) || '',
   processes: [],
   selectedProcessId: '',
@@ -82,6 +88,7 @@ const store = {
   purchaseHistoryLoaded: false,
   eventRegistryLoaded: false,
   workflowsLoaded: false,
+  savedQueryOverviewMode: localStorage.getItem(SAVED_QUERY_OVERVIEW_MODE_STORAGE_KEY) === 'all' ? 'all' : 'pinned',
   workflowContinuousRefresh: localStorage.getItem(WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY) === 'true',
   historySort: { key: 'title', direction: 'asc' },
   summarySignature: '',
@@ -238,6 +245,10 @@ function readCaptureSettings() {
   } catch (_error) {
     stored = {};
   }
+  return normalizeCaptureSettings(stored);
+}
+
+function normalizeCaptureSettings(stored = {}) {
   const clampQuality = (value, fallback) => Math.max(1, Math.min(100, Number.parseInt(String(value), 10) || fallback));
   return {
     itemScreenshotMode: stored.itemScreenshotMode === 'original' ? 'original' : 'compressed',
@@ -248,7 +259,15 @@ function readCaptureSettings() {
 }
 
 function writeCaptureSettings(settings) {
-  localStorage.setItem(CAPTURE_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  localStorage.setItem(CAPTURE_SETTINGS_STORAGE_KEY, JSON.stringify(normalizeCaptureSettings(settings)));
+}
+
+function setCaptureControlValues(settings = readCaptureSettings()) {
+  for (const control of document.querySelectorAll('[data-capture-field]')) {
+    const field = control.dataset.captureField;
+    if (!field || settings[field] === undefined) continue;
+    control.value = settings[field];
+  }
 }
 
 function captureSettingsArgs() {
@@ -2251,6 +2270,38 @@ function ensureWorkflowDraft(workflow) {
   return store.workflowDrafts[workflow.id];
 }
 
+function workerProfilesForWorkflow(workflowId) {
+  return (store.workerProfiles || [])
+    .filter((profile) => profile.workflow_id === workflowId || profile.workflowId === workflowId)
+    .sort((left, right) => String(right.updated_at || right.updatedAt || '').localeCompare(String(left.updated_at || left.updatedAt || ''))
+      || String(left.label || '').localeCompare(String(right.label || '')));
+}
+
+function upsertWorkerProfileInStore(profile) {
+  if (!profile?.profile_id) return;
+  store.workerProfiles = [
+    profile,
+    ...(store.workerProfiles || []).filter((item) => item.profile_id !== profile.profile_id),
+  ];
+  store.workerProfilesLoaded = true;
+}
+
+async function loadWorkerProfiles(workflowId = '') {
+  const query = workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : '';
+  const payload = await fetchJson(`/api/workflows/profiles${query}`);
+  const profiles = Array.isArray(payload.profiles) ? payload.profiles : [];
+  if (workflowId) {
+    store.workerProfiles = [
+      ...(store.workerProfiles || []).filter((profile) => profile.workflow_id !== workflowId),
+      ...profiles,
+    ];
+  } else {
+    store.workerProfiles = profiles;
+  }
+  store.workerProfilesLoaded = true;
+  return profiles;
+}
+
 function selectedWorkflow() {
   return store.workflows.find((workflow) => workflow.id === store.selectedWorkflowId) || store.workflows[0];
 }
@@ -2402,6 +2453,75 @@ function updateWorkflowArgsPreview(workflow = selectedWorkflow()) {
   }
 }
 
+function applyWorkerProfile(profile, workflow = selectedWorkflow()) {
+  if (!profile || !workflow) return;
+  const params = profile.params || {};
+  if (params.captureSettings) {
+    writeCaptureSettings(params.captureSettings);
+    setCaptureControlValues(readCaptureSettings());
+  }
+  store.workflowDrafts[workflow.id] = {
+    ...defaultDraftForWorkflow(workflow),
+    ...params,
+  };
+  delete store.workflowDrafts[workflow.id].captureSettings;
+  persistWorkflowDrafts();
+  updateWorkflowArgsPreview(workflow);
+  renderWorkflowForm();
+  markWorkerConfigSaved(`Loaded profile: ${profile.label || profile.profile_id}`);
+}
+
+async function saveCurrentWorkerProfile() {
+  const workflow = selectedWorkflow();
+  if (!workflow) return;
+  const nameInput = document.getElementById('workerProfileNameInput');
+  const select = document.getElementById('workerProfileSelect');
+  const selected = workerProfilesForWorkflow(workflow.id).find((profile) => profile.profile_id === select?.value);
+  const label = String(nameInput?.value || selected?.label || `${workflowModeLabel(workflow)} profile`).trim();
+  if (!label) {
+    markWorkerConfigSaved('Enter a profile name before saving.');
+    return;
+  }
+  const payload = await fetchJson('/api/workflows/profiles', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      profileId: selected?.profile_id || '',
+      workflowId: workflow.id,
+      label,
+      params: { ...ensureWorkflowDraft(workflow), captureSettings: readCaptureSettings() },
+      args: buildWorkflowArgs(workflow),
+    }),
+  });
+  upsertWorkerProfileInStore(payload.profile);
+  renderWorkerControl();
+  const nextSelect = document.getElementById('workerProfileSelect');
+  if (nextSelect && payload.profile?.profile_id) nextSelect.value = payload.profile.profile_id;
+  const nextNameInput = document.getElementById('workerProfileNameInput');
+  if (nextNameInput) nextNameInput.value = payload.profile?.label || label;
+  markWorkerConfigSaved(`Saved profile: ${payload.profile?.label || label}`);
+}
+
+async function deleteSelectedWorkerProfile() {
+  const workflow = selectedWorkflow();
+  const profileId = document.getElementById('workerProfileSelect')?.value || '';
+  if (!workflow || !profileId) {
+    markWorkerConfigSaved('Choose a profile to delete.');
+    return;
+  }
+  const profile = workerProfilesForWorkflow(workflow.id).find((item) => item.profile_id === profileId);
+  await fetchJson(`/api/workflows/profiles/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
+  store.workerProfiles = (store.workerProfiles || []).filter((item) => item.profile_id !== profileId);
+  renderWorkerControl();
+  markWorkerConfigSaved(`Deleted profile: ${profile?.label || profileId}`);
+}
+
+function selectedWorkerProfile() {
+  const workflow = selectedWorkflow();
+  const profileId = document.getElementById('workerProfileSelect')?.value || '';
+  return workerProfilesForWorkflow(workflow?.id).find((profile) => profile.profile_id === profileId) || null;
+}
+
 function markWorkerConfigSaved(text = 'Saved for next run.') {
   const saved = document.getElementById('workerConfigStatus');
   if (saved) {
@@ -2490,23 +2610,106 @@ function renderSummary() {
   const summary = store.summary || {};
   const counts = summary.queueCounts || {};
   const workerStats = summary.workerStats || {};
-  const cards = [
-    { label: 'Total', value: summary.totalRows || 0, query: '' },
-    { label: 'Pending', value: counts.pending || 0, query: 'listings | where status == "pending" | sort by rank asc' },
-    { label: 'Processing', value: counts.processing || 0, query: 'listings | where status == "processing" | sort by last_seen_at desc' },
-    { label: 'Done', value: counts.done || 0, query: 'listings | where status == "done" | sort by completed_at desc' },
-    { label: 'Needs review', value: counts.error || 0, query: 'listings | where status == "error" | sort by last_seen_at desc' },
-    { label: 'Sold', value: counts.sold || 0, query: 'listings | where status == "sold" | sort by last_seen_at desc' },
-    { label: 'Pending sale', value: counts.pending_sale || 0, query: 'listings | where status == "pending_sale" | sort by last_seen_at desc' },
-    { label: 'Working workers', value: workerStats.working || 0, route: '/workers' },
+  const builtInCards = [
+    { label: 'Total', value: summary.totalRows || 0, query: '', kind: 'total' },
+    { label: 'Pending', value: counts.pending || 0, query: 'listings | where status == "pending" | sort by rank asc', kind: 'pending' },
+    { label: 'Processing', value: counts.processing || 0, query: 'listings | where status == "processing" | sort by last_seen_at desc', kind: 'processing' },
+    { label: 'Done', value: counts.done || 0, query: 'listings | where status == "done" | sort by completed_at desc', kind: 'done' },
+    { label: 'Needs review', value: counts.error || 0, query: 'listings | where status == "error" | sort by last_seen_at desc', kind: 'review' },
+    { label: 'Sold', value: counts.sold || 0, query: 'listings | where status == "sold" | sort by last_seen_at desc', kind: 'sold' },
+    { label: 'Pending sale', value: counts.pending_sale || 0, query: 'listings | where status == "pending_sale" | sort by last_seen_at desc', kind: 'sale' },
+    { label: 'Working workers', value: workerStats.working || 0, route: '/workers', kind: 'workers' },
   ];
-  els.summary.innerHTML = cards.map((card) => (
-    '<button type="button" class="card summary-card" data-summary-action="navigate"'
+  const savedCards = (summary.savedQueryCards || []).map((card) => ({
+    id: card.id,
+    label: card.label,
+    value: card.error ? '!' : card.value || 0,
+    query: card.query || '',
+    showInOverview: card.showInOverview === true,
+    error: card.error || '',
+    kind: card.error ? 'error' : 'saved',
+  }));
+  const cards = [...builtInCards, ...savedCards];
+  const cardHtml = cards.map((card) => {
+    const displayValue = formatSummaryValue(card.value);
+    const valueTitle = typeof card.value === 'number' ? formatSummaryValue(card.value, { compact: false }) : card.value;
+    const kindClass = `summary-kind-${html(card.kind || 'default')}`;
+    if (card.id) {
+      return `<div class="card summary-card summary-saved-query-card ${kindClass}">`
+        + '<button type="button" class="summary-card-main" data-summary-action="navigate"'
+          + ` data-query="${html(card.query)}"`
+          + (card.error ? ` title="${html(card.error)}"` : '')
+          + ` aria-label="${html(`${card.label}: ${card.value}${card.error ? `, ${card.error}` : ''}`)}">`
+          + '<span class="summary-card-content">'
+            + `<span class="label">${html(card.label)}</span>`
+            + `<span class="value" title="${html(valueTitle)}">${html(displayValue)}</span>`
+          + '</span>'
+        + '</button>'
+        + '<button type="button" class="summary-card-pin" data-summary-action="toggle-saved-query-pin"'
+          + ` data-saved-query-id="${html(card.id)}">`
+          + `${card.showInOverview ? 'Pinned' : 'Pin'}`
+        + '</button>'
+      + '</div>';
+    }
+    return `<button type="button" class="card summary-card ${kindClass}" data-summary-action="navigate"`
       + (card.route ? ` data-route="${html(card.route)}"` : ` data-query="${html(card.query)}"`)
-      + ` aria-label="${html(`${card.label}: ${card.value}`)}">`
-      + `<div class="label">${html(card.label)}</div><div class="value">${html(card.value)}</div>`
+      + (card.error ? ` title="${html(card.error)}"` : '')
+      + ` aria-label="${html(`${card.label}: ${card.value}${card.error ? `, ${card.error}` : ''}`)}">`
+      + '<span class="summary-card-content">'
+        + `<span class="label">${html(card.label)}</span>`
+        + `<span class="value" title="${html(valueTitle)}">${html(displayValue)}</span>`
+      + '</span>'
+    + '</button>';
+  }).join('');
+  const toggleLabel = store.savedQueryOverviewMode === 'all' ? 'Only pinned' : 'Show all';
+  els.summary.innerHTML = cardHtml
+    + '<button type="button" class="card summary-card summary-add-card summary-kind-action" data-summary-action="toggle-saved-query-mode"'
+      + ` aria-label="${html(toggleLabel)} saved views">`
+      + '<span class="summary-card-content">'
+        + '<span class="label">Saved</span>'
+        + `<span class="value summary-action-value">${html(toggleLabel)}</span>`
+      + '</span>'
     + '</button>'
-  )).join('');
+    + '<button type="button" class="card summary-card summary-add-card summary-kind-action" data-summary-action="save-current-query" aria-label="Save current query">'
+      + '<span class="summary-card-content">'
+        + '<span class="label">Current</span>'
+        + '<span class="value summary-action-value">Save</span>'
+      + '</span>'
+    + '</button>';
+}
+
+function formatSummaryValue(value, options = {}) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return String(value ?? '');
+  if (options.compact === false) return new Intl.NumberFormat().format(value);
+  if (Math.abs(value) >= 100000) {
+    return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+  }
+  return new Intl.NumberFormat().format(value);
+}
+
+async function saveCurrentQueryFromSummary() {
+  await listingsViewer.saveCurrentQuery({ defaultShowInOverview: true });
+  await loadSummary();
+}
+
+async function toggleSavedQueryOverview(id) {
+  await listingsViewer.toggleSavedQueryOverview(id);
+  await loadSummary();
+}
+
+function toggleSavedQueryOverviewMode() {
+  store.savedQueryOverviewMode = store.savedQueryOverviewMode === 'all' ? 'pinned' : 'all';
+  localStorage.setItem(SAVED_QUERY_OVERVIEW_MODE_STORAGE_KEY, store.savedQueryOverviewMode);
+  loadSummary().catch((error) => {
+    console.warn('Saved query overview refresh failed:', error.message || error);
+  });
+}
+
+function handleSavedQueriesChanged() {
+  if (!store.summary) return;
+  loadSummary().catch((error) => {
+    console.warn('Saved query summary refresh failed:', error.message || error);
+  });
 }
 
 function renderSummarySkeleton() {
@@ -2585,8 +2788,8 @@ function renderWorkerControlSkeleton() {
     ['Limits', '<div class="skeleton-block skeleton-input"></div>'],
   ].map(([label, content]) => `<tr><th>${html(label)}</th><td>${content}</td></tr>`).join('');
   els.workerControl.innerHTML = '<div class="worker-control-title">'
-    + '<div><div class="label">Worker Setup</div><div class="process-meta">Preparing worker modes.</div></div>'
-    + '<label class="worker-type-select-label">Worker Type<select disabled><option>Collector</option><option>Resolver</option><option>Backlog Indexer</option></select></label>'
+    + '<div><div class="label">Worker setup</div><div class="process-meta">Preparing worker modes.</div></div>'
+    + '<label class="worker-type-select-label">Worker type<select disabled><option>Collector</option><option>Resolver</option><option>Backlog indexer</option></select></label>'
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
@@ -2608,7 +2811,7 @@ function renderWorkerControlSkeleton() {
 function renderProcessListSkeleton() {
   if (!els.processList) return;
   els.processList.innerHTML = '<div class="card">'
-    + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Preparing worker status.</div></div></div>'
+    + '<div class="process-header"><div><div class="label">Worker overview</div><div class="process-meta">Preparing worker status.</div></div></div>'
     + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Work</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
     + renderSkeletonRows(4, 11)
     + '</tbody></table></div>'
@@ -2638,6 +2841,15 @@ function summaryRenderSignature(summary = store.summary) {
     sold: counts.sold || 0,
     pending_sale: counts.pending_sale || 0,
     workingWorkers: workerStats.working || 0,
+    savedQueryOverviewMode: store.savedQueryOverviewMode,
+    savedQueryCards: (summary?.savedQueryCards || []).map((card) => ({
+      id: card.id,
+      label: card.label,
+      value: card.value || 0,
+      error: card.error || '',
+      query: card.query || '',
+      showInOverview: card.showInOverview === true,
+    })),
   });
 }
 
@@ -2791,7 +3003,6 @@ function renderSettings() {
   }
 
   const currentTheme = normalizeTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
-  const captureSettings = readCaptureSettings();
   els.settingsContent.innerHTML = '<section class="settings-section">'
     + '<div class="worker-control-section-title">Display</div>'
     + '<div class="settings-grid">'
@@ -2802,20 +3013,9 @@ function renderSettings() {
     + '</div>'
     + '</section>'
     + '<section class="settings-section">'
-    + '<div class="worker-control-section-title">Artifact Capture</div>'
-    + '<div class="settings-grid">'
-    + '<label class="settings-field" for="itemScreenshotMode">Item snapshot<select id="itemScreenshotMode">'
-    + `<option value="compressed"${captureSettings.itemScreenshotMode === 'compressed' ? ' selected' : ''}>Compressed JPEG</option>`
-    + `<option value="original"${captureSettings.itemScreenshotMode === 'original' ? ' selected' : ''}>Original PNG</option>`
-    + '</select></label>'
-    + `<label class="settings-field" for="itemScreenshotQuality">Item JPEG quality<input id="itemScreenshotQuality" type="number" min="1" max="100" value="${html(captureSettings.itemScreenshotQuality)}"></label>`
-    + '<label class="settings-field" for="workerScreenshotMode">Worker live screenshot<select id="workerScreenshotMode">'
-    + `<option value="compressed"${captureSettings.workerScreenshotMode === 'compressed' ? ' selected' : ''}>Compressed JPEG</option>`
-    + `<option value="original"${captureSettings.workerScreenshotMode === 'original' ? ' selected' : ''}>Original PNG</option>`
-    + '</select></label>'
-    + `<label class="settings-field" for="workerScreenshotQuality">Worker JPEG quality<input id="workerScreenshotQuality" type="number" min="1" max="100" value="${html(captureSettings.workerScreenshotQuality)}"></label>`
-    + '</div>'
-    + '<div class="settings-note">These settings are added to Marketplace detail workers started from this monitor, including direct resolve and queued resolve actions.</div>'
+    + '<div class="worker-control-section-title">Image capture defaults</div>'
+    + renderCaptureSettingsFields('settings')
+    + '<div class="settings-note">Saved automatically. Listing detail image settings are added to resolver jobs; live worker image settings are added to every browser worker started from this monitor.</div>'
     + '</section>'
     + renderCredentialManager();
 
@@ -2826,21 +3026,33 @@ function renderSettings() {
   bindCredentialManager();
 }
 
-function bindCaptureSettings() {
-  const controls = [
-    document.getElementById('itemScreenshotMode'),
-    document.getElementById('itemScreenshotQuality'),
-    document.getElementById('workerScreenshotMode'),
-    document.getElementById('workerScreenshotQuality'),
-  ].filter(Boolean);
-  const save = () => {
+function renderCaptureSettingsFields(prefix) {
+  const settings = readCaptureSettings();
+  const fieldId = (name) => `${prefix}-${name}`;
+  return '<div class="settings-grid capture-settings-grid">'
+    + `<label class="settings-field" for="${html(fieldId('itemScreenshotMode'))}">Listing detail image<select id="${html(fieldId('itemScreenshotMode'))}" data-capture-field="itemScreenshotMode">`
+    + `<option value="compressed"${settings.itemScreenshotMode === 'compressed' ? ' selected' : ''}>JPEG, smaller files</option>`
+    + `<option value="original"${settings.itemScreenshotMode === 'original' ? ' selected' : ''}>PNG, full fidelity</option>`
+    + '</select></label>'
+    + `<label class="settings-field" for="${html(fieldId('itemScreenshotQuality'))}">Detail image quality<input id="${html(fieldId('itemScreenshotQuality'))}" data-capture-field="itemScreenshotQuality" type="number" min="1" max="100" value="${html(settings.itemScreenshotQuality)}"></label>`
+    + `<label class="settings-field" for="${html(fieldId('workerScreenshotMode'))}">Live worker image<select id="${html(fieldId('workerScreenshotMode'))}" data-capture-field="workerScreenshotMode">`
+    + `<option value="compressed"${settings.workerScreenshotMode === 'compressed' ? ' selected' : ''}>JPEG, smaller files</option>`
+    + `<option value="original"${settings.workerScreenshotMode === 'original' ? ' selected' : ''}>PNG, full fidelity</option>`
+    + '</select></label>'
+    + `<label class="settings-field" for="${html(fieldId('workerScreenshotQuality'))}">Live image quality<input id="${html(fieldId('workerScreenshotQuality'))}" data-capture-field="workerScreenshotQuality" type="number" min="1" max="100" value="${html(settings.workerScreenshotQuality)}"></label>`
+    + '</div>';
+}
+
+function bindCaptureSettings(root = document) {
+  const controls = Array.from(root.querySelectorAll('[data-capture-field]'));
+  const save = (event) => {
+    const field = event?.target?.dataset?.captureField || '';
     const next = {
-      itemScreenshotMode: document.getElementById('itemScreenshotMode')?.value === 'original' ? 'original' : 'compressed',
-      itemScreenshotQuality: Math.max(1, Math.min(100, Number.parseInt(document.getElementById('itemScreenshotQuality')?.value || '', 10) || DEFAULT_CAPTURE_SETTINGS.itemScreenshotQuality)),
-      workerScreenshotMode: document.getElementById('workerScreenshotMode')?.value === 'original' ? 'original' : 'compressed',
-      workerScreenshotQuality: Math.max(1, Math.min(100, Number.parseInt(document.getElementById('workerScreenshotQuality')?.value || '', 10) || DEFAULT_CAPTURE_SETTINGS.workerScreenshotQuality)),
+      ...readCaptureSettings(),
+      [field]: event?.target?.value,
     };
     writeCaptureSettings(next);
+    setCaptureControlValues(readCaptureSettings());
     const workflow = selectedWorkflow();
     if (workflow?.script === 'marketplace:home:process') {
       updateWorkflowArgsPreview(workflow);
@@ -2961,9 +3173,12 @@ function renderWorkerControl() {
   const modeOptions = workflowsForType(selectedType).map((item) => (
     `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(workflowModeLabel(item))}</option>`
   )).join('');
+  const profileOptions = workerProfilesForWorkflow(workflow.id).map((profile) => (
+    `<option value="${html(profile.profile_id)}">${html(profile.label)}</option>`
+  )).join('');
   els.workerControl.innerHTML = '<div class="worker-control-title">'
-    + '<div><div class="label">Worker Setup</div><div class="process-meta">Saved per worker mode on this browser.</div></div>'
-    + '<label class="worker-type-select-label" for="workerControlTypeSelect">Worker Type'
+    + '<div><div class="label">Worker setup</div><div class="process-meta">Profiles save worker parameters and image capture defaults.</div></div>'
+    + '<label class="worker-type-select-label" for="workerControlTypeSelect">Worker type'
     + `<select id="workerControlTypeSelect">${typeOptions}</select>`
     + '</label>'
     + '</div>'
@@ -2978,14 +3193,28 @@ function renderWorkerControl() {
     + '</tbody></table></div>'
     + '</section>'
     + '<section class="worker-control-column worker-control-right">'
+    + '<div class="worker-control-section-title">Capture defaults</div>'
+    + renderCaptureSettingsFields('worker')
+    + '<div class="settings-note worker-settings-note">Saved automatically. Detail image quality is used by resolver jobs; live image quality is used for worker preview screenshots.</div>'
     + '<div class="worker-control-section-title">Command</div>'
     + '<div class="tablewrap worker-control-tablewrap worker-command-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
+    + '<tr><th><label for="workerProfileSelect">Profile</label></th><td>'
+    + '<div class="worker-control-actions">'
+    + `<select id="workerProfileSelect"><option value="">Saved profiles</option>${profileOptions}</select>`
+    + '<input id="workerProfileNameInput" type="text" placeholder="Profile name">'
+    + '</div>'
+    + '<div class="worker-control-actions">'
+    + '<button type="button" class="secondary" id="workerProfileSaveButton">Save profile</button>'
+    + '<button type="button" class="secondary" id="workerProfileLoadButton">Load</button>'
+    + '<button type="button" class="secondary" id="workerProfileDeleteButton">Delete</button>'
+    + '</div>'
+    + '</td></tr>'
     + `<tr><th>Command</th><td><textarea id="workerControlArgsPreview" readonly>${html(els.workflowArgsPreview.value)}</textarea></td></tr>`
     + '<tr><th>Actions</th><td><div class="worker-control-actions">'
     + '<button type="button" id="workerControlStartButton">Start</button>'
-    + '<button type="button" class="secondary" id="workerControlResetButton">Reset Params</button>'
+    + '<button type="button" class="secondary" id="workerControlResetButton">Reset params</button>'
     + '<button type="button" class="secondary" id="workerControlRefreshButton">Refresh</button>'
-    + '<button type="button" class="secondary" id="workerControlReconcileButton">Check OS</button>'
+    + '<button type="button" class="secondary" id="workerControlReconcileButton">Check OS state</button>'
     + '</div></td></tr>'
     + '<tr><th>Refresh</th><td><label class="inline-control worker-refresh-toggle">'
     + `<input id="workerContinuousRefreshCheckbox" type="checkbox"${store.workflowContinuousRefresh ? ' checked' : ''}> Continuous refresh`
@@ -3005,11 +3234,38 @@ function renderWorkerControl() {
     selectWorkflowId(workflowSelect.value);
     renderWorkflowForm();
   });
+  const profileSelect = document.getElementById('workerProfileSelect');
+  profileSelect?.addEventListener('change', () => {
+    const selected = selectedWorkerProfile();
+    const nameInput = document.getElementById('workerProfileNameInput');
+    if (nameInput) nameInput.value = selected?.label || '';
+  });
   for (const input of els.workerControl.querySelectorAll('[data-field-id]')) {
     input.addEventListener('input', handleWorkflowFieldChange);
     input.addEventListener('change', handleWorkflowFieldChange);
   }
+  bindCaptureSettings(els.workerControl);
   bindWorkflowListEditors(els.workerControl);
+  document.getElementById('workerProfileSaveButton')?.addEventListener('click', () => {
+    saveCurrentWorkerProfile().catch((error) => {
+      markWorkerConfigSaved(error.message || 'Profile could not be saved.');
+      alert(error.message || 'Profile could not be saved.');
+    });
+  });
+  document.getElementById('workerProfileLoadButton')?.addEventListener('click', () => {
+    const selected = selectedWorkerProfile();
+    if (!selected) {
+      markWorkerConfigSaved('Choose a profile to load.');
+      return;
+    }
+    applyWorkerProfile(selected, workflow);
+  });
+  document.getElementById('workerProfileDeleteButton')?.addEventListener('click', () => {
+    deleteSelectedWorkerProfile().catch((error) => {
+      markWorkerConfigSaved(error.message || 'Profile could not be deleted.');
+      alert(error.message || 'Profile could not be deleted.');
+    });
+  });
   document.getElementById('workerControlStartButton').addEventListener('click', () => document.getElementById('startWorkflowButton').click());
   document.getElementById('workerControlResetButton').addEventListener('click', () => {
     store.workflowDrafts[workflow.id] = defaultDraftForWorkflow(workflow);
@@ -3334,6 +3590,7 @@ function renderProcesses(options = {}) {
       + `<td class="cell-text">${html(latestWorkerAction(proc))}</td>`
       + '<td><div class="row-actions">'
       + `<button type="button" class="secondary process-open-button" data-id="${html(proc.id)}">${selected ? 'View' : 'View'}</button>`
+      + `<button type="button" class="secondary restart-button" data-id="${html(proc.id)}">Restart</button>`
       + (running ? `<button type="button" class="danger stop-button" data-id="${html(proc.id)}">End</button>` : '')
       + '</div></td>'
       + '</tr>';
@@ -3432,6 +3689,25 @@ function renderProcesses(options = {}) {
         await loadWorkflows({ light: true });
       } catch (error) {
         alert(error.message || 'Worker stop request could not be sent.');
+        button.disabled = false;
+      }
+    });
+  }
+  for (const button of document.querySelectorAll('.restart-button')) {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        const payload = await fetchJson('/api/workflows/restart', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ processId: button.dataset.id }),
+        });
+        await loadWorkflows({ light: true });
+        if (payload.process?.id) {
+          openWorkerDetail(payload.process.id);
+        }
+      } catch (error) {
+        alert(error.message || 'Worker restart request could not be sent.');
         button.disabled = false;
       }
     });
@@ -3839,7 +4115,34 @@ async function loadWorkerDetail(options = {}) {
 
 async function loadSummary() {
   const requestSeq = ++store.summaryRequestSeq;
-  const summary = await fetchJson('/api/summary');
+  const [summary] = await Promise.all([
+    fetchJson('/api/summary'),
+    listingsViewer.ensureSavedQueriesLoaded?.().catch((error) => {
+      console.warn('Saved query load failed:', error.message || error);
+      return [];
+    }),
+  ]);
+  const savedQueries = listingsViewer.savedQueriesForOverview({
+    includeAll: store.savedQueryOverviewMode === 'all',
+  });
+  if (savedQueries.length) {
+    try {
+      const counts = await fetchJson('/api/query/counts', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ queries: savedQueries }),
+      });
+      summary.savedQueryCards = counts.cards || [];
+    } catch (error) {
+      summary.savedQueryCards = savedQueries.map((item) => ({
+        ...item,
+        value: 0,
+        error: error.message || 'Saved query count failed.',
+      }));
+    }
+  } else {
+    summary.savedQueryCards = [];
+  }
   if (requestSeq !== store.summaryRequestSeq) return;
   const nextSignature = summaryRenderSignature(summary);
   store.summary = summary;
@@ -3857,7 +4160,7 @@ async function loadWorkflows(options = {}) {
   const payload = await fetchJson(configOnly
     ? '/api/workflows/config'
     : light
-      ? '/api/workflows?reconcile=0&stats=0&config=0'
+      ? '/api/workflows?reconcile=0&stats=1&config=0'
       : '/api/workflows');
   if (requestSeq !== store.workflowRequestSeq) return;
   const hasWorkflowPayload = Array.isArray(payload.workflows);
@@ -4048,6 +4351,10 @@ async function runRouteLoader(routePath) {
     }
   } else if (route.panel === 'opsPanel') {
     await loadWorkflows({ configOnly: true });
+    await loadWorkerProfiles().catch((error) => {
+      console.warn('Worker profiles could not be loaded:', error.message || error);
+    });
+    renderWorkflowForm();
     loadWorkflows({ light: true, background: true }).catch((error) => {
       console.warn('Initial worker status load failed:', error.message || error);
     });
@@ -4084,6 +4391,29 @@ function bindEvents() {
     }
   });
   els.summary?.addEventListener('click', async (event) => {
+    const saveCard = event.target.closest('[data-summary-action="save-current-query"]');
+    if (saveCard) {
+      try {
+        await saveCurrentQueryFromSummary();
+      } catch (error) {
+        alert(error.message || 'Saved query could not be saved.');
+      }
+      return;
+    }
+    const modeCard = event.target.closest('[data-summary-action="toggle-saved-query-mode"]');
+    if (modeCard) {
+      toggleSavedQueryOverviewMode();
+      return;
+    }
+    const pinButton = event.target.closest('[data-summary-action="toggle-saved-query-pin"]');
+    if (pinButton) {
+      try {
+        await toggleSavedQueryOverview(pinButton.dataset.savedQueryId);
+      } catch (error) {
+        alert(error.message || 'Saved query display could not be updated.');
+      }
+      return;
+    }
     const card = event.target.closest('[data-summary-action="navigate"]');
     if (!card) return;
     try {

@@ -59,6 +59,19 @@ const {
   updateWorkflowRun,
   getWorkflowRun,
   listWorkflowRuns,
+  listWorkerParameterProfiles,
+  getWorkerParameterProfile,
+  upsertWorkerParameterProfile,
+  deleteWorkerParameterProfile,
+  listSummaryQueryCards,
+  getSummaryQueryCard,
+  upsertSummaryQueryCard,
+  deleteSummaryQueryCard,
+  listSavedQueries,
+  getSavedQuery,
+  upsertSavedQuery,
+  setSavedQueryOverview,
+  deleteSavedQuery,
   resolveWorkerEventIdsForRun,
   listWorkerListingEvents,
   listWorkerAuditEvents,
@@ -864,6 +877,136 @@ test('workflow runs persist process state and logs', () => {
     assert.equal(updated.os_alive, false);
     assert.deepEqual(getWorkflowRun(db, 'run-1').logs, ['started', 'done']);
     assert.equal(listWorkflowRuns(db).length, 1);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('worker parameter profiles persist named server-side workflow params', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const created = upsertWorkerParameterProfile(db, {
+      profileId: 'search-fast',
+      workflowId: 'search-explore',
+      workerType: 'collector',
+      label: 'Fast search',
+      params: {
+        queryMode: 'list',
+        queries: 'leica\nnikon',
+        randomWalksBetweenSeeds: 3,
+        collectAll: true,
+      },
+      args: ['--queries', 'leica, nikon', '--random-walks-between-seeds', '3', '--collect-all'],
+      createdAt: '2026-06-10T00:00:00.000Z',
+      updatedAt: '2026-06-10T00:00:00.000Z',
+    });
+
+    assert.equal(created.profile_id, 'search-fast');
+    assert.equal(created.workflow_id, 'search-explore');
+    assert.equal(created.worker_type, 'collector');
+    assert.deepEqual(created.params, {
+      queryMode: 'list',
+      queries: 'leica\nnikon',
+      randomWalksBetweenSeeds: 3,
+      collectAll: true,
+    });
+    assert.deepEqual(created.args, ['--queries', 'leica, nikon', '--random-walks-between-seeds', '3', '--collect-all']);
+
+    const updated = upsertWorkerParameterProfile(db, {
+      profileId: 'search-fast',
+      workflowId: 'search-explore',
+      workerType: 'collector',
+      label: 'Fast search updated',
+      params: { queryMode: 'single', query: 'pentax' },
+      args: ['--query', 'pentax'],
+      updatedAt: '2026-06-10T00:01:00.000Z',
+    });
+
+    assert.equal(updated.label, 'Fast search updated');
+    assert.equal(updated.created_at, '2026-06-10T00:00:00.000Z');
+    assert.deepEqual(updated.params, { queryMode: 'single', query: 'pentax' });
+    assert.equal(listWorkerParameterProfiles(db, { workflowId: 'search-explore' }).length, 1);
+    assert.equal(getWorkerParameterProfile(db, 'search-fast').args[1], 'pentax');
+    assert.equal(deleteWorkerParameterProfile(db, 'search-fast').profile_id, 'search-fast');
+    assert.equal(getWorkerParameterProfile(db, 'search-fast'), null);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('summary query cards persist saved KQL overview counts', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const created = upsertSummaryQueryCard(db, {
+      cardId: 'pending-camera',
+      label: 'Pending Camera',
+      query: 'listings | where status == "pending" | summarize count()',
+      position: 2,
+      createdAt: '2026-06-10T00:00:00.000Z',
+      updatedAt: '2026-06-10T00:00:00.000Z',
+    });
+
+    assert.equal(created.card_id, 'pending-camera');
+    assert.equal(created.label, 'Pending Camera');
+    assert.equal(created.position, 2);
+    assert.equal(listSummaryQueryCards(db).length, 1);
+
+    const updated = upsertSummaryQueryCard(db, {
+      cardId: 'pending-camera',
+      label: 'Pending Leica',
+      query: 'listings | where title contains "leica" | count',
+      updatedAt: '2026-06-10T00:01:00.000Z',
+    });
+
+    assert.equal(updated.label, 'Pending Leica');
+    assert.equal(updated.created_at, '2026-06-10T00:00:00.000Z');
+    assert.match(getSummaryQueryCard(db, 'pending-camera').query, /\| count$/);
+    assert.equal(deleteSummaryQueryCard(db, 'pending-camera').card_id, 'pending-camera');
+    assert.equal(getSummaryQueryCard(db, 'pending-camera'), null);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('saved queries persist shared overview preferences', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const created = upsertSavedQuery(db, {
+      id: 'high-value-pentax',
+      label: 'High Value Pentax',
+      query: 'listings | where title contains "pentax" and price >= 2000 | count',
+      showInOverview: true,
+      createdAt: '2026-06-12T00:00:00.000Z',
+      updatedAt: '2026-06-12T00:00:00.000Z',
+    });
+
+    assert.equal(created.query_id, 'high-value-pentax');
+    assert.equal(created.label, 'High Value Pentax');
+    assert.equal(created.showInOverview, true);
+    assert.equal(listSavedQueries(db).length, 1);
+
+    const updated = upsertSavedQuery(db, {
+      id: 'high-value-pentax',
+      label: 'Pentax Over 2500',
+      query: 'listings | where title contains "pentax" and price >= 2500 | count',
+      updatedAt: '2026-06-12T00:01:00.000Z',
+    });
+
+    assert.equal(updated.label, 'Pentax Over 2500');
+    assert.equal(updated.created_at, '2026-06-12T00:00:00.000Z');
+    assert.equal(updated.showInOverview, true);
+
+    const hidden = setSavedQueryOverview(db, 'high-value-pentax', false);
+    assert.equal(hidden.showInOverview, false);
+    assert.match(getSavedQuery(db, 'high-value-pentax').query, /2500/);
+    assert.equal(deleteSavedQuery(db, 'high-value-pentax').query_id, 'high-value-pentax');
+    assert.equal(getSavedQuery(db, 'high-value-pentax'), null);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
