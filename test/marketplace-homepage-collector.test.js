@@ -65,6 +65,14 @@ test('parseArgs builds homepage route URLs for major city locations', () => {
     parseArgs(['--location', 'New York, NY']).startUrl,
     'https://www.facebook.com/marketplace/nyc/',
   );
+  assert.equal(
+    parseArgs(['--location', 'Sydney, NSW']).startUrl,
+    'https://www.facebook.com/marketplace/sydney/',
+  );
+  assert.equal(
+    parseArgs(['--location', 'Gold Coast, Queensland']).startUrl,
+    'https://www.facebook.com/marketplace/gold-coast/',
+  );
 });
 
 test('parseArgs keeps custom homepage locations on the generic Marketplace URL', () => {

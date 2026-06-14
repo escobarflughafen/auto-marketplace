@@ -231,6 +231,9 @@ test('inferMarketplaceAreaFromLocation normalizes city names for Marketplace rou
   assert.equal(inferMarketplaceAreaFromLocation('Seattle, Washington'), 'seattle');
   assert.equal(inferMarketplaceAreaFromLocation('Portland, Oregon'), 'portland');
   assert.equal(inferMarketplaceAreaFromLocation('Los Angeles, California'), 'los-angeles');
+  assert.equal(inferMarketplaceAreaFromLocation('Sydney, NSW'), 'sydney');
+  assert.equal(inferMarketplaceAreaFromLocation('Gold Coast, Queensland'), 'gold-coast');
+  assert.equal(inferMarketplaceAreaFromLocation('Canberra, ACT'), 'canberra');
 });
 
 test('getKnownMarketplaceAreaFromLocation only returns configured city route slugs', () => {
@@ -247,6 +250,8 @@ test('getMarketplaceLocationOptions exposes selectable city labels', () => {
   assert.equal(bySlug.get('vancouver')?.value, 'Vancouver');
   assert.equal(bySlug.get('vancouver-wa')?.value, 'Vancouver, WA');
   assert.equal(bySlug.get('ottawa')?.value, 'Ottawa, ON');
+  assert.equal(bySlug.get('sydney')?.value, 'Sydney, NSW');
+  assert.equal(bySlug.get('gold-coast')?.value, 'Gold Coast, QLD');
   assert.equal(bySlug.get('nyc')?.value, 'New York, NY');
 });
 

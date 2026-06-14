@@ -123,6 +123,8 @@ test('parseArgs infers major city area slugs for search explorer', () => {
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'Calgary, Alberta']).area, 'calgary');
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'New York, NY']).area, 'nyc');
   assert.equal(parseArgs(['--query', 'nikon', '--location', 'Vancouver, WA']).area, 'vancouver-wa');
+  assert.equal(parseArgs(['--query', 'nikon', '--location', 'Sydney, NSW']).area, 'sydney');
+  assert.equal(parseArgs(['--query', 'nikon', '--location', 'Gold Coast, Queensland']).area, 'gold-coast');
 });
 
 test('pickSearchCardTitle skips freshness and price lines', () => {
