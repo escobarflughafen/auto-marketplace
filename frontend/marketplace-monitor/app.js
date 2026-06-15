@@ -3531,6 +3531,7 @@ function renderWorkerControl() {
     + '<div class="worker-control-section-title">Command</div>'
     + '<div class="tablewrap worker-control-tablewrap worker-command-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + '<tr><th><label for="workerProfileSelect">Profile</label></th><td>'
+    + '<div class="worker-profile-actions">'
     + '<div class="worker-control-actions">'
     + `<select id="workerProfileSelect"><option value="">Saved profiles</option>${profileOptions}</select>`
     + '<input id="workerProfileNameInput" type="text" placeholder="Profile name">'
@@ -3539,6 +3540,7 @@ function renderWorkerControl() {
     + '<button type="button" class="secondary" id="workerProfileSaveButton">Save profile</button>'
     + '<button type="button" class="secondary" id="workerProfileLoadButton">Load</button>'
     + '<button type="button" class="secondary" id="workerProfileDeleteButton">Delete</button>'
+    + '</div>'
     + '</div>'
     + '</td></tr>'
     + `<tr><th>Command</th><td><textarea id="workerControlArgsPreview" readonly>${html(els.workflowArgsPreview.value)}</textarea></td></tr>`
