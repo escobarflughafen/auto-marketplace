@@ -25,7 +25,7 @@ test('workflow default args honor active query mode fields', () => {
       ],
     },
     { id: 'query', kind: 'text', flag: '--query', defaultValue: 'pentax', activeWhen: { field: 'queryMode', equals: 'single' } },
-    { id: 'queries', kind: 'textarea', flag: '--queries', defaultValue: 'leica, nikon', activeWhen: { field: 'queryMode', equals: 'list' } },
+    { id: 'queryTargets', kind: 'textarea', flag: '--query-targets', defaultValue: '[{"keyword":"leica"},{"keyword":"nikon"}]', activeWhen: { field: 'queryMode', equals: 'list' } },
   ];
 
   assert.deepEqual(buildDefaultArgsFromFields(fields), ['--query', 'pentax']);
@@ -33,7 +33,7 @@ test('workflow default args honor active query mode fields', () => {
     { ...fields[0], defaultValue: 'list' },
     fields[1],
     fields[2],
-  ]), ['--queries', 'leica, nikon']);
+  ]), ['--query-targets', '[{"keyword":"leica"},{"keyword":"nikon"}]']);
 });
 
 test('workflow worker type browser classification keeps only profile onboarding exclusive', () => {
@@ -90,17 +90,62 @@ test('workflow start args allow declared fields and worker screenshot runtime se
 });
 
 test('workflow start args allow search explorer round-robin keyword controls', () => {
+  const targets = JSON.stringify([
+    { keyword: 'leica m6', minPrice: '1000', maxPrice: '4000' },
+    { keyword: 'nikon d850', minPrice: '200', maxPrice: '1200' },
+    { keyword: 'pentax 67' },
+  ]);
   const args = validateWorkflowStartArgs('search-explore', [
-    '--queries', 'leica m6, nikon d850, pentax 67',
+    '--query-targets', targets,
     '--random-walks-between-seeds', '2',
+    '--days-since-listed', '30',
+    '--item-condition', 'used_like_new',
     '--max-runtime-seconds', '30',
   ]);
 
   assert.deepEqual(args, [
-    '--queries', 'leica m6, nikon d850, pentax 67',
+    '--query-targets', targets,
     '--random-walks-between-seeds', '2',
+    '--days-since-listed', '30',
+    '--item-condition', 'used_like_new',
     '--max-runtime-seconds', '30',
   ]);
+});
+
+test('workflow start args allow homepage collector keyword target controls', () => {
+  const targets = JSON.stringify([
+    {
+      keyword: 'leica m6',
+      location: 'Sydney, NSW',
+      minPrice: '1000',
+      maxPrice: '4000',
+      daysSinceListed: '30',
+      itemCondition: 'used_like_new',
+      maxItems: '12',
+    },
+  ]);
+  const args = validateWorkflowStartArgs('home-collect', [
+    '--keyword-targets', targets,
+    '--collect-all',
+    '--max-runtime-seconds', '45',
+  ]);
+
+  assert.deepEqual(args, [
+    '--keyword-targets', targets,
+    '--collect-all',
+    '--max-runtime-seconds', '45',
+  ]);
+});
+
+test('workflow start args reject malformed homepage collector keyword targets', () => {
+  assert.throws(
+    () => validateWorkflowStartArgs('home-collect', ['--keyword-targets', '[{"maxPrice":1000}]']),
+    /include keyword/,
+  );
+  assert.throws(
+    () => validateWorkflowStartArgs('home-collect', ['--keyword-targets', '[{"keyword":"leica","minPrice":2000,"maxPrice":1000}]']),
+    /maxPrice to be >= minPrice/,
+  );
 });
 
 test('workflow start args allow profile onboarder interactive flags', () => {

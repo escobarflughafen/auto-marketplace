@@ -2266,6 +2266,15 @@ function ensureWorkflowDraft(workflow) {
     ) {
       store.workflowDrafts[workflow.id].queryMode = 'list';
     }
+    if (
+      workflow.id === 'search-explore'
+      && !String(store.workflowDrafts[workflow.id].queryTargets || '').trim()
+      && String(store.workflowDrafts[workflow.id].queries || '').trim()
+    ) {
+      store.workflowDrafts[workflow.id].queryTargets = serializeSearchQueryTargetItems(
+        listFieldItems(store.workflowDrafts[workflow.id].queries).map((keyword) => ({ keyword })),
+      );
+    }
   }
   return store.workflowDrafts[workflow.id];
 }
@@ -2402,7 +2411,8 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
       args.push(...(option?.args || []));
       continue;
     }
-    const text = field.kind === 'textarea'
+    const structuredTextareaEditors = new Set(['keywordTargets', 'searchQueryTargets']);
+    const text = field.kind === 'textarea' && !structuredTextareaEditors.has(field.editor)
       ? String(value ?? '').split(/\r?\n/g).map((line) => line.trim()).filter(Boolean).join(', ')
       : String(value ?? '').trim();
     if (text) args.push(field.flag, text);
@@ -2442,6 +2452,78 @@ function listFieldItems(value) {
 
 function serializeListFieldItems(items) {
   return (items || []).map((item) => String(item || '').trim()).filter(Boolean).join('\n');
+}
+
+function keywordTargetItems(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+      .map((item) => ({
+        keyword: String(item.keyword || item.query || '').trim(),
+        location: String(item.location || '').trim(),
+        minPrice: String(item.minPrice ?? item.min_price ?? '').trim(),
+        maxPrice: String(item.maxPrice ?? item.max_price ?? '').trim(),
+        daysSinceListed: String(item.daysSinceListed ?? item.days_since_listed ?? '').trim(),
+        itemCondition: String(item.itemCondition ?? item.item_condition ?? '').trim(),
+        maxItems: String(item.maxItems ?? item.max_items ?? '').trim(),
+      }));
+  } catch (_error) {
+    return text
+      .split(/[\r\n,;]+/g)
+      .map((keyword) => ({ keyword: keyword.trim() }))
+      .filter((item) => item.keyword);
+  }
+}
+
+function serializeKeywordTargetItems(items) {
+  const normalized = (items || [])
+    .map((item) => ({
+      keyword: String(item.keyword || '').trim(),
+      location: String(item.location || '').trim(),
+      minPrice: String(item.minPrice || '').trim(),
+      maxPrice: String(item.maxPrice || '').trim(),
+      daysSinceListed: String(item.daysSinceListed || '').trim(),
+      itemCondition: String(item.itemCondition || '').trim(),
+      maxItems: String(item.maxItems || '').trim(),
+    }))
+    .filter((item) => item.keyword);
+  return normalized.length ? JSON.stringify(normalized) : '';
+}
+
+function searchQueryTargetItems(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+      .map((item) => ({
+        keyword: String(item.keyword || item.query || '').trim(),
+        minPrice: String(item.minPrice ?? item.min_price ?? '').trim(),
+        maxPrice: String(item.maxPrice ?? item.max_price ?? '').trim(),
+      }));
+  } catch (_error) {
+    return text
+      .split(/[\r\n,;]+/g)
+      .map((keyword) => ({ keyword: keyword.trim(), minPrice: '', maxPrice: '' }))
+      .filter((item) => item.keyword);
+  }
+}
+
+function serializeSearchQueryTargetItems(items) {
+  const normalized = (items || [])
+    .map((item) => ({
+      keyword: String(item.keyword || '').trim(),
+      minPrice: String(item.minPrice || '').trim(),
+      maxPrice: String(item.maxPrice || '').trim(),
+    }))
+    .filter((item) => item.keyword);
+  return normalized.length ? JSON.stringify(normalized) : '';
 }
 
 function updateWorkflowArgsPreview(workflow = selectedWorkflow()) {
@@ -2534,6 +2616,72 @@ function workflowListInputs(fieldId) {
     .filter((input) => input.dataset.listFieldId === fieldId);
 }
 
+function keywordTargetRows(fieldId) {
+  return [...(els.workerControl?.querySelectorAll('.worker-keyword-target-row') || [])]
+    .filter((row) => row.dataset.keywordTargetFieldId === fieldId);
+}
+
+function searchQueryTargetRows(fieldId) {
+  return [...(els.workerControl?.querySelectorAll('.worker-search-target-row') || [])]
+    .filter((row) => row.dataset.searchTargetFieldId === fieldId);
+}
+
+function readKeywordTargetRow(row) {
+  const valueFor = (name) => row.querySelector(`[data-keyword-target-name="${name}"]`)?.value || '';
+  return {
+    keyword: valueFor('keyword'),
+    location: valueFor('location'),
+    minPrice: valueFor('minPrice'),
+    maxPrice: valueFor('maxPrice'),
+    daysSinceListed: valueFor('daysSinceListed'),
+    itemCondition: valueFor('itemCondition'),
+    maxItems: valueFor('maxItems'),
+  };
+}
+
+function syncKeywordTargetField(fieldId) {
+  const workflow = selectedWorkflow();
+  if (!workflow) {
+    return;
+  }
+  const draft = ensureWorkflowDraft(workflow);
+  const rows = keywordTargetRows(fieldId);
+  draft[fieldId] = serializeKeywordTargetItems(rows.map(readKeywordTargetRow));
+  persistWorkflowDrafts();
+  const hidden = document.getElementById(`workflowField-${fieldId}`);
+  if (hidden) {
+    hidden.value = draft[fieldId];
+  }
+  updateWorkflowArgsPreview(workflow);
+  markWorkerConfigSaved();
+}
+
+function readSearchQueryTargetRow(row) {
+  const valueFor = (name) => row.querySelector(`[data-search-target-name="${name}"]`)?.value || '';
+  return {
+    keyword: valueFor('keyword'),
+    minPrice: valueFor('minPrice'),
+    maxPrice: valueFor('maxPrice'),
+  };
+}
+
+function syncSearchQueryTargetField(fieldId) {
+  const workflow = selectedWorkflow();
+  if (!workflow) {
+    return;
+  }
+  const draft = ensureWorkflowDraft(workflow);
+  const rows = searchQueryTargetRows(fieldId);
+  draft[fieldId] = serializeSearchQueryTargetItems(rows.map(readSearchQueryTargetRow));
+  persistWorkflowDrafts();
+  const hidden = document.getElementById(`workflowField-${fieldId}`);
+  if (hidden) {
+    hidden.value = draft[fieldId];
+  }
+  updateWorkflowArgsPreview(workflow);
+  markWorkerConfigSaved();
+}
+
 function syncWorkflowListField(fieldId) {
   const workflow = selectedWorkflow();
   if (!workflow) {
@@ -2602,6 +2750,130 @@ function bindWorkflowListEditors(root = els.workerControl) {
       const row = createWorkflowListRow(fieldId);
       add.parentElement?.insertBefore(row, add);
       row.querySelector('input')?.focus();
+    });
+  }
+}
+
+function bindKeywordTargetRow(row) {
+  const fieldId = row.dataset.keywordTargetFieldId;
+  for (const input of row.querySelectorAll('[data-keyword-target-name]')) {
+    input.addEventListener('input', () => syncKeywordTargetField(fieldId));
+    input.addEventListener('change', () => syncKeywordTargetField(fieldId));
+  }
+  row.querySelector('.worker-keyword-target-remove')?.addEventListener('click', () => {
+    const editor = row.closest('.worker-keyword-target-editor');
+    row.remove();
+    if (editor && !editor.querySelector('.worker-keyword-target-row')) {
+      const addButton = editor.querySelector('.worker-keyword-target-add');
+      editor.insertBefore(createKeywordTargetRow(fieldId), addButton);
+    }
+    syncKeywordTargetField(fieldId);
+  });
+}
+
+function createKeywordTargetRow(fieldId, item = {}) {
+  const row = document.createElement('div');
+  row.className = 'worker-keyword-target-row';
+  row.dataset.keywordTargetFieldId = fieldId;
+  const fields = [
+    ['keyword', 'Keyword', item.keyword || ''],
+    ['location', 'Location', item.location || ''],
+    ['minPrice', 'Min price', item.minPrice || ''],
+    ['maxPrice', 'Max price', item.maxPrice || ''],
+    ['daysSinceListed', 'Days', item.daysSinceListed || ''],
+    ['itemCondition', 'Condition', item.itemCondition || ''],
+    ['maxItems', 'Items', item.maxItems || ''],
+  ];
+  for (const [name, placeholder, value] of fields) {
+    const input = document.createElement('input');
+    input.dataset.keywordTargetName = name;
+    input.type = ['minPrice', 'maxPrice', 'daysSinceListed', 'maxItems'].includes(name) ? 'number' : 'text';
+    input.placeholder = placeholder;
+    input.value = value;
+    if (input.type === 'number') input.min = '1';
+    row.append(input);
+  }
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'secondary worker-keyword-target-remove';
+  remove.title = 'Remove keyword target';
+  remove.setAttribute('aria-label', 'Remove keyword target');
+  remove.textContent = '-';
+  row.append(remove);
+  bindKeywordTargetRow(row);
+  return row;
+}
+
+function bindKeywordTargetEditors(root = els.workerControl) {
+  for (const row of root?.querySelectorAll('.worker-keyword-target-row') || []) {
+    bindKeywordTargetRow(row);
+  }
+  for (const add of root?.querySelectorAll('.worker-keyword-target-add') || []) {
+    add.addEventListener('click', () => {
+      const fieldId = add.dataset.keywordTargetFieldId;
+      const row = createKeywordTargetRow(fieldId);
+      add.parentElement?.insertBefore(row, add);
+      row.querySelector('[data-keyword-target-name="keyword"]')?.focus();
+    });
+  }
+}
+
+function bindSearchQueryTargetRow(row) {
+  const fieldId = row.dataset.searchTargetFieldId;
+  for (const input of row.querySelectorAll('[data-search-target-name]')) {
+    input.addEventListener('input', () => syncSearchQueryTargetField(fieldId));
+    input.addEventListener('change', () => syncSearchQueryTargetField(fieldId));
+  }
+  row.querySelector('.worker-search-target-remove')?.addEventListener('click', () => {
+    const editor = row.closest('.worker-search-target-editor');
+    row.remove();
+    if (editor && !editor.querySelector('.worker-search-target-row')) {
+      const addButton = editor.querySelector('.worker-search-target-add');
+      editor.insertBefore(createSearchQueryTargetRow(fieldId), addButton);
+    }
+    syncSearchQueryTargetField(fieldId);
+  });
+}
+
+function createSearchQueryTargetRow(fieldId, item = {}) {
+  const row = document.createElement('div');
+  row.className = 'worker-search-target-row';
+  row.dataset.searchTargetFieldId = fieldId;
+  const fields = [
+    ['keyword', 'Keyword', item.keyword || ''],
+    ['minPrice', 'Min price', item.minPrice || ''],
+    ['maxPrice', 'Max price', item.maxPrice || ''],
+  ];
+  for (const [name, placeholder, value] of fields) {
+    const input = document.createElement('input');
+    input.dataset.searchTargetName = name;
+    input.type = ['minPrice', 'maxPrice'].includes(name) ? 'number' : 'text';
+    input.placeholder = placeholder;
+    input.value = value;
+    if (input.type === 'number') input.min = '0';
+    row.append(input);
+  }
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'secondary worker-search-target-remove';
+  remove.title = 'Remove keyword target';
+  remove.setAttribute('aria-label', 'Remove keyword target');
+  remove.textContent = '-';
+  row.append(remove);
+  bindSearchQueryTargetRow(row);
+  return row;
+}
+
+function bindSearchQueryTargetEditors(root = els.workerControl) {
+  for (const row of root?.querySelectorAll('.worker-search-target-row') || []) {
+    bindSearchQueryTargetRow(row);
+  }
+  for (const add of root?.querySelectorAll('.worker-search-target-add') || []) {
+    add.addEventListener('click', () => {
+      const fieldId = add.dataset.searchTargetFieldId;
+      const row = createSearchQueryTargetRow(fieldId);
+      add.parentElement?.insertBefore(row, add);
+      row.querySelector('[data-search-target-name="keyword"]')?.focus();
     });
   }
 }
@@ -2896,6 +3168,60 @@ function renderField(field, draft) {
       + '</tr>';
   }
   if (field.kind === 'textarea') {
+    if (field.editor === 'keywordTargets') {
+      const items = keywordTargetItems(value);
+      const rows = (items.length ? items : [{}]).map((item) => (
+        '<div class="worker-keyword-target-row" data-keyword-target-field-id="' + html(field.id) + '">'
+        + `<input data-keyword-target-name="keyword" type="text" value="${html(item.keyword || '')}" placeholder="Keyword">`
+        + `<input data-keyword-target-name="location" type="text" value="${html(item.location || '')}" placeholder="Location">`
+        + `<input data-keyword-target-name="minPrice" type="number" min="1" value="${html(item.minPrice || '')}" placeholder="Min price">`
+        + `<input data-keyword-target-name="maxPrice" type="number" min="1" value="${html(item.maxPrice || '')}" placeholder="Max price">`
+        + `<input data-keyword-target-name="daysSinceListed" type="number" min="1" value="${html(item.daysSinceListed || '')}" placeholder="Days">`
+        + `<input data-keyword-target-name="itemCondition" type="text" value="${html(item.itemCondition || '')}" placeholder="Condition">`
+        + `<input data-keyword-target-name="maxItems" type="number" min="1" value="${html(item.maxItems || '')}" placeholder="Items">`
+        + '<button type="button" class="secondary worker-keyword-target-remove" title="Remove keyword target" aria-label="Remove keyword target">&minus;</button>'
+        + '</div>'
+      )).join('');
+      return '<tr class="worker-control-wide-row">'
+        + `<th><label for="${html(id)}">${html(field.label)}</label></th>`
+        + '<td>'
+        + `<input id="${html(id)}" data-field-id="${html(field.id)}" type="hidden" value="${html(value)}">`
+        + '<div class="worker-keyword-target-editor">'
+        + '<div class="worker-keyword-target-header" aria-hidden="true">'
+        + '<span>Keyword</span><span>Location</span><span>Min price</span><span>Max price</span><span>Days</span><span>Condition</span><span>Items</span><span></span>'
+        + '</div>'
+        + rows
+        + `<button type="button" class="secondary worker-keyword-target-add" data-keyword-target-field-id="${html(field.id)}" title="Add keyword target" aria-label="Add keyword target">Add keyword</button>`
+        + '</div>'
+        + '<div class="settings-note">Generic Marketplace search only. Rental category URLs are intentionally not generated here.</div>'
+        + '</td>'
+        + '</tr>';
+    }
+    if (field.editor === 'searchQueryTargets') {
+      const items = searchQueryTargetItems(value);
+      const rows = (items.length ? items : [{}]).map((item) => (
+        '<div class="worker-search-target-row" data-search-target-field-id="' + html(field.id) + '">'
+        + `<input data-search-target-name="keyword" type="text" value="${html(item.keyword || '')}" placeholder="Keyword">`
+        + `<input data-search-target-name="minPrice" type="number" min="0" value="${html(item.minPrice || '')}" placeholder="Min price">`
+        + `<input data-search-target-name="maxPrice" type="number" min="0" value="${html(item.maxPrice || '')}" placeholder="Max price">`
+        + '<button type="button" class="secondary worker-search-target-remove" title="Remove keyword target" aria-label="Remove keyword target">&minus;</button>'
+        + '</div>'
+      )).join('');
+      return '<tr class="worker-control-wide-row">'
+        + `<th><label for="${html(id)}">${html(field.label)}</label></th>`
+        + '<td>'
+        + `<input id="${html(id)}" data-field-id="${html(field.id)}" type="hidden" value="${html(value)}">`
+        + '<div class="worker-search-target-editor">'
+        + '<div class="worker-search-target-header" aria-hidden="true">'
+        + '<span>Keyword</span><span>Min price</span><span>Max price</span><span></span>'
+        + '</div>'
+        + rows
+        + `<button type="button" class="secondary worker-search-target-add" data-search-target-field-id="${html(field.id)}" title="Add keyword target" aria-label="Add keyword target">Add keyword</button>`
+        + '</div>'
+        + '<div class="settings-note">Prices apply only to each keyword row. Listed-within-days and condition remain global and also apply during random walks.</div>'
+        + '</td>'
+        + '</tr>';
+    }
     if (field.editor === 'list') {
       const items = listFieldItems(value);
       const rows = (items.length ? items : ['']).map((item, index) => (
@@ -3088,12 +3414,18 @@ function handleWorkflowFieldChange(event) {
   const field = workflow.fields.find((item) => item.id === fieldId);
   draft[fieldId] = field?.kind === 'boolean' ? event.target.checked : event.target.value;
   if (workflow.id === 'search-explore' && fieldId === 'queryMode') {
-    if (draft.queryMode === 'list' && !String(draft.queries || '').trim() && String(draft.query || '').trim()) {
-      draft.queries = String(draft.query).trim();
+    if (draft.queryMode === 'list' && !String(draft.queryTargets || '').trim() && String(draft.query || '').trim()) {
+      draft.queryTargets = serializeSearchQueryTargetItems([{
+        keyword: String(draft.query).trim(),
+        minPrice: draft.minPrice || '',
+        maxPrice: draft.maxPrice || '',
+      }]);
     } else if (draft.queryMode === 'single' && !String(draft.query || '').trim()) {
-      const firstListItem = listFieldItems(draft.queries)[0];
-      if (firstListItem) {
-        draft.query = firstListItem;
+      const firstTarget = searchQueryTargetItems(draft.queryTargets)[0] || {};
+      if (firstTarget.keyword) {
+        draft.query = firstTarget.keyword;
+        draft.minPrice = firstTarget.minPrice || draft.minPrice || '';
+        draft.maxPrice = firstTarget.maxPrice || draft.maxPrice || '';
       }
     }
   }
@@ -3246,6 +3578,8 @@ function renderWorkerControl() {
   }
   bindCaptureSettings(els.workerControl);
   bindWorkflowListEditors(els.workerControl);
+  bindKeywordTargetEditors(els.workerControl);
+  bindSearchQueryTargetEditors(els.workerControl);
   document.getElementById('workerProfileSaveButton')?.addEventListener('click', () => {
     saveCurrentWorkerProfile().catch((error) => {
       markWorkerConfigSaved(error.message || 'Profile could not be saved.');

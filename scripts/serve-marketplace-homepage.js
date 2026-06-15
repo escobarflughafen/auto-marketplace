@@ -209,6 +209,25 @@ const WORKFLOWS = {
           { value: 'headed', label: 'Headed', args: ['--headed'] },
         ],
       },
+      {
+        id: 'collectionMode',
+        label: 'Collection mode',
+        kind: 'choice',
+        defaultValue: 'feed',
+        options: [
+          { value: 'feed', label: 'Homepage feed', args: [] },
+          { value: 'keywords', label: 'Keyword targets', args: [] },
+        ],
+      },
+      {
+        id: 'keywordTargets',
+        label: 'Keyword targets',
+        kind: 'textarea',
+        editor: 'keywordTargets',
+        flag: '--keyword-targets',
+        defaultValue: '',
+        activeWhen: { field: 'collectionMode', equals: 'keywords' },
+      },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
       { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
       { id: 'radiusMiles', label: 'Radius (miles)', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
@@ -248,10 +267,14 @@ const WORKFLOWS = {
         ],
       },
       { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax', activeWhen: { field: 'queryMode', equals: 'single' } },
-      { id: 'queries', label: 'Keyword list', kind: 'textarea', editor: 'list', flag: '--queries', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
       { id: 'randomWalksBetweenSeeds', label: 'Random walks between entries', kind: 'number', flag: '--random-walks-between-seeds', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'list' } },
       { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
       { id: 'radiusMiles', label: 'Radius (miles)', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
+      { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'daysSinceListed', label: 'Listed within days', kind: 'number', flag: '--days-since-listed', defaultValue: '', min: 1 },
+      { id: 'itemCondition', label: 'Condition filter', kind: 'text', flag: '--item-condition', defaultValue: '' },
       { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
       { id: 'refreshSeconds', label: 'Refresh every (seconds)', kind: 'number', flag: '--refresh-seconds', defaultValue: 30, min: 1 },
       { id: 'refreshJitterMin', label: 'Refresh jitter low', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
@@ -1332,6 +1355,91 @@ function validateWorkflowPathValue(flag, value, rootDir) {
   }
 }
 
+function validateKeywordTargetsValue(flag, value) {
+  const text = String(value ?? '');
+  if (!text || text.startsWith('--')) {
+    throw workflowArgError(`Missing value for workflow argument ${flag}`);
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(text)) {
+    throw workflowArgError(`Unsafe control character in workflow argument ${flag}`);
+  }
+  if (text.length > 12000) {
+    throw workflowArgError(`Workflow argument value is too long for ${flag}`);
+  }
+  let rows;
+  try {
+    rows = JSON.parse(text);
+  } catch (error) {
+    throw workflowArgError(`Expected ${flag} to be JSON: ${error.message}`);
+  }
+  if (!Array.isArray(rows)) {
+    throw workflowArgError(`Expected ${flag} to be a JSON array`);
+  }
+  for (const [index, row] of rows.entries()) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw workflowArgError(`Expected ${flag} row ${index + 1} to be an object`);
+    }
+    if (!String(row.keyword || row.query || '').trim()) {
+      throw workflowArgError(`Expected ${flag} row ${index + 1} to include keyword`);
+    }
+    for (const name of ['minPrice', 'maxPrice', 'daysSinceListed', 'maxItems']) {
+      const raw = row[name] ?? row[name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)];
+      if (raw === undefined || raw === null || raw === '') {
+        continue;
+      }
+      const numeric = Number(raw);
+      if (!Number.isFinite(numeric) || numeric < 1) {
+        throw workflowArgError(`Expected ${flag} row ${index + 1} ${name} to be >= 1`);
+      }
+    }
+    if (row.minPrice !== undefined && row.maxPrice !== undefined && Number(row.maxPrice) < Number(row.minPrice)) {
+      throw workflowArgError(`Expected ${flag} row ${index + 1} maxPrice to be >= minPrice`);
+    }
+  }
+}
+
+function validateSearchQueryTargetsValue(flag, value) {
+  assertSafeWorkflowArgValue(flag, value);
+  const text = String(value || '').trim();
+  if (!text || text.startsWith('--')) {
+    throw workflowArgError(`Missing value for workflow argument ${flag}`);
+  }
+  if (text.length > 12000) {
+    throw workflowArgError(`Workflow argument value is too long for ${flag}`);
+  }
+  let rows;
+  try {
+    rows = JSON.parse(text);
+  } catch (error) {
+    throw workflowArgError(`Expected ${flag} to be JSON: ${error.message}`);
+  }
+  if (!Array.isArray(rows)) {
+    throw workflowArgError(`Expected ${flag} to be a JSON array`);
+  }
+  for (const [index, row] of rows.entries()) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw workflowArgError(`Expected ${flag} row ${index + 1} to be an object`);
+    }
+    if (!String(row.keyword || row.query || '').trim()) {
+      throw workflowArgError(`Expected ${flag} row ${index + 1} to include keyword`);
+    }
+    const minPrice = row.minPrice ?? row.min_price;
+    const maxPrice = row.maxPrice ?? row.max_price;
+    for (const [name, raw] of [['minPrice', minPrice], ['maxPrice', maxPrice]]) {
+      if (raw === undefined || raw === null || raw === '') {
+        continue;
+      }
+      const numeric = Number(raw);
+      if (!Number.isFinite(numeric) || numeric < 0) {
+        throw workflowArgError(`Expected ${flag} row ${index + 1} ${name} to be >= 0`);
+      }
+    }
+    if (minPrice !== undefined && minPrice !== '' && maxPrice !== undefined && maxPrice !== '' && Number(maxPrice) < Number(minPrice)) {
+      throw workflowArgError(`Expected ${flag} row ${index + 1} maxPrice to be >= minPrice`);
+    }
+  }
+}
+
 function workflowArgSpec(workflow, options = {}) {
   const booleanFlags = new Set();
   const valueValidators = new Map();
@@ -1380,7 +1488,21 @@ function workflowArgSpec(workflow, options = {}) {
       addValueFlag(field.flag, (value) => validateNumberFieldValue(field.flag, value, field));
       continue;
     }
+    if (field.editor === 'keywordTargets') {
+      addValueFlag(field.flag, (value) => validateKeywordTargetsValue(field.flag, value));
+      continue;
+    }
+    if (field.editor === 'searchQueryTargets') {
+      addValueFlag(field.flag, (value) => validateSearchQueryTargetsValue(field.flag, value));
+      continue;
+    }
     addValueFlag(field.flag, (value) => assertSafeWorkflowArgValue(field.flag, value));
+  }
+
+  if (workflow.id === 'search-explore') {
+    addValueFlag('--queries', (value) => assertSafeWorkflowArgValue('--queries', value));
+    addValueFlag('--seed-queries', (value) => assertSafeWorkflowArgValue('--seed-queries', value));
+    addValueFlag('--seed-query-targets', (value) => validateSearchQueryTargetsValue('--seed-query-targets', value));
   }
 
   for (const flag of COMMON_WORKER_SCREENSHOT_VALUE_FLAGS) {

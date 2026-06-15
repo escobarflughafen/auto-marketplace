@@ -48,6 +48,10 @@ const {
 
 const DEFAULT_AREA = 'vancouver';
 const DEFAULT_SEARCH_URL_TEMPLATE = 'https://www.facebook.com/marketplace/%AREA%/search/?query=%QUERY%';
+const RANDOM_WALK_FILTER_PARAMS = Object.freeze([
+  'minPrice',
+  'maxPrice',
+]);
 const log = createLogger('collect-marketplace-search-explorer');
 
 function readFlagValue(argv, index, flagName) {
@@ -66,6 +70,14 @@ function parseIntegerFlag(value, flagName, minimum = 0) {
   }
 
   return parsed;
+}
+
+function parseOptionalIntegerFlag(value, flagName, minimum = 0) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return null;
+  }
+  return parseIntegerFlag(text, flagName, minimum);
 }
 
 function parseKeywordList(value) {
@@ -89,12 +101,65 @@ function uniqueKeywords(keywords) {
   return result;
 }
 
+function parseSearchQueryTargets(value, flagName = '--query-targets') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return [];
+  }
+
+  let rows;
+  try {
+    rows = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Expected ${flagName} to be JSON: ${error.message}`);
+  }
+
+  if (!Array.isArray(rows)) {
+    throw new Error(`Expected ${flagName} to be a JSON array`);
+  }
+
+  const seen = new Set();
+  const targets = [];
+  for (const [index, row] of rows.entries()) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error(`Expected ${flagName} row ${index + 1} to be an object`);
+    }
+    const keyword = normalizeKeyword(row.keyword || row.query || '');
+    if (!keyword) {
+      throw new Error(`Expected ${flagName} row ${index + 1} to include keyword`);
+    }
+    const minPrice = parseOptionalIntegerFlag(row.minPrice ?? row.min_price ?? '', `${flagName} row ${index + 1} minPrice`, 0);
+    const maxPrice = parseOptionalIntegerFlag(row.maxPrice ?? row.max_price ?? '', `${flagName} row ${index + 1} maxPrice`, 0);
+    if (minPrice !== null && maxPrice !== null && maxPrice < minPrice) {
+      throw new Error(`Expected ${flagName} row ${index + 1} maxPrice to be >= minPrice`);
+    }
+    const key = keyword.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    targets.push({ keyword, minPrice, maxPrice });
+  }
+
+  return targets;
+}
+
+function queryTargetsFromKeywords(keywords) {
+  return uniqueKeywords(keywords).map((keyword) => ({
+    keyword,
+    minPrice: null,
+    maxPrice: null,
+  }));
+}
+
 function parseArgs(argv) {
   const options = applyWorkerScreenshotDefaults({
     query: '',
     queryInputs: [],
     queriesRaw: '',
+    queryTargetsRaw: '',
     seedQueries: [],
+    seedQueryTargets: [],
     keywordListProvided: false,
     randomWalksBetweenSeedsMin: 0,
     randomWalksBetweenSeedsMax: 0,
@@ -102,6 +167,10 @@ function parseArgs(argv) {
     areaExplicit: false,
     location: '',
     radiusMiles: 0,
+    minPrice: null,
+    maxPrice: null,
+    daysSinceListed: null,
+    itemCondition: '',
     searchUrlTemplate: DEFAULT_SEARCH_URL_TEMPLATE,
     userDataDir: path.join(process.cwd(), 'profiles', 'facebook-marketplace'),
     dbPath: DEFAULT_DB_PATH,
@@ -146,6 +215,12 @@ function parseArgs(argv) {
         options.keywordListProvided = true;
         index += 1;
         break;
+      case '--query-targets':
+      case '--seed-query-targets':
+        options.queryTargetsRaw = readFlagValue(argv, index, arg);
+        options.keywordListProvided = true;
+        index += 1;
+        break;
       case '--random-walks-between-seeds':
         options.randomWalksBetweenSeedsMin = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
         options.randomWalksBetweenSeedsMax = options.randomWalksBetweenSeedsMin;
@@ -170,6 +245,26 @@ function parseArgs(argv) {
         break;
       case '--radius-miles':
         options.radiusMiles = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--min-price':
+      case '--minPrice':
+        options.minPrice = parseOptionalIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--max-price':
+      case '--maxPrice':
+        options.maxPrice = parseOptionalIntegerFlag(readFlagValue(argv, index, arg), arg, 0);
+        index += 1;
+        break;
+      case '--days-since-listed':
+      case '--daysSinceListed':
+        options.daysSinceListed = parseOptionalIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--item-condition':
+      case '--itemCondition':
+        options.itemCondition = readFlagValue(argv, index, arg).trim();
         index += 1;
         break;
       case '--search-url-template':
@@ -327,15 +422,31 @@ function parseArgs(argv) {
     }
   }
 
+  const explicitSeedTargets = parseSearchQueryTargets(options.queryTargetsRaw);
   const explicitSeedQueries = parseKeywordList(options.queriesRaw);
   const queryInputSeeds = uniqueKeywords(options.queryInputs);
-  options.seedQueries = uniqueKeywords(explicitSeedQueries.length ? explicitSeedQueries : queryInputSeeds);
+  const seedTargets = explicitSeedTargets.length
+    ? explicitSeedTargets
+    : queryTargetsFromKeywords(explicitSeedQueries.length ? explicitSeedQueries : queryInputSeeds);
+  options.seedQueryTargets = seedTargets;
+  options.seedQueries = seedTargets.map((target) => target.keyword);
   options.query = normalizeKeyword(options.seedQueries[0] || options.query);
   if (!options.query) {
-    throw new Error('Missing required search keyword. Pass --query "<keyword>" or --queries "<keyword1>,<keyword2>".');
+    throw new Error('Missing required search keyword. Pass --query "<keyword>", --queries "<keyword1>,<keyword2>", or --query-targets JSON.');
   }
   if (!options.seedQueries.length) {
     options.seedQueries = [options.query];
+    options.seedQueryTargets = [{
+      keyword: options.query,
+      minPrice: options.minPrice,
+      maxPrice: options.maxPrice,
+    }];
+  } else if (!explicitSeedTargets.length && !explicitSeedQueries.length) {
+    options.seedQueryTargets = [{
+      keyword: options.query,
+      minPrice: options.minPrice,
+      maxPrice: options.maxPrice,
+    }];
   }
 
   options.location = cleanText(options.location);
@@ -354,6 +465,9 @@ function parseArgs(argv) {
   }
   if (options.randomWalksBetweenSeedsMax < options.randomWalksBetweenSeedsMin) {
     throw new Error('Expected --random-walks-between-seeds-max to be >= --random-walks-between-seeds-min');
+  }
+  if (options.minPrice !== null && options.maxPrice !== null && options.maxPrice < options.minPrice) {
+    throw new Error('Expected --max-price to be >= --min-price');
   }
 
   if (options.bagMaxKeywordLength < options.bagMinKeywordLength) {
@@ -419,10 +533,55 @@ function appendCollectorListingEvent(db, options, listing, event = {}) {
   }
 }
 
-function buildSearchUrl(area, query, template = DEFAULT_SEARCH_URL_TEMPLATE) {
-  return String(template)
+function stripSearchFilterParams(urlText) {
+  try {
+    const url = new URL(urlText);
+    for (const param of RANDOM_WALK_FILTER_PARAMS) {
+      url.searchParams.delete(param);
+    }
+    return url.toString();
+  } catch (_error) {
+    let result = urlText;
+    for (const param of RANDOM_WALK_FILTER_PARAMS) {
+      result = result
+        .replace(new RegExp(`([?&])${param}=[^&#]*&`, 'gi'), '$1')
+        .replace(new RegExp(`([?&])${param}=[^&#]*($|#)`, 'gi'), '$2');
+    }
+    return result.replace(/\?&/g, '?').replace(/\?($|#)/g, '$1');
+  }
+}
+
+function addSearchFilterParams(urlText, filters = {}) {
+  try {
+    const url = new URL(urlText);
+    if (filters.minPrice !== null && filters.minPrice !== undefined) {
+      url.searchParams.set('minPrice', String(filters.minPrice));
+    }
+    if (filters.maxPrice !== null && filters.maxPrice !== undefined) {
+      url.searchParams.set('maxPrice', String(filters.maxPrice));
+    }
+    if (filters.daysSinceListed !== null && filters.daysSinceListed !== undefined) {
+      url.searchParams.set('daysSinceListed', String(filters.daysSinceListed));
+    }
+    if (filters.itemCondition) {
+      url.searchParams.set('itemCondition', String(filters.itemCondition));
+    }
+    return url.toString();
+  } catch (_error) {
+    return urlText;
+  }
+}
+
+function randomWalkShouldIgnoreFilters(querySource) {
+  return String(querySource || '').startsWith('round_random_walk');
+}
+
+function buildSearchUrl(area, query, template = DEFAULT_SEARCH_URL_TEMPLATE, options = {}) {
+  const baseUrl = String(template)
     .replace('%AREA%', encodeURIComponent(String(area || DEFAULT_AREA)))
     .replace('%QUERY%', encodeURIComponent(String(query || '')));
+  const url = addSearchFilterParams(baseUrl, options.filters || {});
+  return options.stripFilters ? stripSearchFilterParams(url) : url;
 }
 
 function isPriceLine(line) {
@@ -647,6 +806,15 @@ function computeJitteredRefreshMs(refreshSeconds, jitterMin, jitterMax) {
   };
 }
 
+function priceTargetForSeed(options, seedIndex, query = '') {
+  const targets = Array.isArray(options.seedQueryTargets) ? options.seedQueryTargets : [];
+  if (Number.isFinite(seedIndex) && targets[seedIndex]) {
+    return targets[seedIndex];
+  }
+  const normalizedQuery = normalizeKeyword(query);
+  return targets.find((target) => normalizeKeyword(target.keyword).toLowerCase() === normalizedQuery.toLowerCase()) || null;
+}
+
 async function writeCycleSnapshot(snapshotFile, cycleSummary) {
   const resolvedPath = path.isAbsolute(snapshotFile)
     ? snapshotFile
@@ -703,6 +871,7 @@ async function chooseRoundQuery(db, state, options) {
           querySource: 'round_random_walk',
           nextSeedRound: state.nextSeedRound,
           bagKeyword: null,
+          queryTarget: null,
           seedIndex: state.seedIndex || 0,
           randomWalksRemaining: state.randomWalksRemaining,
           randomWalkCandidateSource: 'previous_round_collected_titles',
@@ -719,6 +888,7 @@ async function chooseRoundQuery(db, state, options) {
           querySource: 'round_random_walk_bag_fallback',
           nextSeedRound: state.nextSeedRound,
           bagKeyword,
+          queryTarget: null,
           seedIndex: state.seedIndex || 0,
           randomWalksRemaining: state.randomWalksRemaining,
           randomWalkCandidateSource: 'title_bag_fallback',
@@ -741,6 +911,7 @@ async function chooseRoundQuery(db, state, options) {
       querySource: 'seed_round_robin',
       nextSeedRound: state.nextSeedRound,
       bagKeyword: null,
+      queryTarget: priceTargetForSeed(options, normalizedSeedIndex, query),
       seedIndex: normalizedSeedIndex,
       nextSeedIndex,
       randomWalksRemaining: nextRandomWalks,
@@ -759,6 +930,7 @@ async function chooseRoundQuery(db, state, options) {
       querySource: 'seed',
       nextSeedRound: reseedRound,
       bagKeyword: null,
+      queryTarget: priceTargetForSeed(options, 0, options.query),
     };
   }
 
@@ -772,6 +944,7 @@ async function chooseRoundQuery(db, state, options) {
       querySource: 'seed_fallback',
       nextSeedRound: state.nextSeedRound,
       bagKeyword: null,
+      queryTarget: priceTargetForSeed(options, 0, options.query),
     };
   }
 
@@ -780,6 +953,7 @@ async function chooseRoundQuery(db, state, options) {
     querySource: 'bag',
     nextSeedRound: state.nextSeedRound,
     bagKeyword,
+    queryTarget: null,
   };
 }
 
@@ -791,7 +965,18 @@ async function runRound(page, db, options, state, lifecycle = null) {
     credentialsProfile: options.credentialsProfile,
   });
   const queryPlan = await chooseRoundQuery(db, state, options);
-  const searchUrl = buildSearchUrl(options.area, queryPlan.query, options.searchUrlTemplate);
+  const stripSearchFilters = randomWalkShouldIgnoreFilters(queryPlan.querySource);
+  const queryTarget = queryPlan.queryTarget || {};
+  const activeSearchFilters = {
+    minPrice: stripSearchFilters ? null : queryTarget.minPrice,
+    maxPrice: stripSearchFilters ? null : queryTarget.maxPrice,
+    daysSinceListed: options.daysSinceListed,
+    itemCondition: options.itemCondition,
+  };
+  const searchUrl = buildSearchUrl(options.area, queryPlan.query, options.searchUrlTemplate, {
+    filters: activeSearchFilters,
+    stripFilters: stripSearchFilters,
+  });
   const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
 
   appendCollectorWorkflowEvent(db, options, 'collector_query_selected', {
@@ -800,6 +985,12 @@ async function runRound(page, db, options, state, lifecycle = null) {
       query: queryPlan.query,
       querySource: queryPlan.querySource,
       roundNumber: state.roundNumber,
+      searchFiltersApplied: !stripSearchFilters,
+      searchFilters: activeSearchFilters,
+      queryPriceTarget: {
+        minPrice: queryTarget.minPrice ?? null,
+        maxPrice: queryTarget.maxPrice ?? null,
+      },
       nextSeedRound: queryPlan.nextSeedRound,
       seedIndex: queryPlan.seedIndex,
       nextSeedIndex: queryPlan.nextSeedIndex,
@@ -813,6 +1004,12 @@ async function runRound(page, db, options, state, lifecycle = null) {
       startUrl: searchUrl,
       query: queryPlan.query,
       area: options.area,
+      searchFiltersApplied: !stripSearchFilters,
+      searchFilters: activeSearchFilters,
+      queryPriceTarget: {
+        minPrice: queryTarget.minPrice ?? null,
+        maxPrice: queryTarget.maxPrice ?? null,
+      },
       maxItems: targetLabel,
       collectAll: options.collectAll,
       dbCountsBefore: countsBefore,
@@ -820,7 +1017,7 @@ async function runRound(page, db, options, state, lifecycle = null) {
   });
   await appendLog(
     options.logFile,
-    `round_start round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" next_seed_round=${queryPlan.nextSeedRound} seed_index=${queryPlan.seedIndex ?? ''} next_seed_index=${queryPlan.nextSeedIndex ?? ''} random_walks_remaining=${queryPlan.randomWalksRemaining ?? ''} random_walk_candidate_source=${queryPlan.randomWalkCandidateSource || ''} area=${options.area} max_items=${targetLabel} collect_all=${options.collectAll} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} bag_keywords=${bagCountsBefore.totalKeywords} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
+    `round_start round=${state.roundNumber} query_source=${queryPlan.querySource} query="${queryPlan.query}" search_filters_applied=${!stripSearchFilters} next_seed_round=${queryPlan.nextSeedRound} seed_index=${queryPlan.seedIndex ?? ''} next_seed_index=${queryPlan.nextSeedIndex ?? ''} random_walks_remaining=${queryPlan.randomWalksRemaining ?? ''} random_walk_candidate_source=${queryPlan.randomWalkCandidateSource || ''} area=${options.area} max_items=${targetLabel} collect_all=${options.collectAll} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} bag_keywords=${bagCountsBefore.totalKeywords} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
   );
 
   const activePage = await safeGoto(page.context(), page, searchUrl);
@@ -884,6 +1081,7 @@ async function runRound(page, db, options, state, lifecycle = null) {
     randomWalksRemaining: queryPlan.randomWalksRemaining,
     randomWalkCandidateSource: queryPlan.randomWalkCandidateSource || '',
     randomWalkCandidateCount: state.randomWalkCandidates.length,
+    searchFiltersApplied: !stripSearchFilters,
     area: options.area,
     collectAll: options.collectAll,
     session: sessionSummary,
@@ -925,6 +1123,7 @@ async function runRound(page, db, options, state, lifecycle = null) {
       elapsedSeconds: collectionStats.elapsedSeconds,
       query: queryPlan.query,
       querySource: queryPlan.querySource,
+      searchFiltersApplied: !stripSearchFilters,
       roundNumber: state.roundNumber,
       seedIndex: queryPlan.seedIndex,
       nextSeedIndex: queryPlan.nextSeedIndex,
@@ -953,7 +1152,7 @@ async function main() {
   await ensureDir(options.workerScreenshotDir);
   await appendLog(
     options.logFile,
-    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" seed_queries=${JSON.stringify(options.seedQueries)} keyword_rotation=${roundRobinSearchEnabled(options) ? 'round_robin' : 'legacy'} random_walks_between_seeds_min=${options.randomWalksBetweenSeedsMin} random_walks_between_seeds_max=${options.randomWalksBetweenSeedsMax} area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
+    `search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" seed_queries=${JSON.stringify(options.seedQueries)} keyword_rotation=${roundRobinSearchEnabled(options) ? 'round_robin' : 'legacy'} random_walks_between_seeds_min=${options.randomWalksBetweenSeedsMin} random_walks_between_seeds_max=${options.randomWalksBetweenSeedsMax} area=${options.area} location="${options.location || ''}" radius_miles=${options.radiusMiles} min_price=${options.minPrice ?? ''} max_price=${options.maxPrice ?? ''} days_since_listed=${options.daysSinceListed ?? ''} item_condition="${options.itemCondition || ''}" refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} reseed_round_min=${options.reseedRoundMin} reseed_round_max=${options.reseedRoundMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -972,6 +1171,12 @@ async function main() {
       keywordRotation: roundRobinSearchEnabled(options) ? 'round_robin' : 'legacy',
       randomWalksBetweenSeedsMin: options.randomWalksBetweenSeedsMin,
       randomWalksBetweenSeedsMax: options.randomWalksBetweenSeedsMax,
+      searchFilters: {
+        minPrice: options.minPrice,
+        maxPrice: options.maxPrice,
+        daysSinceListed: options.daysSinceListed,
+        itemCondition: options.itemCondition,
+      },
       area: options.area,
     },
   });
@@ -1140,6 +1345,7 @@ if (require.main === module) {
 module.exports = {
   parseArgs,
   parseKeywordList,
+  parseSearchQueryTargets,
   buildSearchUrl,
   pickSearchCardTitle,
   filterBagKeywordsFromItems,

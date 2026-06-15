@@ -44,6 +44,92 @@ const {
 const DEFAULT_HOME_URL = 'https://www.facebook.com/marketplace/';
 const log = createLogger('collect-marketplace-homepage');
 
+function normalizeOptionalText(value) {
+  return String(value ?? '').trim();
+}
+
+function parseOptionalPositiveInteger(value, fieldName) {
+  const text = normalizeOptionalText(value);
+  if (!text) {
+    return null;
+  }
+  const parsed = Number.parseInt(text, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`Expected ${fieldName} to be an integer >= 1`);
+  }
+  return parsed;
+}
+
+function parseKeywordTargets(rawValue) {
+  const text = normalizeOptionalText(rawValue);
+  if (!text) {
+    return [];
+  }
+
+  let rows;
+  try {
+    rows = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Expected --keyword-targets to be JSON: ${error.message}`);
+  }
+
+  if (!Array.isArray(rows)) {
+    throw new Error('Expected --keyword-targets to be a JSON array');
+  }
+
+  return rows.map((row, index) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error(`Expected --keyword-targets row ${index + 1} to be an object`);
+    }
+    const keyword = normalizeOptionalText(row.keyword || row.query);
+    if (!keyword) {
+      throw new Error(`Expected --keyword-targets row ${index + 1} to include keyword`);
+    }
+    const target = {
+      keyword,
+      location: normalizeOptionalText(row.location),
+      minPrice: parseOptionalPositiveInteger(row.minPrice ?? row.min_price, `keyword target ${index + 1} minPrice`),
+      maxPrice: parseOptionalPositiveInteger(row.maxPrice ?? row.max_price, `keyword target ${index + 1} maxPrice`),
+      daysSinceListed: parseOptionalPositiveInteger(row.daysSinceListed ?? row.days_since_listed, `keyword target ${index + 1} daysSinceListed`),
+      itemCondition: normalizeOptionalText(row.itemCondition ?? row.item_condition),
+      maxItems: parseOptionalPositiveInteger(row.maxItems ?? row.max_items, `keyword target ${index + 1} maxItems`),
+    };
+    if (target.minPrice !== null && target.maxPrice !== null && target.maxPrice < target.minPrice) {
+      throw new Error(`Expected keyword target ${index + 1} maxPrice to be >= minPrice`);
+    }
+    return target;
+  });
+}
+
+function marketplaceAreaForKeywordTarget(target, fallbackLocation = '') {
+  return getKnownMarketplaceAreaFromLocation(target.location)
+    || getKnownMarketplaceAreaFromLocation(fallbackLocation)
+    || '';
+}
+
+function buildMarketplaceKeywordSearchUrl(target, options = {}) {
+  const area = marketplaceAreaForKeywordTarget(target, options.location);
+  const basePath = area
+    ? `https://www.facebook.com/marketplace/${encodeURIComponent(area)}/search`
+    : 'https://www.facebook.com/marketplace/search';
+  const url = new URL(basePath);
+  url.searchParams.set('query', target.keyword);
+  url.searchParams.set('exact', 'false');
+  if (target.minPrice !== null && target.minPrice !== undefined) {
+    url.searchParams.set('minPrice', String(target.minPrice));
+  }
+  if (target.maxPrice !== null && target.maxPrice !== undefined) {
+    url.searchParams.set('maxPrice', String(target.maxPrice));
+  }
+  if (target.daysSinceListed !== null && target.daysSinceListed !== undefined) {
+    url.searchParams.set('daysSinceListed', String(target.daysSinceListed));
+  }
+  if (target.itemCondition) {
+    url.searchParams.set('itemCondition', target.itemCondition);
+  }
+  return url.toString();
+}
+
 function readFlagValue(argv, index, flagName) {
   const value = argv[index + 1];
   if (!value || value.startsWith('--')) {
@@ -83,6 +169,8 @@ function parseArgs(argv) {
     headless: true,
     location: '',
     radiusMiles: 0,
+    keywordTargets: [],
+    keywordTargetsRaw: '',
     useCredentials: false,
     authMode: '',
     credentialsPath: DEFAULT_CREDENTIALS_PATH,
@@ -165,6 +253,12 @@ function parseArgs(argv) {
         break;
       case '--radius-miles':
         options.radiusMiles = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
+        index += 1;
+        break;
+      case '--keyword-targets':
+      case '--search-keyword-targets':
+        options.keywordTargetsRaw = readFlagValue(argv, index, arg);
+        options.keywordTargets = parseKeywordTargets(options.keywordTargetsRaw);
         index += 1;
         break;
       case '--use-credentials':
@@ -500,31 +594,97 @@ async function runCycle(page, db, options, lifecycle = null) {
     credentialsProfile: options.credentialsProfile,
   });
   const targetLabel = options.collectAll ? 'all' : String(options.maxItems);
+  const cycleTargets = options.keywordTargets.length
+    ? options.keywordTargets.map((target, index) => ({
+      type: 'keyword',
+      label: target.keyword,
+      source: 'search',
+      sourceKeyword: target.keyword,
+      url: buildMarketplaceKeywordSearchUrl(target, options),
+      options: {
+        ...options,
+        startUrl: buildMarketplaceKeywordSearchUrl(target, options),
+        maxItems: target.maxItems || options.maxItems,
+        collectAll: target.maxItems ? false : options.collectAll,
+      },
+      target,
+      index,
+    }))
+    : [{
+      type: 'homepage',
+      label: 'homepage',
+      source: 'homepage',
+      sourceKeyword: '',
+      url: options.startUrl,
+      options,
+      target: null,
+      index: 0,
+    }];
   appendCollectorWorkflowEvent(db, options, 'collector_cycle_started', {
     status: 'running',
     payload: {
       startUrl: options.startUrl,
       maxItems: targetLabel,
       collectAll: options.collectAll,
+      targetMode: options.keywordTargets.length ? 'keyword_targets' : 'homepage',
+      targetCount: cycleTargets.length,
       dbCountsBefore: countsBefore,
     },
   });
   await appendLog(
     options.logFile,
-    `cycle_start url=${options.startUrl} max_items=${targetLabel} collect_all=${options.collectAll} max_runtime_seconds=${options.maxRuntimeSeconds} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
+    `cycle_start url=${options.startUrl} target_mode=${options.keywordTargets.length ? 'keyword_targets' : 'homepage'} target_count=${cycleTargets.length} max_items=${targetLabel} collect_all=${options.collectAll} max_runtime_seconds=${options.maxRuntimeSeconds} loaded_email=${sessionSummary.loadedEmail || 'n/a'} signed_in_user_id=${sessionSummary.signedInUserId || 'n/a'} logged_in=${sessionSummary.loggedIn} db_pending=${countsBefore.pending} db_processing=${countsBefore.processing} db_done=${countsBefore.done} db_error=${countsBefore.error}`,
   );
 
-  const activePage = await safeGoto(page.context(), page, options.startUrl);
-  if (lifecycle) {
-    lifecycle.currentPage = activePage;
-  }
-  await waitForMarketplaceResults(activePage, {
-    timeoutMs: 20000,
-    settleTimeMs: 1200,
-  });
+  let activePage = page;
+  const targetSummaries = [];
+  const allItems = [];
+  for (const target of cycleTargets) {
+    await appendLog(
+      options.logFile,
+      `cycle_target_start index=${target.index + 1}/${cycleTargets.length} type=${target.type} keyword="${target.sourceKeyword}" url=${target.url} max_items=${target.options.collectAll ? 'all' : target.options.maxItems}`,
+    );
+    activePage = await safeGoto(activePage.context(), activePage, target.url);
+    if (lifecycle) {
+      lifecycle.currentPage = activePage;
+    }
+    await waitForMarketplaceResults(activePage, {
+      timeoutMs: 20000,
+      settleTimeMs: 1200,
+    });
 
-  const collection = await collectHomepageItems(activePage, options);
-  const { items, stats: collectionStats } = collection;
+    const collection = await collectHomepageItems(activePage, target.options);
+    const targetItems = collection.items.map((item) => ({
+      ...item,
+      source: target.source,
+      source_keyword: target.sourceKeyword,
+    }));
+    allItems.push(...targetItems);
+    targetSummaries.push({
+      type: target.type,
+      keyword: target.sourceKeyword,
+      url: target.url,
+      totalCollected: targetItems.length,
+      collectionStats: collection.stats,
+      parameters: target.target,
+    });
+    await appendLog(
+      options.logFile,
+      `cycle_target_done index=${target.index + 1}/${cycleTargets.length} type=${target.type} keyword="${target.sourceKeyword}" collected=${targetItems.length} stop_reason=${collection.stats.stopReason} elapsed_seconds=${collection.stats.elapsedSeconds}`,
+    );
+  }
+  const items = allItems;
+  const collectionStats = {
+    stopReason: targetSummaries.map((target) => target.collectionStats.stopReason).join(',') || 'none',
+    elapsedSeconds: Number(targetSummaries.reduce((sum, target) => sum + Number(target.collectionStats.elapsedSeconds || 0), 0).toFixed(3)),
+    scrollPasses: targetSummaries.reduce((sum, target) => sum + Number(target.collectionStats.scrollPasses || 0), 0),
+    stablePassesReached: targetSummaries.reduce((sum, target) => sum + Number(target.collectionStats.stablePassesReached || 0), 0),
+    stablePassesTarget: options.stablePasses,
+    runtimeLimitReached: targetSummaries.some((target) => target.collectionStats.runtimeLimitReached),
+    targetMode: options.keywordTargets.length ? 'keyword_targets' : 'homepage',
+    targetCount: cycleTargets.length,
+    targets: targetSummaries,
+  };
   const seenAt = new Date().toISOString();
   const storedResults = items.map((item) => upsertHomepageListingWithStatus(db, item, { seenAt }));
   scanPurchaseHistoryMatchesForListings(db, storedResults.map((result) => result.row.listing_id), {
@@ -547,6 +707,7 @@ async function runCycle(page, db, options, lifecycle = null) {
     dbCountsBefore: countsBefore,
     totalCollected: items.length,
     collectionStats,
+    targetSummaries,
     maxItemsTarget: targetLabel,
     outcomeCounts,
     counts,
@@ -608,7 +769,7 @@ async function main() {
   await ensureDir(options.workerScreenshotDir);
   await appendLog(
     options.logFile,
-    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
+    `collector_start db_path=${options.dbPath} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} target_mode=${options.keywordTargets.length ? 'keyword_targets' : 'homepage'} keyword_targets=${options.keywordTargets.length} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} first_load_only=${options.firstLoadOnly} initial_load_wait_ms=${options.initialLoadWaitMs} headless=${options.headless} location="${options.location || ''}" radius_miles=${options.radiusMiles} auth_mode=${options.authMode} use_credentials=${options.useCredentials} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`,
   );
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
@@ -623,6 +784,8 @@ async function main() {
       refreshSeconds: options.refreshSeconds,
       maxItems: options.collectAll ? 'all' : options.maxItems,
       collectAll: options.collectAll,
+      targetMode: options.keywordTargets.length ? 'keyword_targets' : 'homepage',
+      keywordTargets: options.keywordTargets.length,
     },
   });
   appendCollectorWorkflowEvent(db, options, 'browser_context_launch_started', {
@@ -776,5 +939,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildMarketplaceKeywordSearchUrl,
   parseArgs,
+  parseKeywordTargets,
 };

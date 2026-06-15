@@ -12,6 +12,8 @@ const {
 const {
   parseArgs,
   parseKeywordList,
+  parseSearchQueryTargets,
+  buildSearchUrl,
   pickSearchCardTitle,
   filterBagKeywordsFromItems,
   computeNextSeedRound,
@@ -69,6 +71,28 @@ test('parseArgs reads search radius miles', () => {
   assert.equal(options.radiusMiles, 10);
 });
 
+test('parseArgs reads search filter flags', () => {
+  const options = parseArgs([
+    '--query', 'leica m6',
+    '--min-price', '1000',
+    '--max-price', '4000',
+    '--days-since-listed', '30',
+    '--item-condition', 'used_like_new',
+  ]);
+
+  assert.equal(options.minPrice, 1000);
+  assert.equal(options.maxPrice, 4000);
+  assert.equal(options.daysSinceListed, 30);
+  assert.equal(options.itemCondition, 'used_like_new');
+});
+
+test('parseArgs rejects inverted search price filters', () => {
+  assert.throws(
+    () => parseArgs(['--query', 'leica m6', '--min-price', '4000', '--max-price', '1000']),
+    /--max-price to be >= --min-price/,
+  );
+});
+
 test('parseArgs supports unauthenticated search exploration', () => {
   const options = parseArgs(['--query', 'nikon', '--auth-mode', 'none']);
 
@@ -93,6 +117,69 @@ test('parseArgs reads round-robin seed queries and random walk count', () => {
   assert.deepEqual(options.seedQueries, ['leica m6', 'nikon d850', 'pentax 67']);
   assert.equal(options.randomWalksBetweenSeedsMin, 2);
   assert.equal(options.randomWalksBetweenSeedsMax, 2);
+});
+
+test('parseArgs reads per-keyword search query targets', () => {
+  const targets = JSON.stringify([
+    { keyword: 'leica m6', minPrice: '1000', maxPrice: '4000' },
+    { keyword: 'nikon d850', minPrice: '200', maxPrice: '1200' },
+  ]);
+  const options = parseArgs([
+    '--query-targets', targets,
+    '--random-walks-between-seeds', '2',
+    '--days-since-listed', '30',
+    '--item-condition', 'used_like_new',
+  ]);
+
+  assert.equal(options.query, 'leica m6');
+  assert.deepEqual(options.seedQueries, ['leica m6', 'nikon d850']);
+  assert.deepEqual(options.seedQueryTargets, [
+    { keyword: 'leica m6', minPrice: 1000, maxPrice: 4000 },
+    { keyword: 'nikon d850', minPrice: 200, maxPrice: 1200 },
+  ]);
+  assert.equal(options.daysSinceListed, 30);
+  assert.equal(options.itemCondition, 'used_like_new');
+});
+
+test('parseSearchQueryTargets rejects inverted per-keyword prices', () => {
+  assert.throws(
+    () => parseSearchQueryTargets('[{"keyword":"leica","minPrice":4000,"maxPrice":1000}]'),
+    /maxPrice to be >= minPrice/,
+  );
+});
+
+test('buildSearchUrl keeps filters for seed searches and strips them for random walks', () => {
+  const template = 'https://www.facebook.com/marketplace/%AREA%/search?query=%QUERY%&minPrice=1000&maxPrice=4000&daysSinceListed=30&itemCondition=used_like_new&exact=false';
+  const seedUrl = new URL(buildSearchUrl('vancouver', 'leica m6', template, {
+    filters: {
+      minPrice: 1200,
+      maxPrice: 4200,
+      daysSinceListed: 7,
+      itemCondition: 'new',
+    },
+  }));
+  assert.equal(seedUrl.searchParams.get('query'), 'leica m6');
+  assert.equal(seedUrl.searchParams.get('minPrice'), '1200');
+  assert.equal(seedUrl.searchParams.get('maxPrice'), '4200');
+  assert.equal(seedUrl.searchParams.get('daysSinceListed'), '7');
+  assert.equal(seedUrl.searchParams.get('itemCondition'), 'new');
+  assert.equal(seedUrl.searchParams.get('exact'), 'false');
+
+  const walkUrl = new URL(buildSearchUrl('vancouver', 'summicron lens', template, {
+    filters: {
+      minPrice: 1200,
+      maxPrice: 4200,
+      daysSinceListed: 7,
+      itemCondition: 'new',
+    },
+    stripFilters: true,
+  }));
+  assert.equal(walkUrl.searchParams.get('query'), 'summicron lens');
+  assert.equal(walkUrl.searchParams.has('minPrice'), false);
+  assert.equal(walkUrl.searchParams.has('maxPrice'), false);
+  assert.equal(walkUrl.searchParams.get('daysSinceListed'), '7');
+  assert.equal(walkUrl.searchParams.get('itemCondition'), 'new');
+  assert.equal(walkUrl.searchParams.get('exact'), 'false');
 });
 
 test('parseArgs reads search explorer worker id', () => {
@@ -206,6 +293,10 @@ test('chooseRoundQuery rotates seed list with random walks from previous round c
   const options = {
     query: 'leica m6',
     seedQueries: ['leica m6', 'nikon d850'],
+    seedQueryTargets: [
+      { keyword: 'leica m6', minPrice: 1000, maxPrice: 4000 },
+      { keyword: 'nikon d850', minPrice: 200, maxPrice: 1200 },
+    ],
     keywordListProvided: true,
     randomWalksBetweenSeedsMin: 2,
     randomWalksBetweenSeedsMax: 2,
@@ -226,6 +317,7 @@ test('chooseRoundQuery rotates seed list with random walks from previous round c
     assert.equal(firstSeed.seedIndex, 0);
     assert.equal(firstSeed.nextSeedIndex, 1);
     assert.equal(firstSeed.randomWalksRemaining, 2);
+    assert.deepEqual(firstSeed.queryTarget, { keyword: 'leica m6', minPrice: 1000, maxPrice: 4000 });
 
     state.roundNumber += 1;
     state.randomWalkCandidates = ['Leica M6 Classic'];
@@ -234,6 +326,7 @@ test('chooseRoundQuery rotates seed list with random walks from previous round c
     assert.equal(firstWalk.querySource, 'round_random_walk');
     assert.equal(firstWalk.randomWalkCandidateSource, 'previous_round_collected_titles');
     assert.equal(firstWalk.randomWalksRemaining, 1);
+    assert.equal(firstWalk.queryTarget, null);
 
     state.roundNumber += 1;
     state.randomWalkCandidates = ['Leica M6 TTL'];
@@ -249,6 +342,7 @@ test('chooseRoundQuery rotates seed list with random walks from previous round c
     assert.equal(secondSeed.querySource, 'seed_round_robin');
     assert.equal(secondSeed.seedIndex, 1);
     assert.equal(secondSeed.nextSeedIndex, 0);
+    assert.deepEqual(secondSeed.queryTarget, { keyword: 'nikon d850', minPrice: 200, maxPrice: 1200 });
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }
