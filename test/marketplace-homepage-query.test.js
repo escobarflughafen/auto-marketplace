@@ -6,6 +6,7 @@ const {
   buildListingsQuery,
   buildListingIdsQuery,
   buildCountQuery,
+  buildListingsStatsQueries,
 } = require('../scripts/marketplace-homepage-query');
 
 test('parseQuery extracts plain terms and field filters', () => {
@@ -130,4 +131,34 @@ test('listing queries can exclude staged resolve queue ids', () => {
   });
   assert.match(countQuery.sql, /listing_id NOT IN \(\?\)/);
   assert.deepEqual(countQuery.params, ['pending', 'queued-a']);
+});
+
+test('buildListingsStatsQueries aggregates the full filtered result without pagination', () => {
+  const stats = buildListingsStatsQueries({
+    query: 'title contains "pentax" and price >= 2000',
+    excludeListingIds: ['queued-a'],
+  });
+
+  assert.match(stats.priceSummary.sql, /COUNT\(numeric_price\) AS pricedCount/);
+  assert.doesNotMatch(stats.priceSummary.sql, /LIMIT \? OFFSET \?/);
+  assert.match(stats.statusCounts.sql, /GROUP BY label/);
+  assert.deepEqual(stats.priceSummary.params, ['%pentax%', '%pentax%', 2000, 'queued-a']);
+
+  const histogram = stats.priceHistogram({ min: 2000, max: 5000, binCount: 6 });
+  assert.match(histogram.sql, /GROUP BY bucket/);
+  assert.equal(histogram.binCount, 6);
+  assert.deepEqual(histogram.params.slice(0, 4), [5000, 5, 2000, 500]);
+  assert.deepEqual(histogram.params.slice(4), stats.priceSummary.params);
+});
+
+test('buildListingsStatsQueries supports lite KQL filters', () => {
+  const stats = buildListingsStatsQueries({
+    query: 'listings | where title contains "leica" and price >= 1000',
+    excludeListingIds: ['queued-b'],
+  });
+
+  assert.equal(stats.parsedQuery.mode, 'lite-kql');
+  assert.match(stats.priceSummary.sql, /FROM homepage_listings/);
+  assert.doesNotMatch(stats.priceSummary.sql, /LIMIT \? OFFSET \?/);
+  assert.deepEqual(stats.priceSummary.params, [1000, '%leica%', '%leica%', 'queued-b']);
 });

@@ -5,6 +5,7 @@ const {
   buildLiteListingsQuery,
   buildLiteListingIdsQuery,
   buildLiteCountQuery,
+  buildLiteListingsStatsQueries,
 } = require('./lite-kql-sqlite');
 
 const FIELD_ALIASES = {
@@ -823,10 +824,114 @@ function buildCountQuery(options = {}) {
   };
 }
 
+function buildStatsQueriesFromWhere(parsedQuery, where) {
+  const priceExpression = buildPriceExpression();
+  const pricedRowsSql = `
+    SELECT ${priceExpression} AS numeric_price
+    FROM homepage_listings
+    ${where.sql}
+  `;
+  return {
+    parsedQuery,
+    priceSummary: {
+      sql: `
+        SELECT
+          COUNT(*) AS totalRows,
+          COUNT(numeric_price) AS pricedCount,
+          MIN(numeric_price) AS priceMin,
+          MAX(numeric_price) AS priceMax,
+          AVG(numeric_price) AS priceAverage
+        FROM (${pricedRowsSql}) priced_rows
+      `,
+      params: where.params,
+    },
+    priceMedian: {
+      sql: `
+        WITH priced_rows AS (
+          ${pricedRowsSql}
+        ),
+        numbered AS (
+          SELECT
+            numeric_price,
+            ROW_NUMBER() OVER (ORDER BY numeric_price) AS rowNumber,
+            COUNT(*) OVER () AS rowCount
+          FROM priced_rows
+          WHERE numeric_price IS NOT NULL
+        )
+        SELECT AVG(numeric_price) AS priceMedian
+        FROM numbered
+        WHERE rowNumber IN ((rowCount + 1) / 2, (rowCount + 2) / 2)
+      `,
+      params: where.params,
+    },
+    statusCounts: {
+      sql: `
+        SELECT COALESCE(NULLIF(detail_status, ''), 'unknown') AS label, COUNT(*) AS count
+        FROM homepage_listings
+        ${where.sql}
+        GROUP BY label
+        ORDER BY count DESC, label ASC
+        LIMIT 12
+      `,
+      params: where.params,
+    },
+    sourceCounts: {
+      sql: `
+        SELECT COALESCE(NULLIF(source, ''), 'unknown') AS label, COUNT(*) AS count
+        FROM homepage_listings
+        ${where.sql}
+        GROUP BY label
+        ORDER BY count DESC, label ASC
+        LIMIT 12
+      `,
+      params: where.params,
+    },
+    priceHistogram(range = {}) {
+      const min = Number(range.min);
+      const max = Number(range.max);
+      const binCount = Math.max(2, Math.min(Number.parseInt(range.binCount, 10) || 6, 20));
+      const width = Number.isFinite(min) && Number.isFinite(max) && max > min
+        ? (max - min) / binCount
+        : 1;
+      return {
+        sql: `
+          SELECT bucket, COUNT(*) AS count
+          FROM (
+            SELECT
+              CASE
+                WHEN numeric_price >= ? THEN ?
+                ELSE CAST((numeric_price - ?) / ? AS INTEGER)
+              END AS bucket
+            FROM (${pricedRowsSql}) priced_rows
+            WHERE numeric_price IS NOT NULL
+          ) bucketed
+          GROUP BY bucket
+          ORDER BY bucket ASC
+        `,
+        params: [max, binCount - 1, min, width, ...where.params],
+        binCount,
+        min,
+        max,
+        width,
+      };
+    },
+  };
+}
+
+function buildListingsStatsQueries(options = {}) {
+  if (looksLikeLiteKql(options.query || '')) {
+    return buildLiteListingsStatsQueries(options);
+  }
+  const parsedQuery = parseQuery(options.query || '');
+  const where = appendExcludeListingIds(buildWhereClause(parsedQuery), options.excludeListingIds);
+  return buildStatsQueriesFromWhere(parsedQuery, where);
+}
+
 module.exports = {
   parseQuery,
   buildListingsQuery,
   buildListingIdsQuery,
   buildCountQuery,
+  buildListingsStatsQueries,
   clampLimit,
 };

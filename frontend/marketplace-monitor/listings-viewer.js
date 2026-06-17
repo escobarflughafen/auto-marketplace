@@ -418,6 +418,13 @@ function renderCompactPriceDistributionHtml(stats = {}) {
   + '</span>';
 }
 
+function renderPendingPriceDistributionHtml() {
+  return '<span class="results-price-plot results-price-plot-empty" aria-label="Loading full query price distribution">'
+    + '<span class="results-price-plot-label">Price</span>'
+    + '<span class="results-price-empty">Loading</span>'
+  + '</span>';
+}
+
 function dateFormatter(cell) {
   return escapeHtml(formatDate(cell.getValue()));
 }
@@ -689,6 +696,7 @@ export function createListingsViewer(config = {}) {
     selectedPovOrderIds: [],
     queryCompletionTimer: null,
     queryCompletionSeq: 0,
+    resultStatsRequestId: 0,
     querySuggestions: [],
     querySuggestionIndex: -1,
     queryDiagnostics: [],
@@ -711,6 +719,8 @@ export function createListingsViewer(config = {}) {
     resolvePollInFlight: false,
     resolveControlsSignature: '',
     lastResultMeta: null,
+    cachedResultStatsKey: '',
+    cachedResultStats: null,
     savedQueriesLoaded: false,
     table: null,
   };
@@ -1082,12 +1092,32 @@ export function createListingsViewer(config = {}) {
     return apiUrl(`/api/listings?${urlParams.toString()}`);
   }
 
+  function buildListingsStatsUrl() {
+    const urlParams = new URLSearchParams({
+      q: state.q,
+    });
+    for (const listingId of queuedExclusionIds()) {
+      urlParams.append('excludeListingId', listingId);
+    }
+    return apiUrl(`/api/listings/stats?${urlParams.toString()}`);
+  }
+
+  function listingsStatsKey() {
+    return JSON.stringify({
+      q: state.q || '',
+      excludeListingIds: queuedExclusionIds().sort(),
+    });
+  }
+
   async function requestListings(_url, _config, params) {
     const size = Math.max(1, Number.parseInt(params?.size, 10) || state.limit);
     const payload = await fetchJson(buildListingsUrl(params));
     state.total = payload.total;
     state.rows = await enrichRowsWithResolverStatus(payload.rows || []);
     renderMeta(payload);
+    if (state.lastResultMeta?.resultStatsPending) {
+      refreshQueryResultStats();
+    }
     const selectedSnapshot = state.rows.find((row) => row.listing_id === state.selectedSnapshotListingId);
     if (selectedSnapshot) {
       renderSnapshotPanel(selectedSnapshot);
@@ -1164,6 +1194,56 @@ export function createListingsViewer(config = {}) {
     };
   }
 
+  function renderResultsMetaButton() {
+    const meta = state.lastResultMeta || {};
+    const warnings = meta.warnings || [];
+    const compact = [
+      `Showing ${meta.shown || 0} of ${meta.total || 0}`,
+      `${meta.elapsedMs || 0}ms`,
+      warnings.length ? 'warning' : '',
+    ].filter(Boolean).join(' · ');
+    const pricePlot = meta.resultStatsPending
+      ? renderPendingPriceDistributionHtml()
+      : renderCompactPriceDistributionHtml(meta.resultStats || {});
+    els.resultsMeta.innerHTML = '<button type="button" class="results-meta-button" id="queryResultMetaButton">'
+      + '<span class="results-meta-main">'
+        + `<span class="results-meta-text">${escapeHtml(compact)}</span>`
+        + (meta.query ? '<span class="results-meta-hint">View query</span>' : '<span class="results-meta-hint">View details</span>')
+      + '</span>'
+      + pricePlot
+      + '</button>';
+    document.getElementById('queryResultMetaButton')?.addEventListener('click', openQueryResultDetail);
+  }
+
+  async function refreshQueryResultStats() {
+    const requestId = state.resultStatsRequestId + 1;
+    const statsKey = listingsStatsKey();
+    state.resultStatsRequestId = requestId;
+    try {
+      const payload = await fetchJson(buildListingsStatsUrl());
+      if (requestId !== state.resultStatsRequestId || !state.lastResultMeta || state.lastResultMeta.statsKey !== statsKey) {
+        return;
+      }
+      const resultStats = payload.resultStats || {};
+      state.cachedResultStatsKey = statsKey;
+      state.cachedResultStats = resultStats;
+      state.lastResultMeta.resultStats = resultStats;
+      state.lastResultMeta.resultStatsPending = false;
+      state.lastResultMeta.resultStatsElapsedMs = payload.stats?.elapsedMs ?? 0;
+      renderResultsMetaButton();
+      if (els.queryResultDetailDialog?.open) {
+        renderQueryResultDetail();
+      }
+    } catch (error) {
+      if (requestId !== state.resultStatsRequestId || !state.lastResultMeta || state.lastResultMeta.statsKey !== statsKey) {
+        return;
+      }
+      state.lastResultMeta.resultStatsPending = false;
+      state.lastResultMeta.resultStatsError = error.message || 'Unable to load result statistics.';
+      renderResultsMetaButton();
+    }
+  }
+
   function renderMeta(payload = {}) {
     const stats = payload.stats || {};
     const offset = stats.offset ?? 0;
@@ -1174,7 +1254,7 @@ export function createListingsViewer(config = {}) {
       .filter((value) => typeof value === 'number' && Number.isFinite(value));
     const priceMin = pricedRows.length ? Math.min(...pricedRows) : null;
     const priceMax = pricedRows.length ? Math.max(...pricedRows) : null;
-    const resultStats = {
+    const pageResultStats = {
       pricedCount: pricedRows.length,
       unpricedCount: Math.max(0, state.rows.length - pricedRows.length),
       priceMin,
@@ -1185,6 +1265,10 @@ export function createListingsViewer(config = {}) {
       statusCounts: countBy(state.rows, 'detail_status'),
       sourceCounts: countBy(state.rows, 'source'),
     };
+    const statsKey = listingsStatsKey();
+    const cachedResultStats = state.cachedResultStatsKey === statsKey ? state.cachedResultStats : null;
+    const resultStatsPending = stats.resultStatsDeferred === true && !stats.resultStats && !cachedResultStats;
+    const resultStats = stats.resultStats || cachedResultStats || (resultStatsPending ? null : pageResultStats);
     state.lastResultMeta = {
       shown: state.rows.length,
       total: state.total,
@@ -1195,20 +1279,12 @@ export function createListingsViewer(config = {}) {
       window: `${offset}-${offset + state.rows.length}`,
       warnings,
       resultStats,
+      resultStatsPending,
+      resultStatsError: '',
+      resultStatsElapsedMs: stats.resultStats ? (stats.elapsedMs ?? 0) : 0,
+      statsKey,
     };
-    const compact = [
-      `Showing ${state.rows.length} of ${state.total}`,
-      `${stats.elapsedMs ?? 0}ms`,
-      warnings.length ? 'warning' : '',
-    ].filter(Boolean).join(' · ');
-    els.resultsMeta.innerHTML = '<button type="button" class="results-meta-button" id="queryResultMetaButton">'
-      + '<span class="results-meta-main">'
-        + `<span class="results-meta-text">${escapeHtml(compact)}</span>`
-        + (state.q ? '<span class="results-meta-hint">View query</span>' : '<span class="results-meta-hint">View details</span>')
-      + '</span>'
-      + renderCompactPriceDistributionHtml(resultStats)
-      + '</button>';
-    document.getElementById('queryResultMetaButton')?.addEventListener('click', openQueryResultDetail);
+    renderResultsMetaButton();
   }
 
   function renderQueryResultDetail() {
@@ -1235,6 +1311,7 @@ export function createListingsViewer(config = {}) {
         ['Hidden queued', meta.hiddenQueued || 0],
         ['Sort', meta.sort || '-'],
         ['Query time', `${meta.elapsedMs || 0}ms`],
+        ['Statistics', meta.resultStatsPending ? 'Loading full result' : (meta.resultStatsError || `${meta.resultStatsElapsedMs || 0}ms`)],
         ['Window', meta.window || '-'],
         ['Priced rows', `${resultStats.pricedCount || 0} priced / ${resultStats.unpricedCount || 0} unpriced`],
         ['Price span', priceSpan],

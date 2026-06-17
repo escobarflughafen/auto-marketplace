@@ -64,6 +64,7 @@ const {
   buildListingsQuery,
   buildListingIdsQuery,
   buildCountQuery,
+  buildListingsStatsQueries,
 } = require('./marketplace-homepage-query');
 const {
   completeLiteKql,
@@ -2564,6 +2565,73 @@ function writeCsv(response, filename, rows, fields) {
   response.end(`${renderCsv(rows, fields)}\n`);
 }
 
+function nullableNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeCountRows(rows) {
+  return (rows || [])
+    .map((row) => [String(row.label || 'unknown'), Number.parseInt(row.count, 10) || 0])
+    .filter((item) => item[1] > 0);
+}
+
+function buildPriceHistogramFromBuckets(bucketRows, histogramQuery, pricedCount) {
+  const min = nullableNumber(histogramQuery.min);
+  const max = nullableNumber(histogramQuery.max);
+  const total = Number.parseInt(pricedCount, 10) || 0;
+  if (!total || min === null || max === null) {
+    return [];
+  }
+  if (min === max) {
+    return [{ min, max, count: total }];
+  }
+
+  const binCount = Math.max(2, histogramQuery.binCount || 6);
+  const width = Number(histogramQuery.width) > 0 ? Number(histogramQuery.width) : (max - min) / binCount;
+  const counts = new Map((bucketRows || []).map((row) => [
+    Number.parseInt(row.bucket, 10) || 0,
+    Number.parseInt(row.count, 10) || 0,
+  ]));
+  return Array.from({ length: binCount }, (_item, index) => ({
+    min: min + width * index,
+    max: index === binCount - 1 ? max : min + width * (index + 1),
+    count: counts.get(index) || 0,
+  }));
+}
+
+function readListingsResultStats(db, options = {}) {
+  const queries = buildListingsStatsQueries(options);
+  const summary = db.prepare(queries.priceSummary.sql).get(...queries.priceSummary.params) || {};
+  const pricedCount = Number.parseInt(summary.pricedCount, 10) || 0;
+  const priceMin = nullableNumber(summary.priceMin);
+  const priceMax = nullableNumber(summary.priceMax);
+  const histogramQuery = queries.priceHistogram({
+    min: priceMin,
+    max: priceMax,
+    binCount: 6,
+  });
+  const histogramRows = pricedCount > 0
+    ? db.prepare(histogramQuery.sql).all(...histogramQuery.params)
+    : [];
+  const median = pricedCount > 0
+    ? db.prepare(queries.priceMedian.sql).get(...queries.priceMedian.params)
+    : {};
+
+  const totalRows = Number.parseInt(summary.totalRows, 10) || 0;
+  return {
+    pricedCount,
+    unpricedCount: Math.max(0, totalRows - pricedCount),
+    priceMin,
+    priceMax,
+    priceAverage: nullableNumber(summary.priceAverage),
+    priceMedian: nullableNumber(median?.priceMedian),
+    priceHistogram: buildPriceHistogramFromBuckets(histogramRows, histogramQuery, pricedCount),
+    statusCounts: normalizeCountRows(db.prepare(queries.statusCounts.sql).all(...queries.statusCounts.params)),
+    sourceCounts: normalizeCountRows(db.prepare(queries.sourceCounts.sql).all(...queries.sourceCounts.params)),
+  };
+}
+
 function writeAuthError(response, access) {
   if (!access.role) {
     writeJson(response, 401, { error: 'Missing or invalid API token' });
@@ -3289,6 +3357,32 @@ function createServer(options) {
       return;
     }
 
+    if (requestUrl.pathname === '/api/listings/stats') {
+      const query = requestUrl.searchParams.get('q') || '';
+      const excludeListingIds = normalizeListingIds(requestUrl.searchParams.getAll('excludeListingId'));
+
+      try {
+        const startedAt = process.hrtime.bigint();
+        const resultStats = readListingsResultStats(db, { query, excludeListingIds });
+        const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
+        writeJson(response, 200, {
+          query,
+          resultStats,
+          stats: {
+            elapsedMs,
+            totalRows: resultStats.pricedCount + resultStats.unpricedCount,
+          },
+        });
+      } catch (error) {
+        writeJson(response, error.statusCode || 400, {
+          error: error.message,
+          query,
+          diagnostics: error.diagnostics || [],
+        });
+      }
+      return;
+    }
+
     if (requestUrl.pathname === '/api/listings') {
       const query = requestUrl.searchParams.get('q') || '';
       const limit = requestUrl.searchParams.get('limit') || '50';
@@ -3320,6 +3414,7 @@ function createServer(options) {
             totalRows: total,
             limit: listingsQuery.limit,
             offset: listingsQuery.offset,
+            resultStatsDeferred: true,
           },
         });
       } catch (error) {
@@ -3940,4 +4035,5 @@ module.exports = {
   updateWorkflowRunWithLifecycleEvent,
   isBrowserWorkerType,
   isExclusiveBrowserWorkerType,
+  createServer,
 };
