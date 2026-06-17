@@ -1425,7 +1425,8 @@ button:not(:disabled):hover,
   gap: 8px;
   flex-wrap: wrap;
 }
-.history-toggle-stats-button {
+.history-toggle-stats-button,
+.history-print-button {
   padding: 5px 8px;
   font-size: 12px;
 }

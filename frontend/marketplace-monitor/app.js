@@ -130,6 +130,7 @@ const els = {
   historyStatus: document.getElementById('historyStatus'),
   historyInventoryStatsRow: document.getElementById('historyInventoryStatsRow'),
   historyToggleStatsButton: document.getElementById('historyToggleStatsButton'),
+  historyPrintButton: document.getElementById('historyPrintButton'),
   historySoldRangeSelect: document.getElementById('historySoldRangeSelect'),
   historyDocumentSelect: document.getElementById('historyDocumentSelect'),
   historyMergeSourceSelect: document.getElementById('historyMergeSourceSelect'),
@@ -546,7 +547,21 @@ function renderHistoryStats() {
     return;
   }
 
-  const rows = store.purchaseHistory || [];
+  const cards = historySummaryCards(store.purchaseHistory || []);
+  els.historyInventoryStatsRow.innerHTML = cards.map(([label, value, meta]) => (
+    '<div class="inventory-stat">'
+      + `<div class="inventory-stat-label">${html(label)}</div>`
+      + `<div class="inventory-stat-value">${html(value || '-')}</div>`
+      + `<div class="process-meta">${html(meta || '')}</div>`
+    + '</div>'
+  )).join('');
+}
+
+function currentHistoryDocument() {
+  return store.purchaseHistoryDocuments.find((document) => document.document_id === selectedHistoryDocumentId()) || null;
+}
+
+function historySummaryCards(rows = store.purchaseHistory || []) {
   const byStatus = { hold: [], listed: [], sold: [] };
   for (const row of rows) {
     byStatus[inventoryStatusFromHistoryRow(row)]?.push(row);
@@ -558,20 +573,156 @@ function renderHistoryStats() {
   const listedValue = sumMoney(byStatus.listed, 'list_price_cad');
   const soldRevenue = sumMoney(soldRows, 'sold_price_cad');
   const realizedProfit = sumMoney(soldRows, 'realized_profit_cad');
-  const cards = [
+  return [
     ['Items', String(rows.length), `${byStatus.hold.length} hold / ${byStatus.listed.length} listed / ${byStatus.sold.length} sold`],
     ['Active cost', formatMoney(activeCost), 'hold + listed cost basis'],
     ['Listed value', formatMoney(listedValue), 'current asking price'],
     ['Sold revenue', formatMoney(soldRevenue), `${soldRows.length} sold, ${soldRange}`],
     ['Realized profit', formatMoney(realizedProfit), `avg ROI ${averageRoi(soldRows) || '-'}, ${soldRange}`],
   ];
-  els.historyInventoryStatsRow.innerHTML = cards.map(([label, value, meta]) => (
-    '<div class="inventory-stat">'
-      + `<div class="inventory-stat-label">${html(label)}</div>`
-      + `<div class="inventory-stat-value">${html(value || '-')}</div>`
-      + `<div class="process-meta">${html(meta || '')}</div>`
+}
+
+function historyPrintRowHtml(row) {
+  const title = titleFromHistoryRow(row);
+  const identity = [row.brand, row.model, row.mount].filter(Boolean).join(' / ');
+  const dates = [
+    row.purchase_at ? `Bought ${compactDate(row.purchase_at)}` : '',
+    row.listed_at ? `Listed ${compactDate(row.listed_at)}` : '',
+    row.sold_at ? `Sold ${compactDate(row.sold_at)}` : '',
+  ].filter(Boolean).join(' / ');
+  const notes = String(row.notes || '').trim();
+  return '<tr>'
+    + '<td>'
+      + `<div class="print-item-title">${html(title || '-')}</div>`
+      + `<div class="print-muted">${html(identity)}</div>`
+      + (notes ? `<div class="print-note">${html(notes)}</div>` : '')
+    + '</td>'
+    + `<td>${html(row.subcategory || '')}</td>`
+    + `<td>${html(originalPackageLabel(row._originalPackage))}</td>`
+    + `<td class="num">${html(formatMoney(row._cost) || '-')}</td>`
+    + `<td class="num">${html(formatMoney(row._netCost) || '-')}</td>`
+    + `<td class="num">${html(formatMoney(row._price) || '-')}</td>`
+    + `<td>${html(row._status || '')}</td>`
+    + `<td class="num">${html(formatMoney(row._profit) || '-')}<div class="print-muted">${html(formatPercent(row._roi) || '')}</div></td>`
+    + `<td class="num">${html(formatPercent(row._margin) || '-')}</td>`
+    + `<td class="num">${Number.isFinite(row._daysHeld) ? html(row._daysHeld) : ''}</td>`
+    + `<td>${html(row._result || '')}</td>`
+    + `<td>${html(dates)}</td>`
+  + '</tr>';
+}
+
+function printThemeTokens() {
+  const styles = getComputedStyle(document.documentElement);
+  const token = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+  return {
+    ink: token('--ink', '#0d0015'),
+    muted: token('--muted', '#5d5368'),
+    line: token('--line', '#0d0015'),
+    lineSoft: token('--line-soft', 'rgba(13,0,21,.18)'),
+    fill: token('--fill', '#f8f8fa'),
+    fillStrong: token('--fill-strong', '#ececf1'),
+    accent: token('--accent-strong', '#fccc0a'),
+    brand: token('--brand-bg', '#ff6319'),
+    banner: token('--banner-bg', '#000000'),
+    bannerInk: token('--banner-ink', '#ffffff'),
+    sans: token('--sans', '"Univers","Helvetica Neue","Segoe UI","YuGothic",Arial,sans-serif'),
+  };
+}
+
+function historyPrintDocumentHtml(rows) {
+  const historyDocument = currentHistoryDocument();
+  const theme = printThemeTokens();
+  const generatedAt = new Date().toLocaleString();
+  const sortLabel = `${store.historySort.key} ${store.historySort.direction}`;
+  const cards = historySummaryCards(store.purchaseHistory || []);
+  const bodyRows = rows.length
+    ? rows.map(historyPrintRowHtml).join('')
+    : '<tr><td colspan="12" class="empty">No trade history rows loaded.</td></tr>';
+  return '<!doctype html>'
+    + '<html><head><meta charset="utf-8">'
+    + '<title>Trade History Print</title>'
+    + '<style>'
+      + '@page{size:landscape;margin:10mm;}'
+      + `:root{--ink:${theme.ink};--muted:${theme.muted};--line:${theme.line};--line-soft:${theme.lineSoft};--fill:${theme.fill};--fill-strong:${theme.fillStrong};--accent:${theme.accent};--brand:${theme.brand};--banner:${theme.banner};--banner-ink:${theme.bannerInk};--sans:${theme.sans};}`
+      + 'body{font-family:var(--sans);color:var(--ink);background:#fff;margin:0;font-size:10.5px;line-height:1.25;}'
+      + '.print-page{padding:14px;}'
+      + '.app-rail{display:flex;align-items:center;height:30px;background:var(--banner);color:var(--banner-ink);margin-bottom:10px;}'
+      + '.brand-block{align-self:stretch;width:42px;background:var(--brand);border-right:1px solid var(--banner);}'
+      + '.rail-title{padding:0 10px;font-size:12px;font-weight:750;text-transform:uppercase;}'
+      + '.print-header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;border:1px solid var(--line);border-bottom:3px solid var(--accent);padding:10px 12px;margin-bottom:10px;background:#fff;}'
+      + 'h1{margin:0;font-size:20px;line-height:1.05;font-weight:800;}'
+      + '.meta{color:var(--muted);font-size:10.5px;margin-top:4px;}'
+      + '.summary{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid var(--line);border-bottom:0;margin:0 0 10px;background:var(--fill);}'
+      + '.card{min-width:0;padding:8px 10px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);background:#fff;}'
+      + '.card:last-child{border-right:0;}'
+      + '.label{font-size:9px;font-weight:800;text-transform:uppercase;color:var(--muted);letter-spacing:0;}'
+      + '.value{font-size:17px;font-weight:800;margin-top:3px;color:var(--ink);}'
+      + '.hint{color:var(--muted);margin-top:2px;font-size:9.5px;}'
+      + 'table{width:100%;border-collapse:collapse;table-layout:fixed;border:1px solid var(--line);}'
+      + 'thead{display:table-header-group;}'
+      + 'th{background:var(--fill-strong);color:var(--ink);font-size:9px;text-transform:uppercase;text-align:left;border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:5px 6px;font-weight:800;}'
+      + 'td{vertical-align:top;border-right:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft);padding:5px 6px;overflow-wrap:anywhere;}'
+      + 'th:last-child,td:last-child{border-right:0;}'
+      + 'tr{break-inside:avoid;}'
+      + 'tbody tr:nth-child(even) td{background:var(--fill);}'
+      + '.num{text-align:right;white-space:nowrap;}'
+      + '.print-item-title{font-weight:750;}'
+      + '.print-muted,.print-note{color:var(--muted);font-size:9.5px;margin-top:2px;}'
+      + '.print-note{font-style:italic;}'
+      + '.empty{text-align:center;color:var(--muted);padding:18px;}'
+      + '@media print{.print-page{padding:0;}.no-print{display:none!important;}}'
+    + '</style></head><body>'
+    + '<div class="print-page">'
+      + '<div class="app-rail"><div class="brand-block"></div><div class="rail-title">Marketplace Monitor</div></div>'
+      + '<div class="print-header">'
+        + '<div>'
+          + '<h1>Trade History</h1>'
+          + `<div class="meta">${html(historyDocument?.name || 'Current document')} - ${html(rows.length)} rows</div>`
+        + '</div>'
+        + '<div class="meta">'
+          + `<div>Generated ${html(generatedAt)}</div>`
+          + `<div>Sold range ${html(soldRangeLabel(store.historySoldRange))}</div>`
+          + `<div>Sort ${html(sortLabel)}</div>`
+        + '</div>'
+      + '</div>'
+      + '<div class="summary">'
+        + cards.map(([label, value, meta]) => (
+          '<div class="card">'
+            + `<div class="label">${html(label)}</div>`
+            + `<div class="value">${html(value || '-')}</div>`
+            + `<div class="hint">${html(meta || '')}</div>`
+          + '</div>'
+        )).join('')
+      + '</div>'
+      + '<table>'
+        + '<colgroup>'
+          + '<col style="width:24%"><col style="width:8%"><col style="width:7%"><col style="width:7%"><col style="width:7%"><col style="width:7%">'
+          + '<col style="width:7%"><col style="width:9%"><col style="width:7%"><col style="width:5%"><col style="width:7%"><col style="width:12%">'
+        + '</colgroup>'
+        + '<thead><tr>'
+          + '<th>Item</th><th>Kind</th><th>Package</th><th>Cost</th><th>Net cost</th><th>Price</th>'
+          + '<th>Status</th><th>Profit / ROI</th><th>Margin</th><th>Days</th><th>Result</th><th>Dates</th>'
+        + '</tr></thead>'
+        + `<tbody>${bodyRows}</tbody>`
+      + '</table>'
     + '</div>'
-  )).join('');
+    + '</body></html>';
+}
+
+function printPurchaseHistory() {
+  const rows = historyTableData(sortRows(store.purchaseHistory || [], store.historySort, historySortValue));
+  const printWindow = window.open('', '_blank', 'width=1200,height=800');
+  if (!printWindow) {
+    alert('Print window was blocked. Allow pop-ups for this site and try again.');
+    return;
+  }
+  printWindow.document.open();
+  printWindow.document.write(historyPrintDocumentHtml(rows));
+  printWindow.document.close();
+  printWindow.focus();
+  setTimeout(() => {
+    printWindow.print();
+  }, 150);
 }
 
 function sortDirectionMultiplier(direction) {
@@ -4925,6 +5076,7 @@ function bindEvents() {
   document.getElementById('historyEditCloseButton')?.addEventListener('click', () => els.historyEditDialog?.close());
   document.getElementById('historyEditCancelButton')?.addEventListener('click', () => els.historyEditDialog?.close());
   els.historyLinkAddButton?.addEventListener('click', addHistoryListingLink);
+  els.historyPrintButton?.addEventListener('click', printPurchaseHistory);
   document.getElementById('eventRegistryRefreshButton')?.addEventListener('click', async () => {
     try {
       await loadEventRegistry();
