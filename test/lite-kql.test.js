@@ -64,3 +64,14 @@ test('completeLiteKql suggests fields, operators, and enum values from cursor co
   const valueCompletion = completeLiteKql({ query: 'listings | where status == ', cursor: 'listings | where status == '.length });
   assert.ok(valueCompletion.suggestions.some((item) => item.label === 'pending'));
 });
+
+test('completeLiteKql supports trade history source fields and values', () => {
+  const sourceCompletion = completeLiteKql({ query: 'his', cursor: 'his'.length });
+  assert.ok(sourceCompletion.suggestions.some((item) => item.label === 'history'));
+
+  const fieldCompletion = completeLiteKql({ query: 'history | where pro', cursor: 'history | where pro'.length });
+  assert.ok(fieldCompletion.suggestions.some((item) => item.label === 'profit'));
+
+  const valueCompletion = completeLiteKql({ query: 'history | where status == ', cursor: 'history | where status == '.length });
+  assert.ok(valueCompletion.suggestions.some((item) => item.label === 'sold'));
+});

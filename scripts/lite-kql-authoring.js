@@ -63,6 +63,13 @@ function snippetSuggestions(start, end) {
       detail: 'Title and max price',
       score: 90,
     },
+    {
+      label: 'sold trade history',
+      kind: 'snippet',
+      insertText: 'history | where status == "sold" | sort by profit desc',
+      detail: 'Sold trade history by profit',
+      score: 82,
+    },
   ].map((item) => withReplacement(item, start, end));
 }
 
@@ -107,11 +114,18 @@ function completeLiteKql(input = {}) {
   const previous = tokenBeforeCursor(tokens, range.start);
   const active = tokenAtCursor(tokens, cursor);
   const stageToken = segmentTokens[0];
+  const tablePosition = !query.slice(0, cursor).includes('|')
+    && (
+      !query.slice(0, cursor).trim()
+      || (tokens.length <= 1 && (!active || active.type === 'identifier'))
+    );
   const suggestions = [];
 
-  if (!query.slice(0, cursor).trim()) {
+  if (tablePosition) {
     suggestions.push(...sourceSuggestions(range.start, range.end));
-    suggestions.push(...snippetSuggestions(range.start, range.end));
+    if (!range.prefix) {
+      suggestions.push(...snippetSuggestions(range.start, range.end));
+    }
   } else if (previous?.type === 'pipe' || (stageToken && stageToken.start >= range.start && segmentTokens.length <= 1)) {
     suggestions.push(...STAGE_SUGGESTIONS.map((item) => withReplacement(item, range.start, range.end)));
   } else if (stageToken?.lower === 'where') {

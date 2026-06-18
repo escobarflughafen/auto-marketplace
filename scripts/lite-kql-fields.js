@@ -63,6 +63,32 @@ const SOURCES = {
       { name: 'created_at', label: 'Created', type: 'date', operators: COMMON_DATE_OPERATORS },
     ],
   },
+  history: {
+    label: 'Trade History',
+    fields: [
+      { name: 'id', label: 'Record ID', type: 'text', aliases: ['record_id'], operators: COMMON_TEXT_OPERATORS },
+      { name: 'title', label: 'Item title', type: 'text', aliases: ['item'], operators: COMMON_TEXT_OPERATORS },
+      { name: 'brand', label: 'Brand', type: 'text', operators: COMMON_TEXT_OPERATORS },
+      { name: 'model', label: 'Model', type: 'text', operators: COMMON_TEXT_OPERATORS },
+      { name: 'mount', label: 'Mount', type: 'text', operators: COMMON_TEXT_OPERATORS },
+      { name: 'kind', label: 'Kind', type: 'enum', aliases: ['subcategory'], values: ['camera', 'lens', 'accessory', 'other'], operators: COMMON_ENUM_OPERATORS },
+      { name: 'status', label: 'Inventory status', type: 'enum', aliases: ['inventory_status'], values: ['hold', 'listed', 'sold'], operators: COMMON_ENUM_OPERATORS },
+      { name: 'result', label: 'Result', type: 'enum', aliases: ['outcome'], values: ['pending', 'profitable', 'break even', 'loss'], operators: COMMON_ENUM_OPERATORS },
+      { name: 'package', label: 'Original package', type: 'enum', aliases: ['original_package'], values: ['yes', 'no', 'unknown'], operators: COMMON_ENUM_OPERATORS },
+      { name: 'condition', label: 'Condition', type: 'text', aliases: ['condition_grade'], operators: COMMON_TEXT_OPERATORS },
+      { name: 'cost', label: 'Purchase cost', type: 'number', aliases: ['purchase_price_cad'], operators: COMMON_NUMBER_OPERATORS },
+      { name: 'net_cost', label: 'Net cost', type: 'number', aliases: ['net_cost_cad'], operators: COMMON_NUMBER_OPERATORS },
+      { name: 'price', label: 'Current or sold price', type: 'number', aliases: ['sold_price_cad', 'list_price_cad'], operators: COMMON_NUMBER_OPERATORS },
+      { name: 'profit', label: 'Profit', type: 'number', aliases: ['realized_profit_cad'], operators: COMMON_NUMBER_OPERATORS },
+      { name: 'roi', label: 'ROI percent', type: 'number', aliases: ['roi_percent'], operators: COMMON_NUMBER_OPERATORS },
+      { name: 'margin', label: 'Margin percent', type: 'number', operators: COMMON_NUMBER_OPERATORS },
+      { name: 'days', label: 'Days held', type: 'number', aliases: ['days_held'], operators: COMMON_NUMBER_OPERATORS },
+      { name: 'purchase_at', label: 'Purchase date', type: 'date', aliases: ['purchased'], operators: COMMON_DATE_OPERATORS },
+      { name: 'listed_at', label: 'Listed date', type: 'date', operators: COMMON_DATE_OPERATORS },
+      { name: 'sold_at', label: 'Sold date', type: 'date', aliases: ['sold'], operators: COMMON_DATE_OPERATORS },
+      { name: 'notes', label: 'Notes', type: 'text', operators: COMMON_TEXT_OPERATORS },
+    ],
+  },
 };
 
 function sourceNames() {

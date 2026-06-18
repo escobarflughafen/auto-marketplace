@@ -91,6 +91,8 @@ const store = {
   savedQueryOverviewMode: localStorage.getItem(SAVED_QUERY_OVERVIEW_MODE_STORAGE_KEY) === 'all' ? 'all' : 'pinned',
   workflowContinuousRefresh: localStorage.getItem(WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY) === 'true',
   historySort: { key: 'title', direction: 'asc' },
+  lastHistoryQuery: '',
+  lastHistoryQueryResult: null,
   summarySignature: '',
   workflowSignature: '',
   processSignature: '',
@@ -452,6 +454,76 @@ function originalPackageLabel(value) {
       : 'Unknown';
 }
 
+const HISTORY_QUERY_SOURCE_ALIASES = new Set(['history', 'trade', 'trades', 'trade_history']);
+const HISTORY_QUERY_FIELD_ALIASES = new Map([
+  ['id', 'record_id'],
+  ['record_id', 'record_id'],
+  ['title', 'title'],
+  ['item', 'title'],
+  ['brand', 'brand'],
+  ['model', 'model'],
+  ['mount', 'mount'],
+  ['kind', 'subcategory'],
+  ['subcategory', 'subcategory'],
+  ['status', 'status'],
+  ['inventory_status', 'status'],
+  ['result', 'result'],
+  ['outcome', 'result'],
+  ['package', 'package'],
+  ['original_package', 'package'],
+  ['condition', 'condition_grade'],
+  ['condition_grade', 'condition_grade'],
+  ['cost', 'cost'],
+  ['purchase_price', 'cost'],
+  ['purchase_price_cad', 'cost'],
+  ['net_cost', 'net_cost'],
+  ['net_cost_cad', 'net_cost'],
+  ['price', 'price'],
+  ['sold_price', 'price'],
+  ['sold_price_cad', 'price'],
+  ['list_price', 'price'],
+  ['list_price_cad', 'price'],
+  ['profit', 'profit'],
+  ['realized_profit', 'profit'],
+  ['realized_profit_cad', 'profit'],
+  ['roi', 'roi'],
+  ['roi_percent', 'roi'],
+  ['margin', 'margin'],
+  ['days', 'days'],
+  ['days_held', 'days'],
+  ['purchase_at', 'purchase_at'],
+  ['purchased', 'purchase_at'],
+  ['listed_at', 'listed_at'],
+  ['sold_at', 'sold_at'],
+  ['sold', 'sold_at'],
+  ['notes', 'notes'],
+  ['text', 'text'],
+]);
+
+const HISTORY_QUERY_NUMERIC_FIELDS = new Set(['cost', 'net_cost', 'price', 'profit', 'roi', 'margin', 'days']);
+const HISTORY_QUERY_DATE_FIELDS = new Set(['purchase_at', 'listed_at', 'sold_at']);
+const HISTORY_QUERY_SORT_KEYS = new Map([
+  ['title', 'title'],
+  ['item', 'title'],
+  ['kind', 'subcategory'],
+  ['subcategory', 'subcategory'],
+  ['package', 'originalPackage'],
+  ['cost', 'cost'],
+  ['net_cost', 'netCost'],
+  ['price', 'price'],
+  ['status', 'status'],
+  ['profit', 'profit'],
+  ['roi', 'roi'],
+  ['margin', 'margin'],
+  ['days', 'daysHeld'],
+  ['days_held', 'daysHeld'],
+  ['result', 'result'],
+  ['purchase_at', 'date'],
+  ['listed_at', 'date'],
+  ['sold_at', 'date'],
+  ['date', 'date'],
+]);
+
 function applyOriginalPackageStatus(row, status) {
   const normalizedStatus = status === 'yes' || status === 'no' ? status : 'unknown';
   const included = historyListItems(row.included_items).filter((item) => !isOriginalPackageItem(item));
@@ -466,6 +538,388 @@ function applyOriginalPackageStatus(row, status) {
     bundle_type: included.length > 1 ? 'bundle' : row.bundle_type || 'single',
     included_items: included.join('|'),
     missing_items: missing.join('|'),
+  };
+}
+
+function queryParamFromLocation() {
+  return new URL(window.location.href).searchParams.get('q') || '';
+}
+
+function historyQuerySource(query = '') {
+  const firstWord = String(query || '').trim().split(/\s+/, 1)[0]?.toLowerCase() || '';
+  return HISTORY_QUERY_SOURCE_ALIASES.has(firstWord) ? firstWord : '';
+}
+
+function isHistoryQuery(query = '') {
+  return Boolean(historyQuerySource(query));
+}
+
+function currentHistoryQuery() {
+  const query = queryParamFromLocation();
+  return isHistoryQuery(query) ? query.trim() : '';
+}
+
+function tokenizeHistoryQuery(value = '') {
+  const tokens = [];
+  const pattern = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(==|!=|<=|>=|=~|!~|\|\||&&|\.\.|[()|,<>])|(\S+)/g;
+  let match;
+  while ((match = pattern.exec(String(value || '')))) {
+    const text = match[1] ?? match[2] ?? match[3] ?? match[4] ?? '';
+    tokens.push({
+      text: String(text).replace(/\\(["'])/g, '$1'),
+      lower: String(text).toLowerCase(),
+    });
+  }
+  return tokens;
+}
+
+function splitHistoryQueryStages(query = '') {
+  const tokens = tokenizeHistoryQuery(query);
+  if (tokens.length && HISTORY_QUERY_SOURCE_ALIASES.has(tokens[0].lower)) {
+    tokens.shift();
+  }
+  if (tokens[0]?.text === '|') {
+    tokens.shift();
+  }
+  const stages = [];
+  let current = [];
+  for (const token of tokens) {
+    if (token.text === '|') {
+      if (current.length) stages.push(current);
+      current = [];
+    } else {
+      current.push(token);
+    }
+  }
+  if (current.length) stages.push(current);
+  return stages;
+}
+
+function normalizeHistoryQueryField(field) {
+  return HISTORY_QUERY_FIELD_ALIASES.get(String(field || '').toLowerCase()) || '';
+}
+
+function historyRowQueryText(row = {}) {
+  return [
+    row.record_id,
+    row.title,
+    row.brand,
+    row.model,
+    row.variant,
+    row.mount,
+    row.subcategory,
+    row.condition_grade,
+    row.notes,
+    row.included_items,
+    row.missing_items,
+    resultLabelFromHistoryRow(row),
+    inventoryStatusFromHistoryRow(row),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function historyQueryFieldValue(row = {}, field) {
+  switch (field) {
+    case 'record_id':
+      return row.record_id || '';
+    case 'title':
+      return titleFromHistoryRow(row);
+    case 'status':
+      return inventoryStatusFromHistoryRow(row);
+    case 'result':
+      return resultLabelFromHistoryRow(row);
+    case 'package':
+      return originalPackageStatus(row);
+    case 'cost':
+      return parseMoney(row.purchase_price_cad);
+    case 'net_cost':
+      return historyNetCost(row);
+    case 'price':
+      return historyPrice(row);
+    case 'profit':
+      return historyProfit(row);
+    case 'roi':
+      return historyRoiPercent(row);
+    case 'margin':
+      return historyMarginPercent(row);
+    case 'days':
+      return historyDaysHeld(row);
+    case 'text':
+      return historyRowQueryText(row);
+    default:
+      return row[field] || '';
+  }
+}
+
+function normalizeQueryOperator(operator) {
+  const normalized = String(operator || '').toLowerCase();
+  return normalized === '=' ? '==' : normalized;
+}
+
+function parseQueryNumber(value) {
+  const parsed = Number.parseFloat(String(value ?? '').replace(/[$,%\s,]/g, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseQueryDate(value) {
+  if (!value) return null;
+  const parsed = Date.parse(String(value).includes('T') ? value : `${value}T00:00:00`);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function compareHistoryText(actual, operator, expected) {
+  const left = String(actual ?? '').toLowerCase();
+  const right = String(expected ?? '').toLowerCase();
+  switch (operator) {
+    case '==':
+      return left === right;
+    case '!=':
+      return left !== right;
+    case 'contains':
+    case 'has':
+    case '=~':
+      return left.includes(right);
+    case '!contains':
+    case '!has':
+    case '!~':
+      return !left.includes(right);
+    case 'startswith':
+      return left.startsWith(right);
+    case '!startswith':
+      return !left.startsWith(right);
+    case 'endswith':
+      return left.endsWith(right);
+    case '!endswith':
+      return !left.endsWith(right);
+    default:
+      return false;
+  }
+}
+
+function compareHistoryScalar(actual, operator, expected, field) {
+  const normalizedOperator = normalizeQueryOperator(operator);
+  if (HISTORY_QUERY_NUMERIC_FIELDS.has(field)) {
+    const left = parseQueryNumber(actual);
+    const right = parseQueryNumber(expected);
+    if (left === null || right === null) return false;
+    if (normalizedOperator === '==') return left === right;
+    if (normalizedOperator === '!=') return left !== right;
+    if (normalizedOperator === '<') return left < right;
+    if (normalizedOperator === '<=') return left <= right;
+    if (normalizedOperator === '>') return left > right;
+    if (normalizedOperator === '>=') return left >= right;
+    return false;
+  }
+  if (HISTORY_QUERY_DATE_FIELDS.has(field)) {
+    const left = parseQueryDate(actual);
+    const right = parseQueryDate(expected);
+    if (left === null || right === null) return false;
+    if (normalizedOperator === '==') return left === right;
+    if (normalizedOperator === '!=') return left !== right;
+    if (normalizedOperator === '<') return left < right;
+    if (normalizedOperator === '<=') return left <= right;
+    if (normalizedOperator === '>') return left > right;
+    if (normalizedOperator === '>=') return left >= right;
+    return false;
+  }
+  return compareHistoryText(actual, normalizedOperator, expected);
+}
+
+function parseHistoryValueList(tokens, index) {
+  const values = [];
+  if (tokens[index]?.text !== '(') {
+    return {
+      values: tokens[index] ? [tokens[index].text] : [],
+      nextIndex: Math.min(index + 1, tokens.length),
+    };
+  }
+  let cursor = index + 1;
+  while (cursor < tokens.length && tokens[cursor]?.text !== ')') {
+    if (tokens[cursor]?.text !== ',') {
+      values.push(tokens[cursor].text);
+    }
+    cursor += 1;
+  }
+  return {
+    values,
+    nextIndex: tokens[cursor]?.text === ')' ? cursor + 1 : cursor,
+  };
+}
+
+function parseHistoryExpression(tokens = []) {
+  let index = 0;
+  const peek = () => tokens[index];
+  const consume = () => tokens[index++];
+  const isLogical = (value) => peek()?.lower === value
+    || (value === 'and' && peek()?.text === '&&')
+    || (value === 'or' && peek()?.text === '||');
+
+  function parseCondition() {
+    if (isLogical('not')) {
+      consume();
+      return { type: 'not', child: parsePrimary() };
+    }
+
+    const fieldToken = peek();
+    const field = normalizeHistoryQueryField(fieldToken?.text);
+    const operator = normalizeQueryOperator(tokens[index + 1]?.text);
+    if (field && ['==', '=', '!=', '=~', '!~', '<', '<=', '>', '>=', 'contains', '!contains', 'has', '!has', 'startswith', '!startswith', 'endswith', '!endswith', 'in', '!in', 'between'].includes(operator)) {
+      consume();
+      consume();
+      if (operator === 'in' || operator === '!in') {
+        const parsed = parseHistoryValueList(tokens, index);
+        index = parsed.nextIndex;
+        return { type: 'condition', field, operator, values: parsed.values };
+      }
+      if (operator === 'between') {
+        const first = consume()?.text;
+        if (peek()?.lower === 'and' || peek()?.text === '..') consume();
+        const second = consume()?.text;
+        return { type: 'condition', field, operator, values: [first, second].filter((value) => value !== undefined) };
+      }
+      return { type: 'condition', field, operator, values: [consume()?.text].filter((value) => value !== undefined) };
+    }
+
+    const term = consume();
+    if (!term || ['and', 'or', ')'].includes(term.lower)) return null;
+    return { type: 'term', value: term.text };
+  }
+
+  function parsePrimary() {
+    if (peek()?.text === '(') {
+      consume();
+      const expression = parseOr();
+      if (peek()?.text === ')') consume();
+      return expression;
+    }
+    return parseCondition();
+  }
+
+  function parseAnd() {
+    let node = parsePrimary();
+    while (index < tokens.length && isLogical('and')) {
+      consume();
+      node = { type: 'and', left: node, right: parsePrimary() };
+    }
+    return node;
+  }
+
+  function parseOr() {
+    let node = parseAnd();
+    while (index < tokens.length && isLogical('or')) {
+      consume();
+      node = { type: 'or', left: node, right: parseAnd() };
+    }
+    return node;
+  }
+
+  return parseOr();
+}
+
+function historyRowMatchesExpression(row, expression) {
+  if (!expression) return true;
+  if (expression.type === 'term') {
+    return historyRowQueryText(row).includes(String(expression.value || '').toLowerCase());
+  }
+  if (expression.type === 'not') {
+    return !historyRowMatchesExpression(row, expression.child);
+  }
+  if (expression.type === 'and') {
+    return historyRowMatchesExpression(row, expression.left) && historyRowMatchesExpression(row, expression.right);
+  }
+  if (expression.type === 'or') {
+    return historyRowMatchesExpression(row, expression.left) || historyRowMatchesExpression(row, expression.right);
+  }
+  if (expression.type !== 'condition') return true;
+  const actual = historyQueryFieldValue(row, expression.field);
+  const operator = normalizeQueryOperator(expression.operator);
+  if (operator === 'in' || operator === '!in') {
+    const matched = expression.values.some((value) => compareHistoryScalar(actual, '==', value, expression.field));
+    return operator === '!in' ? !matched : matched;
+  }
+  if (operator === 'between') {
+    const [first, second] = expression.values;
+    if (HISTORY_QUERY_NUMERIC_FIELDS.has(expression.field)) {
+      const left = parseQueryNumber(actual);
+      const min = parseQueryNumber(first);
+      const max = parseQueryNumber(second);
+      return left !== null && min !== null && max !== null && left >= Math.min(min, max) && left <= Math.max(min, max);
+    }
+    if (HISTORY_QUERY_DATE_FIELDS.has(expression.field)) {
+      const left = parseQueryDate(actual);
+      const min = parseQueryDate(first);
+      const max = parseQueryDate(second);
+      return left !== null && min !== null && max !== null && left >= Math.min(min, max) && left <= Math.max(min, max);
+    }
+    return false;
+  }
+  return compareHistoryScalar(actual, operator, expression.values[0], expression.field);
+}
+
+function parseHistoryQueryPlan(query = '') {
+  const stages = splitHistoryQueryStages(query);
+  const plan = {
+    query: String(query || '').trim(),
+    expression: null,
+    sortKey: '',
+    sortDirection: 'asc',
+    take: null,
+    skip: 0,
+    warnings: [],
+  };
+  for (const stage of stages) {
+    const head = stage[0]?.lower;
+    if (head === 'where') {
+      const expression = parseHistoryExpression(stage.slice(1));
+      plan.expression = plan.expression && expression
+        ? { type: 'and', left: plan.expression, right: expression }
+        : expression || plan.expression;
+    } else if (head === 'sort' || head === 'order') {
+      const byOffset = stage[1]?.lower === 'by' ? 2 : 1;
+      const field = String(stage[byOffset]?.text || '').toLowerCase();
+      plan.sortKey = HISTORY_QUERY_SORT_KEYS.get(field) || '';
+      plan.sortDirection = stage[byOffset + 1]?.lower === 'desc' ? 'desc' : 'asc';
+      if (field && !plan.sortKey) {
+        plan.warnings.push(`Unknown history sort field: ${field}`);
+      }
+    } else if (head === 'take' || head === 'limit') {
+      const value = Number.parseInt(stage[1]?.text, 10);
+      if (Number.isFinite(value) && value > 0) plan.take = Math.min(value, 1000);
+    } else if (head === 'skip') {
+      const value = Number.parseInt(stage[1]?.text, 10);
+      if (Number.isFinite(value) && value > 0) plan.skip = value;
+    }
+  }
+  return plan;
+}
+
+function applyHistoryQuery(rows = [], query = '') {
+  if (!isHistoryQuery(query)) {
+    return {
+      rows: sortRows(rows, store.historySort, historySortValue),
+      total: rows.length,
+      matched: rows.length,
+      query: '',
+      plan: null,
+      warnings: [],
+    };
+  }
+  const plan = parseHistoryQueryPlan(query);
+  const matched = plan.expression
+    ? rows.filter((row) => historyRowMatchesExpression(row, plan.expression))
+    : [...rows];
+  const sortState = plan.sortKey
+    ? { key: plan.sortKey, direction: plan.sortDirection }
+    : store.historySort;
+  const sorted = sortRows(matched, sortState, historySortValue);
+  const skipped = plan.skip ? sorted.slice(plan.skip) : sorted;
+  const limited = plan.take !== null ? skipped.slice(0, plan.take) : skipped;
+  return {
+    rows: limited,
+    total: rows.length,
+    matched: matched.length,
+    query: plan.query,
+    plan,
+    warnings: plan.warnings,
   };
 }
 
@@ -522,7 +976,7 @@ function filterRowsBySoldRange(rows, range) {
   });
 }
 
-function renderHistoryStats() {
+function renderHistoryStats(rows = store.purchaseHistory || []) {
   if (!els.historyInventoryStatsRow || !els.historyToggleStatsButton) {
     return;
   }
@@ -547,7 +1001,7 @@ function renderHistoryStats() {
     return;
   }
 
-  const cards = historySummaryCards(store.purchaseHistory || []);
+  const cards = historySummaryCards(rows);
   els.historyInventoryStatsRow.innerHTML = cards.map(([label, value, meta]) => (
     '<div class="inventory-stat">'
       + `<div class="inventory-stat-label">${html(label)}</div>`
@@ -634,7 +1088,7 @@ function historyPrintDocumentHtml(rows) {
   const theme = printThemeTokens();
   const generatedAt = new Date().toLocaleString();
   const sortLabel = `${store.historySort.key} ${store.historySort.direction}`;
-  const cards = historySummaryCards(store.purchaseHistory || []);
+  const cards = historySummaryCards(rows);
   const bodyRows = rows.length
     ? rows.map(historyPrintRowHtml).join('')
     : '<tr><td colspan="12" class="empty">No trade history rows loaded.</td></tr>';
@@ -710,7 +1164,9 @@ function historyPrintDocumentHtml(rows) {
 }
 
 function printPurchaseHistory() {
-  const rows = historyTableData(sortRows(store.purchaseHistory || [], store.historySort, historySortValue));
+  const rows = historyTableData(
+    store.lastHistoryQueryResult?.rows || applyHistoryQuery(store.purchaseHistory || [], currentHistoryQuery()).rows,
+  );
   const printWindow = window.open('', '_blank', 'width=1200,height=800');
   if (!printWindow) {
     alert('Print window was blocked. Allow pop-ups for this site and try again.');
@@ -1268,11 +1724,21 @@ function renderPurchaseHistory() {
     renderHistoryTableSkeleton();
     return;
   }
-  const rows = sortRows(store.purchaseHistory, store.historySort, historySortValue);
+  const historyQuery = currentHistoryQuery();
+  const queryResult = applyHistoryQuery(store.purchaseHistory, historyQuery);
   const selectedDocument = store.purchaseHistoryDocuments.find((document) => document.document_id === selectedHistoryDocumentId());
-  els.historyMeta.textContent = `${store.purchaseHistory.length} rows${selectedDocument ? ` in ${selectedDocument.name}` : ''}`;
-  renderHistoryStats();
-  renderHistoryTable(rows);
+  const documentLabel = selectedDocument ? ` in ${selectedDocument.name}` : '';
+  if (queryResult.query) {
+    const takeLabel = queryResult.plan?.take !== null ? ` / showing ${queryResult.rows.length}` : '';
+    const warningLabel = queryResult.warnings.length ? ` / ${queryResult.warnings.join(' ')}` : '';
+    els.historyMeta.textContent = `${queryResult.matched} of ${queryResult.total} rows${takeLabel}${documentLabel} / query: ${queryResult.query}${warningLabel}`;
+  } else {
+    els.historyMeta.textContent = `${store.purchaseHistory.length} rows${documentLabel}`;
+  }
+  store.lastHistoryQuery = historyQuery;
+  store.lastHistoryQueryResult = queryResult;
+  renderHistoryStats(queryResult.rows);
+  renderHistoryTable(queryResult.rows);
 }
 
 function buildHistoryFormRow(form = els.historyForm, existingRow = {}) {
@@ -3166,6 +3632,7 @@ function recommendationStatusFromQuery(query) {
 }
 
 function routeForQuerySource(source) {
+  if (source === 'history' || HISTORY_QUERY_SOURCE_ALIASES.has(source)) return '/history';
   if (source === 'recommendations') return '/history/recommendations';
   if (source === 'events') return '/review';
   if (source === 'workers') return '/workers';
@@ -3181,8 +3648,8 @@ async function routeQuerySource(source, query) {
       els.recommendationsStatusSelect.value = status;
     }
   }
-  await navigateToRoute(route);
   writeQueryParam(query);
+  await navigateToRoute(route);
   return true;
 }
 
@@ -4835,6 +5302,8 @@ async function runRouteLoader(routePath) {
       await loadRecommendations({ refreshBacklog: false });
     } else if (!store.purchaseHistoryLoaded) {
       await loadPurchaseHistory();
+    } else {
+      renderPurchaseHistory();
     }
   } else if (route.panel === 'opsPanel') {
     await loadWorkflows({ configOnly: true });

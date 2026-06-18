@@ -24,7 +24,7 @@ const SORT_BY_FIELD = {
 };
 
 const BACKLOG_STATUSES = new Set(['pending', 'error', 'processing']);
-const QUERY_SOURCES = new Set(['listings', 'events', 'workers', 'recommendations']);
+const QUERY_SOURCES = new Set(['listings', 'events', 'workers', 'recommendations', 'history', 'trade', 'trades', 'trade_history']);
 const TEXT_OPERATORS = ['contains', '!contains', '==', '!=', '=~', '!~', 'startswith', '!startswith', 'endswith', '!endswith', 'in', '!in'];
 const ENUM_OPERATORS = ['==', '!=', '=~', '!~', 'in', '!in'];
 const NUMBER_OPERATORS = ['==', '!=', '<', '<=', '>', '>=', 'between', 'in', '!in'];
@@ -56,6 +56,25 @@ const LOCAL_QUERY_SCHEMA = {
       { name: 'status', label: 'Status', type: 'enum', values: ['queued', 'saved', 'dismissed', 'cleared', 'ignored'], operators: ENUM_OPERATORS },
       { name: 'score', label: 'Score', type: 'number', operators: NUMBER_OPERATORS },
       { name: 'created_at', label: 'Created', type: 'date', operators: DATE_OPERATORS },
+    ],
+  },
+  history: {
+    label: 'Trade History',
+    fields: [
+      { name: 'title', label: 'Item title', type: 'text', aliases: ['item'], operators: TEXT_OPERATORS },
+      { name: 'brand', label: 'Brand', type: 'text', operators: TEXT_OPERATORS },
+      { name: 'model', label: 'Model', type: 'text', operators: TEXT_OPERATORS },
+      { name: 'kind', label: 'Kind', type: 'enum', aliases: ['subcategory'], values: ['camera', 'lens', 'accessory', 'other'], operators: ENUM_OPERATORS },
+      { name: 'status', label: 'Inventory status', type: 'enum', aliases: ['inventory_status'], values: ['hold', 'listed', 'sold'], operators: ENUM_OPERATORS },
+      { name: 'result', label: 'Result', type: 'enum', aliases: ['outcome'], values: ['pending', 'profitable', 'break even', 'loss'], operators: ENUM_OPERATORS },
+      { name: 'package', label: 'Original package', type: 'enum', aliases: ['original_package'], values: ['yes', 'no', 'unknown'], operators: ENUM_OPERATORS },
+      { name: 'cost', label: 'Purchase cost', type: 'number', aliases: ['purchase_price_cad'], operators: NUMBER_OPERATORS },
+      { name: 'net_cost', label: 'Net cost', type: 'number', aliases: ['net_cost_cad'], operators: NUMBER_OPERATORS },
+      { name: 'price', label: 'Current/sold price', type: 'number', aliases: ['sold_price_cad', 'list_price_cad'], operators: NUMBER_OPERATORS },
+      { name: 'profit', label: 'Profit', type: 'number', aliases: ['realized_profit_cad'], operators: NUMBER_OPERATORS },
+      { name: 'roi', label: 'ROI percent', type: 'number', aliases: ['roi_percent'], operators: NUMBER_OPERATORS },
+      { name: 'purchase_at', label: 'Purchase date', type: 'date', aliases: ['purchased'], operators: DATE_OPERATORS },
+      { name: 'sold_at', label: 'Sold date', type: 'date', aliases: ['sold'], operators: DATE_OPERATORS },
     ],
   },
   workers: {
@@ -108,6 +127,13 @@ const LOCAL_SNIPPET_SUGGESTIONS = [
     insertText: 'recommendations | where status == "saved"',
     detail: 'Trade & Match saved items',
     score: 85,
+  },
+  {
+    label: 'sold trade history',
+    kind: 'snippet',
+    insertText: 'history | where status == "sold" | sort by profit desc',
+    detail: 'Sold items by profit',
+    score: 82,
   },
 ];
 const SAVED_QUERY_STORAGE_KEY = 'marketplace-monitor-saved-queries';
@@ -484,6 +510,7 @@ function quoteQueryValue(value) {
 function querySourceFromText(query) {
   const firstStage = String(query || '').trim().split('|')[0]?.trim() || '';
   const firstWord = firstStage.match(/^([A-Za-z_][\w]*)\b/)?.[1]?.toLowerCase() || '';
+  if (['trade', 'trades', 'trade_history'].includes(firstWord)) return 'history';
   return QUERY_SOURCES.has(firstWord) ? firstWord : 'listings';
 }
 
@@ -806,7 +833,7 @@ export function createListingsViewer(config = {}) {
   }
 
   function highlightQueryText(value) {
-    const pattern = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|(==|!=|<=|>=|=~|!~|\.\.|\||[(),<>])|\b(where|sort|by|take|skip|summarize|count|and|or|not|in|between|contains|startswith|endswith|has|listings|events|workers|recommendations|asc|desc)\b|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*/gi;
+    const pattern = /"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|(==|!=|<=|>=|=~|!~|\.\.|\||[(),<>])|\b(where|sort|by|take|skip|summarize|count|and|or|not|in|between|contains|startswith|endswith|has|listings|events|workers|recommendations|history|trade|trades|trade_history|asc|desc)\b|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*/gi;
     let cursor = 0;
     let output = '';
     const text = String(value || '');
@@ -818,7 +845,7 @@ export function createListingsViewer(config = {}) {
         : /^-?\d/.test(token) ? 'number'
           : ['|', '==', '!=', '<=', '>=', '=~', '!~', '..', '(', ')', ',', '<', '>'].includes(token) ? 'operator'
             : ['where', 'sort', 'by', 'take', 'skip', 'summarize', 'count', 'and', 'or', 'not', 'in', 'between', 'contains', 'startswith', 'endswith', 'has', 'asc', 'desc'].includes(lower) ? 'keyword'
-              : ['listings', 'events', 'workers', 'recommendations'].includes(lower) ? 'source'
+              : ['listings', 'events', 'workers', 'recommendations', 'history', 'trade', 'trades', 'trade_history'].includes(lower) ? 'source'
                 : 'field';
       output += `<span class="query-token-${klass}">${escapeHtml(token)}</span>`;
       cursor = match.index + token.length;
