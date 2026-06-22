@@ -34,6 +34,7 @@ const {
   appendWorkflowEvent,
   getLatestListingEvent,
   scanPurchaseHistoryMatchesForListings,
+  upsertListingMediaForListing,
 } = require('./marketplace-homepage-db');
 const {
   DEFAULT_CREDENTIALS_PATH,
@@ -690,6 +691,32 @@ function buildJobCardEventContent(listing, workerId, extra = {}) {
   };
 }
 
+function persistDetailListingMedia(db, listingId, detailRecord) {
+  const thumbnails = Array.isArray(detailRecord?.thumbnails) ? detailRecord.thumbnails : [];
+  if (thumbnails.length === 0) {
+    return [];
+  }
+
+  return upsertListingMediaForListing(
+    db,
+    listingId,
+    thumbnails.map((thumbnail, index) => ({
+      source: 'detail_thumbnail',
+      sourceUrl: thumbnail.src || '',
+      artifactPath: thumbnail.screenshotPath || '',
+      altText: thumbnail.alt || '',
+      width: thumbnail.width,
+      height: thumbnail.height,
+      position: index,
+      metadata: {
+        thumbnailIndex: index,
+        captureSource: 'detail_resolver',
+      },
+    })),
+    { source: 'detail_thumbnail' },
+  );
+}
+
 function contentHashForDetailEvent(content) {
   return hashContent(content.comparable?.detail || content.detail || {});
 }
@@ -786,6 +813,7 @@ async function processBatch(page, db, options, state = {}) {
             capture.detailRecord,
             capture.detailRecord.listingContent?.availabilityReason || inactiveStatus,
           );
+          persistDetailListingMedia(db, listing.listing_id, capture.detailRecord);
         });
         await appendLog(
           options.logFile,
@@ -838,6 +866,7 @@ async function processBatch(page, db, options, state = {}) {
         }
 
         markHomepageListingProcessed(db, listing.listing_id, capture.detailRecord);
+        persistDetailListingMedia(db, listing.listing_id, capture.detailRecord);
       });
       await appendLog(
         options.logFile,

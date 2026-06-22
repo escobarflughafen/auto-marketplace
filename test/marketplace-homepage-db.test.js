@@ -13,6 +13,7 @@ const {
   upsertHomepageListingWithStatus,
   upsertHomepageListing,
   getHomepageListing,
+  listListingMedia,
   listBacklogCandidates,
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
@@ -1267,6 +1268,78 @@ test('upsertHomepageListingWithStatus stores source and source keyword for searc
 
     assert.equal(created.row.source, 'search');
     assert.equal(created.row.source_keyword, 'leica m6');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+test('upsertHomepageListingWithStatus stores listing media from card photos', () => {
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    upsertHomepageListingWithStatus(db, {
+      listingId: 'media-1',
+      href: 'https://www.facebook.com/marketplace/item/media-1/?ref=search',
+      title: 'Leica M6',
+      text: 'CA$ 3800 | Leica M6',
+      photos: [
+        {
+          source: 'search_card',
+          sourceUrl: 'https://scontent.example/leica-front.jpg',
+          altText: 'Leica M6 front',
+          width: 320,
+          height: 240,
+          position: 0,
+        },
+      ],
+    }, {
+      source: 'search',
+      sourceKeyword: 'leica m6',
+      seenAt: '2026-04-29T00:00:00.000Z',
+    });
+
+    let media = listListingMedia(db, 'media-1');
+    assert.equal(media.length, 1);
+    assert.equal(media[0].source, 'search_card');
+    assert.equal(media[0].source_url, 'https://scontent.example/leica-front.jpg');
+    assert.equal(media[0].alt_text, 'Leica M6 front');
+    assert.equal(media[0].width, 320);
+    assert.equal(media[0].height, 240);
+    assert.equal(media[0].first_seen_at, '2026-04-29T00:00:00.000Z');
+    assert.equal(media[0].last_seen_at, '2026-04-29T00:00:00.000Z');
+
+    upsertHomepageListingWithStatus(db, {
+      listingId: 'media-1',
+      href: 'https://www.facebook.com/marketplace/item/media-1/?ref=search',
+      title: 'Leica M6',
+      text: 'CA$ 3800 | Leica M6',
+      photos: [
+        {
+          source: 'search_card',
+          sourceUrl: 'https://scontent.example/leica-front.jpg',
+          altText: 'Updated Leica M6 front',
+          width: 640,
+          height: 480,
+          position: 1,
+        },
+      ],
+    }, {
+      source: 'search',
+      sourceKeyword: 'leica m6',
+      seenAt: '2026-04-29T00:05:00.000Z',
+    });
+
+    media = listListingMedia(db, 'media-1');
+    assert.equal(media.length, 1);
+    assert.equal(media[0].alt_text, 'Updated Leica M6 front');
+    assert.equal(media[0].width, 640);
+    assert.equal(media[0].position, 1);
+    assert.equal(media[0].first_seen_at, '2026-04-29T00:00:00.000Z');
+    assert.equal(media[0].last_seen_at, '2026-04-29T00:05:00.000Z');
+
+    const listing = getHomepageListing(db, 'media-1');
+    assert.match(listing.raw_card_json, /leica-front\.jpg/);
   } finally {
     closeMarketplaceHomepageDatabase(db);
   }

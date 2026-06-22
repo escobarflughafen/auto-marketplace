@@ -600,6 +600,25 @@ function pickSearchCardTitle(lines) {
 async function readSearchResultItems(page) {
   return page.evaluate(() => {
     const seenListingIds = new Set();
+    const readPhotos = (anchor) => {
+      const roots = [anchor, anchor.parentElement, anchor.closest('[role="article"]')].filter(Boolean);
+      const seenSources = new Set();
+      return roots.flatMap((root) => Array.from(root.querySelectorAll('img')))
+        .map((image, index) => ({
+          sourceUrl: image.currentSrc || image.src || '',
+          altText: image.alt || '',
+          width: image.naturalWidth || image.clientWidth || 0,
+          height: image.naturalHeight || image.clientHeight || 0,
+          position: index,
+          source: 'search_card',
+        }))
+        .filter((photo) => {
+          if (!photo.sourceUrl || seenSources.has(photo.sourceUrl)) return false;
+          seenSources.add(photo.sourceUrl);
+          return true;
+        })
+        .slice(0, 4);
+    };
     return Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'))
       .map((anchor) => {
         const href = anchor.href || '';
@@ -621,6 +640,7 @@ async function readSearchResultItems(page) {
           href,
           lines,
           text: lines.join(' | '),
+          photos: readPhotos(anchor),
         };
       })
       .filter(Boolean);
@@ -652,6 +672,7 @@ async function collectSearchItems(page, options) {
           href,
           title: cleanText(pickSearchCardTitle(item.lines || [])),
           text: cleanText(item.text),
+          photos: item.photos || [],
         });
       }
     }
@@ -696,6 +717,7 @@ async function collectSearchItems(page, options) {
           href,
           title: cleanText(pickSearchCardTitle(item.lines || [])),
           text: cleanText(item.text),
+          photos: item.photos || [],
         });
       }
     }

@@ -394,6 +394,29 @@ function appendCollectorListingEvent(db, options, listing, event = {}) {
 async function readHomepageItems(page) {
   return page.evaluate(() => {
     const seenListingIds = new Set();
+    const cleanLine = (line) => line.replace(/\s+/g, ' ').trim();
+    const isPriceLine = (line) => /^(?:CA\$|\$)\s*[\d,]+/i.test(line) || /^free$/i.test(line);
+    const isFreshnessLine = (line) => /^(?:just listed|new listing|today|yesterday|刚刚上架|刚刚发布|listed .* ago)$/i.test(line);
+    const pickTitle = (lines) => lines.find((line) => !isPriceLine(line) && !isFreshnessLine(line)) || lines[0] || '';
+    const readPhotos = (anchor) => {
+      const roots = [anchor, anchor.parentElement, anchor.closest('[role="article"]')].filter(Boolean);
+      const seenSources = new Set();
+      return roots.flatMap((root) => Array.from(root.querySelectorAll('img')))
+        .map((image, index) => ({
+          sourceUrl: image.currentSrc || image.src || '',
+          altText: image.alt || '',
+          width: image.naturalWidth || image.clientWidth || 0,
+          height: image.naturalHeight || image.clientHeight || 0,
+          position: index,
+          source: 'collector_card',
+        }))
+        .filter((photo) => {
+          if (!photo.sourceUrl || seenSources.has(photo.sourceUrl)) return false;
+          seenSources.add(photo.sourceUrl);
+          return true;
+        })
+        .slice(0, 4);
+    };
     return Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'))
       .map((anchor) => {
         const href = anchor.href || '';
@@ -406,15 +429,16 @@ async function readHomepageItems(page) {
         const rawText = anchor.innerText || anchor.parentElement?.innerText || '';
         const lines = rawText
           .split('\n')
-          .map((line) => line.replace(/\s+/g, ' ').trim())
+          .map(cleanLine)
           .filter(Boolean);
 
         seenListingIds.add(listingId);
         return {
           listingId,
           href,
-          title: lines[0] || '',
+          title: pickTitle(lines),
           text: lines.join(' | '),
+          photos: readPhotos(anchor),
         };
       })
       .filter(Boolean);
@@ -446,6 +470,7 @@ async function collectHomepageItems(page, options) {
           href,
           title: cleanText(item.title),
           text: cleanText(item.text),
+          photos: item.photos || [],
         });
       }
     }
@@ -490,6 +515,7 @@ async function collectHomepageItems(page, options) {
           href,
           title: cleanText(item.title),
           text: cleanText(item.text),
+          photos: item.photos || [],
         });
       }
     }

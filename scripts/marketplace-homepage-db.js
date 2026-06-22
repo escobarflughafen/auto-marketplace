@@ -209,6 +209,31 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS listing_media (
+      listing_id TEXT NOT NULL,
+      media_key TEXT NOT NULL,
+      media_type TEXT NOT NULL DEFAULT 'image',
+      source TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      artifact_path TEXT NOT NULL DEFAULT '',
+      alt_text TEXT NOT NULL DEFAULT '',
+      width INTEGER,
+      height INTEGER,
+      position INTEGER NOT NULL DEFAULT 0,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY (listing_id, media_key),
+      FOREIGN KEY (listing_id) REFERENCES homepage_listings(listing_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_listing_media_listing_position
+    ON listing_media (listing_id, position, last_seen_at DESC);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS listing_events (
       event_id TEXT PRIMARY KEY,
       workflow_run_id TEXT NOT NULL DEFAULT '',
@@ -626,6 +651,122 @@ function closeMarketplaceHomepageDatabase(db) {
   }
 }
 
+function normalizeListingMediaItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => {
+      const sourceUrl = String(item.sourceUrl || item.source_url || item.src || item.url || '').trim();
+      const artifactPath = String(item.artifactPath || item.artifact_path || item.screenshotPath || item.screenshot_path || '').trim();
+      if (!sourceUrl && !artifactPath) {
+        return null;
+      }
+      const mediaKey = String(item.mediaKey || item.media_key || '').trim()
+        || crypto.createHash('sha1').update(`${sourceUrl}\n${artifactPath}`).digest('hex');
+      return {
+        mediaKey,
+        mediaType: String(item.mediaType || item.media_type || 'image').trim() || 'image',
+        source: String(item.source || '').trim(),
+        sourceUrl,
+        artifactPath,
+        altText: String(item.altText || item.alt_text || item.alt || '').trim(),
+        width: Number.isFinite(Number(item.width)) ? Number(item.width) : null,
+        height: Number.isFinite(Number(item.height)) ? Number(item.height) : null,
+        position: Number.isFinite(Number(item.position)) ? Number(item.position) : index,
+        metadata: item.metadata || item.metadata_json || {},
+      };
+    })
+    .filter(Boolean);
+}
+
+function upsertListingMediaForListing(db, listingId, items = [], options = {}) {
+  const normalizedListingId = String(listingId || '').trim();
+  const mediaItems = normalizeListingMediaItems(items);
+  if (!normalizedListingId || mediaItems.length === 0) {
+    return [];
+  }
+  const seenAt = options.seenAt || new Date().toISOString();
+  const sourceFallback = String(options.source || '').trim();
+  const statement = db.prepare(`
+    INSERT INTO listing_media (
+      listing_id,
+      media_key,
+      media_type,
+      source,
+      source_url,
+      artifact_path,
+      alt_text,
+      width,
+      height,
+      position,
+      first_seen_at,
+      last_seen_at,
+      metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(listing_id, media_key) DO UPDATE SET
+      media_type = excluded.media_type,
+      source = excluded.source,
+      source_url = excluded.source_url,
+      artifact_path = excluded.artifact_path,
+      alt_text = excluded.alt_text,
+      width = excluded.width,
+      height = excluded.height,
+      position = excluded.position,
+      last_seen_at = excluded.last_seen_at,
+      metadata_json = excluded.metadata_json
+  `);
+
+  for (const item of mediaItems) {
+    statement.run(
+      normalizedListingId,
+      item.mediaKey,
+      item.mediaType,
+      item.source || sourceFallback,
+      item.sourceUrl,
+      item.artifactPath,
+      item.altText,
+      item.width,
+      item.height,
+      item.position,
+      seenAt,
+      seenAt,
+      serializeJson(item.metadata || {}),
+    );
+  }
+
+  return listListingMedia(db, normalizedListingId);
+}
+
+function normalizeListingMediaRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    listing_id: row.listing_id,
+    media_key: row.media_key,
+    media_type: row.media_type,
+    source: row.source || '',
+    source_url: row.source_url || '',
+    artifact_path: row.artifact_path || '',
+    alt_text: row.alt_text || '',
+    width: row.width,
+    height: row.height,
+    position: row.position || 0,
+    first_seen_at: row.first_seen_at,
+    last_seen_at: row.last_seen_at,
+    metadata: parseJsonObject(row.metadata_json),
+  };
+}
+
+function listListingMedia(db, listingId, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 100)) : 50;
+  return db.prepare(`
+    SELECT *
+    FROM listing_media
+    WHERE listing_id = ?
+    ORDER BY position ASC, last_seen_at DESC
+    LIMIT ?
+  `).all(String(listingId || '').trim(), limit).map(normalizeListingMediaRow);
+}
+
 function upsertHomepageListingWithStatus(db, listing, options = {}) {
   const now = options.seenAt || new Date().toISOString();
   const href = canonicalizeListingUrl(listing.href);
@@ -718,6 +859,11 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
     now,
     rank,
   );
+
+  upsertListingMediaForListing(db, listingId, listing.photos || listing.media || [], {
+    seenAt: now,
+    source,
+  });
 
   const row = getHomepageListing(db, listingId);
   const sameContent = Boolean(
@@ -4859,6 +5005,8 @@ module.exports = {
   upsertHomepageListingWithStatus,
   upsertHomepageListing,
   getHomepageListing,
+  upsertListingMediaForListing,
+  listListingMedia,
   listBacklogCandidates,
   claimNextPendingHomepageListing,
   markHomepageListingProcessed,
