@@ -4028,10 +4028,13 @@ function createServer(options) {
         writeJson(response, 404, { error: `Unknown workflow run: ${workerId}` });
         return;
       }
-      const processRecord = publicWorkflowRunRecordWithStats(db, run, {
-        includeLogs: true,
-        includeLatestEvents: true,
-      });
+      const includeStats = requestUrl.searchParams.get('stats') !== '0';
+      const processRecord = includeStats
+        ? publicWorkflowRunRecordWithStats(db, run, {
+          includeLogs: true,
+          includeLatestEvents: true,
+        })
+        : publicWorkflowRunRecord(run, { includeLogs: true });
       processRecord.screenshots = listWorkerScreenshots(workerId);
       writeJson(response, 200, {
         process: processRecord,

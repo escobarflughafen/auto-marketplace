@@ -4214,6 +4214,14 @@ async function refreshWorkerPanel(options = {}) {
   if (status) status.textContent = 'Refreshing worker status...';
   try {
     await loadWorkflows({ light: options.light !== false });
+    if (store.selectedProcessId && !store.workerDetailLoading) {
+      await loadWorkerDetail({
+        render: true,
+        preserveScroll: true,
+        onlyIfChanged: true,
+        processOnly: true,
+      });
+    }
     scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
     if (status) status.textContent = 'Worker status refreshed.';
   } catch (error) {
@@ -4232,6 +4240,14 @@ async function reconcileWorkerPanel() {
   try {
     await fetchJson('/api/workflows/reconcile', { method: 'POST' });
     await loadWorkflows({ light: true });
+    if (store.selectedProcessId && !store.workerDetailLoading) {
+      await loadWorkerDetail({
+        render: true,
+        preserveScroll: true,
+        onlyIfChanged: true,
+        processOnly: true,
+      });
+    }
     scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
     if (status) status.textContent = 'Worker OS state checked.';
   } catch (error) {
@@ -5247,6 +5263,7 @@ function renderWorkerDetail(selectedProcess) {
 async function loadWorkerDetail(options = {}) {
   const render = options.render !== false;
   const onlyIfChanged = options.onlyIfChanged === true;
+  const processOnly = options.processOnly === true;
   const selectedProcess = activeProcess();
   if (!selectedProcess) {
     clearWorkerDetailState();
@@ -5261,28 +5278,36 @@ async function loadWorkerDetail(options = {}) {
   let selectedEventType = store.workerDetailEventType;
   const requestSeq = ++store.workerDetailRequestSeq;
   const workerId = encodeURIComponent(selectedProcessId);
-  store.workerDetailLoading = true;
-  store.workerDetailError = '';
+  if (!processOnly) {
+    store.workerDetailLoading = true;
+    store.workerDetailError = '';
+  }
   let detailPayload;
   let statsPayload;
   let eventsPayload;
   try {
-    const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
-    [detailPayload, statsPayload, eventsPayload] = await Promise.all([
-      fetchJson(`/api/workflows/${workerId}`),
-      fetchJson(`/api/workflows/${workerId}/stats`),
-      fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`),
-    ]);
-    const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
-    if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
-      selectedEventType = 'all';
-      store.workerDetailEventType = 'all';
-      eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}&limit=50`);
+    if (processOnly) {
+      detailPayload = await fetchJson(`/api/workflows/${workerId}?stats=0`);
+    } else {
+      const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
+      [detailPayload, statsPayload, eventsPayload] = await Promise.all([
+        fetchJson(`/api/workflows/${workerId}`),
+        fetchJson(`/api/workflows/${workerId}/stats`),
+        fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`),
+      ]);
+      const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
+      if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
+        selectedEventType = 'all';
+        store.workerDetailEventType = 'all';
+        eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}&limit=50`);
+      }
     }
   } catch (error) {
     if (requestSeq === store.workerDetailRequestSeq && store.selectedProcessId === selectedProcessId) {
-      store.workerDetailLoading = false;
-      store.workerDetailError = error.message || 'Worker detail could not be loaded.';
+      if (!processOnly) {
+        store.workerDetailLoading = false;
+        store.workerDetailError = error.message || 'Worker detail could not be loaded.';
+      }
       if (render) renderProcesses({ preserveScroll: options.preserveScroll });
     }
     throw error;
@@ -5296,10 +5321,12 @@ async function loadWorkerDetail(options = {}) {
     return;
   }
   store.workerDetailProcess = detailPayload.process || selectedProcess;
-  store.workerDetailStats = statsPayload.stats || null;
-  store.workerDetailEvents = eventsPayload.events || [];
-  store.workerDetailLoading = false;
-  store.workerDetailError = '';
+  if (!processOnly) {
+    store.workerDetailStats = statsPayload.stats || null;
+    store.workerDetailEvents = eventsPayload.events || [];
+    store.workerDetailLoading = false;
+    store.workerDetailError = '';
+  }
   const nextSignature = workerDetailRenderSignature(
     store.workerDetailProcess,
     store.workerDetailStats,
@@ -5503,6 +5530,14 @@ async function syncWorkflowsInBackground() {
       background: true,
       light: true,
     });
+    if (isPanelActive('opsPanel') && store.selectedProcessId && !store.workerDetailLoading) {
+      await loadWorkerDetail({
+        render: true,
+        preserveScroll: true,
+        onlyIfChanged: true,
+        processOnly: true,
+      });
+    }
   } catch (error) {
     console.warn('Background workflow sync failed:', error.message || error);
   } finally {
