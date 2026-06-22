@@ -1057,8 +1057,9 @@ button:not(:disabled):hover,
   border-bottom: 1px solid var(--line);
   background: #fff;
 }
-.tabs + .panel .subtabs {
-  margin-top: -1px;
+.workspace-surface > .panel > .subtabs:first-child,
+.settings-content > .subtabs:first-child {
+  border-top: 0;
 }
 .subtab {
   flex: 0 0 auto;
