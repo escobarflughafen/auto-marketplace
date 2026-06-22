@@ -12,7 +12,10 @@
   <script>
     (() => {
       const savedTheme = localStorage.getItem('marketplace-monitor-theme');
-      document.documentElement.dataset.theme = savedTheme === 'classic' ? 'classic' : 'parasols';
+      const theme = ['parasols', 'classic', 'dark'].includes(savedTheme) ? savedTheme : 'parasols';
+      document.documentElement.dataset.theme = theme;
+      const colorScheme = theme === 'dark' ? 'dark' : 'light';
+      document.querySelector('meta[name="color-scheme"]')?.setAttribute('content', colorScheme);
     })();
   </script>
   <link rel="stylesheet" href="/vendor/tabulator/css/tabulator.min.css">

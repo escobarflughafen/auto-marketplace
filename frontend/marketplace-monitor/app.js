@@ -203,13 +203,15 @@ const DEFAULT_CAPTURE_SETTINGS = {
 };
 
 function normalizeTheme(value) {
-  return value === 'classic' ? 'classic' : 'parasols';
+  return ['parasols', 'classic', 'dark'].includes(value) ? value : 'parasols';
 }
 
 function setTheme(value) {
   const theme = normalizeTheme(value);
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('marketplace-monitor-theme', theme);
+  document.querySelector('meta[name="color-scheme"]')?.setAttribute('content', theme === 'dark' ? 'dark' : 'light');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#000000');
   const themeSelect = document.getElementById('themeSelect');
   if (themeSelect) {
     themeSelect.value = theme;
@@ -4066,6 +4068,7 @@ function renderGeneralSettings() {
     + '<label class="settings-field" for="themeSelect">Style<select id="themeSelect">'
     + `<option value="parasols"${currentTheme === 'parasols' ? ' selected' : ''}>Parasols</option>`
     + `<option value="classic"${currentTheme === 'classic' ? ' selected' : ''}>Classic</option>`
+    + `<option value="dark"${currentTheme === 'dark' ? ' selected' : ''}>Escobar Flughafen Dark</option>`
     + '</select></label>'
     + '</div>'
     + '</section>'
