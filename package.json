@@ -20,6 +20,7 @@
     "marketplace:home:tier3:dry-run": "node scripts/marketplace-tier3-verdict-dry-run.js",
     "marketplace:home:export": "node scripts/export-marketplace-homepage.js",
     "marketplace:home:serve": "node scripts/serve-marketplace-homepage.js",
+    "marketplace:ux:monitor": "node scripts/perf/marketplace-ux-monitor.js",
     "web:observe": "node scripts/observe-web-interaction.js",
     "marketplace:deploy": "bash scripts/deploy-marketplace.sh",
     "history:normalize-inventory": "node scripts/normalize-inventory-trading-history.js",

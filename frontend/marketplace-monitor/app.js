@@ -90,6 +90,11 @@ const store = {
   workflowsLoaded: false,
   savedQueryOverviewMode: localStorage.getItem(SAVED_QUERY_OVERVIEW_MODE_STORAGE_KEY) === 'all' ? 'all' : 'pinned',
   workflowContinuousRefresh: localStorage.getItem(WORKFLOW_CONTINUOUS_REFRESH_STORAGE_KEY) === 'true',
+  settingsView: 'general',
+  performanceReports: [],
+  performanceReportsLoaded: false,
+  performanceReportsLoading: false,
+  performanceReportsError: '',
   historySort: { key: 'title', direction: 'asc' },
   lastHistoryQuery: '',
   lastHistoryQueryResult: null,
@@ -109,12 +114,14 @@ const store = {
   recommendationsTableBuilt: false,
   recommendationsTablePendingSetData: false,
   eventRegistryTable: null,
+  workerOverviewTable: null,
 };
 
 function resizeTabularViews() {
   store.historyTable?.redraw?.(true);
   store.recommendationsTable?.redraw?.(true);
   store.eventRegistryTable?.redraw?.(true);
+  store.workerOverviewTable?.redraw?.(true);
 }
 
 const els = {
@@ -3941,13 +3948,94 @@ function renderCredentialManager() {
     + '</section>';
 }
 
-function renderSettings() {
-  if (!els.settingsContent) {
-    return;
-  }
+function formatPerformanceMs(value) {
+  const ms = Number(value) || 0;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10000 ? 1 : 2)}s`;
+  return `${Math.round(ms)}ms`;
+}
 
+function performanceStepLabel(name) {
+  return String(name || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function performanceStatusClass(ms, warn = 3000, fail = 10000) {
+  if (ms >= fail) return 'error';
+  if (ms >= warn) return 'pending';
+  return 'done';
+}
+
+function latestPerformanceReport() {
+  return store.performanceReports[0] || null;
+}
+
+function renderPerformanceDashboard() {
+  if (store.performanceReportsLoading) {
+    return '<section class="settings-section"><div class="worker-control-section-title">Performance</div><div class="empty-state">Loading performance reports...</div></section>';
+  }
+  if (store.performanceReportsError) {
+    return '<section class="settings-section"><div class="worker-control-section-title">Performance</div>'
+      + `<div class="empty-state">${html(store.performanceReportsError)}</div>`
+      + '<div class="worker-control-actions"><button type="button" id="performanceReportsRefreshButton">Refresh</button></div>'
+      + '</section>';
+  }
+  const report = latestPerformanceReport();
+  if (!report) {
+    return '<section class="settings-section"><div class="worker-control-section-title">Performance</div>'
+      + '<div class="empty-state">No UX monitor reports found. Run <code>npm run marketplace:ux:monitor</code> to create one.</div>'
+      + '<div class="worker-control-actions"><button type="button" id="performanceReportsRefreshButton">Refresh</button></div>'
+      + '</section>';
+  }
+  const steps = report.summary?.steps || [];
+  const stepCards = steps.map((step) => {
+    const statusClass = performanceStatusClass(step.p95Ms || step.maxMs || 0);
+    return '<div class="performance-metric-card">'
+      + `<div class="label">${html(performanceStepLabel(step.name))}</div>`
+      + `<div class="value"><span class="status ${statusClass}">${html(formatPerformanceMs(step.p95Ms || step.maxMs || 0))}</span></div>`
+      + `<div class="process-meta">p50 ${html(formatPerformanceMs(step.p50Ms))} / max ${html(formatPerformanceMs(step.maxMs))}</div>`
+      + '</div>';
+  }).join('');
+  const apiRows = (report.summary?.api || []).slice(0, 8).map((row) => (
+    '<tr>'
+      + `<td class="cell-text"><code>${html(row.path || '')}</code></td>`
+      + `<td>${html(row.count || 0)}</td>`
+      + `<td>${html(formatPerformanceMs(row.p50Ms))}</td>`
+      + `<td>${html(formatPerformanceMs(row.p95Ms))}</td>`
+      + `<td>${html(formatPerformanceMs(row.maxMs))}</td>`
+    + '</tr>'
+  )).join('') || '<tr><td colspan="5" class="empty-state">No API timings in this report.</td></tr>';
+  const reportOptions = store.performanceReports.map((item, index) => (
+    `<option value="${html(index)}"${index === 0 ? ' selected' : ''}>${html(item.file || item.timestamp || `Report ${index + 1}`)}</option>`
+  )).join('');
+  const savedQueries = listingsViewer.savedQueriesForOverview?.({ includeAll: true }) || [];
+  const pinnedQueries = savedQueries.filter((item) => item.showInOverview === true);
+  return '<section class="settings-section">'
+    + '<div class="settings-section-header">'
+      + '<div><div class="worker-control-section-title">Performance</div>'
+      + `<div class="process-meta">Latest report ${html(report.file || '')} / ${html(formatDate(report.timestamp || report.updatedAt))}</div></div>`
+      + '<div class="worker-control-actions"><button type="button" id="performanceReportsRefreshButton">Refresh</button></div>'
+    + '</div>'
+    + '<div class="settings-grid performance-report-controls">'
+      + `<label class="settings-field">Report<select id="performanceReportSelect">${reportOptions}</select></label>`
+      + `<label class="settings-field">Target<input type="text" readonly value="${html(report.target?.url || '')}"></label>`
+    + '</div>'
+    + `<div class="performance-metric-grid">${stepCards}</div>`
+    + '<div class="worker-control-section-title">Slow APIs Seen By Browser</div>'
+    + '<div class="tablewrap compact-tablewrap"><table class="compact-kv-table performance-api-table">'
+    + '<thead><tr><th>Path</th><th>Calls</th><th>p50</th><th>p95</th><th>Max</th></tr></thead>'
+    + `<tbody>${apiRows}</tbody></table></div>`
+    + '<div class="worker-control-section-title">Saved Query Count Model</div>'
+    + '<div class="settings-note">'
+      + `Server saved queries loaded in this browser: ${html(savedQueries.length)}; pinned/overview candidates: ${html(pinnedQueries.length)}. `
+      + 'Current overview counts are live query counts from <code>/api/query/counts</code>. For large data, the next step is a server-side count cache keyed by query hash, data version, and invalidation time, with stale counts shown immediately and exact counts refreshed in the background.'
+    + '</div>'
+    + '</section>';
+}
+
+function renderGeneralSettings() {
   const currentTheme = normalizeTheme(localStorage.getItem('marketplace-monitor-theme') || document.documentElement.dataset.theme);
-  els.settingsContent.innerHTML = '<section class="settings-section">'
+  return '<section class="settings-section">'
     + '<div class="worker-control-section-title">Display</div>'
     + '<div class="settings-grid">'
     + '<label class="settings-field" for="themeSelect">Style<select id="themeSelect">'
@@ -3962,9 +4050,44 @@ function renderSettings() {
     + '<div class="settings-note">Saved automatically. Listing detail image settings are added to resolver jobs; live worker image settings are added to every browser worker started from this monitor.</div>'
     + '</section>'
     + renderCredentialManager();
+}
+
+function renderSettings() {
+  if (!els.settingsContent) {
+    return;
+  }
+
+  const view = store.settingsView === 'performance' ? 'performance' : 'general';
+  els.settingsContent.innerHTML = '<nav class="subtabs settings-subtabs">'
+    + `<button type="button" class="subtab${view === 'general' ? ' active' : ''}" data-settings-view="general">General</button>`
+    + `<button type="button" class="subtab${view === 'performance' ? ' active' : ''}" data-settings-view="performance">Performance</button>`
+    + '</nav>'
+    + (view === 'performance' ? renderPerformanceDashboard() : renderGeneralSettings());
 
   document.getElementById('themeSelect')?.addEventListener('change', (event) => {
     setTheme(event.target.value);
+  });
+  for (const button of els.settingsContent.querySelectorAll('[data-settings-view]')) {
+    button.addEventListener('click', () => {
+      store.settingsView = button.dataset.settingsView || 'general';
+      renderSettings();
+      if (store.settingsView === 'performance') {
+        loadPerformanceReports().catch(() => {});
+      }
+    });
+  }
+  document.getElementById('performanceReportsRefreshButton')?.addEventListener('click', () => {
+    loadPerformanceReports({ force: true }).catch(() => {});
+  });
+  document.getElementById('performanceReportSelect')?.addEventListener('change', (event) => {
+    const index = Number.parseInt(event.target.value || '0', 10);
+    if (index > 0 && store.performanceReports[index]) {
+      store.performanceReports = [
+        store.performanceReports[index],
+        ...store.performanceReports.filter((_item, itemIndex) => itemIndex !== index),
+      ];
+      renderSettings();
+    }
   });
   bindCaptureSettings();
   bindCredentialManager();
@@ -4488,6 +4611,29 @@ function clearWorkerDetailState() {
   store.workerDetailSignature = '';
 }
 
+async function stopWorkerById(processId) {
+  if (!processId) return;
+  await fetchJson('/api/workflows/stop', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ processId }),
+  });
+  await loadWorkflows({ light: true });
+}
+
+async function restartWorkerById(processId) {
+  if (!processId) return;
+  const payload = await fetchJson('/api/workflows/restart', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ processId }),
+  });
+  await loadWorkflows({ light: true });
+  if (payload.process?.id) {
+    openWorkerDetail(payload.process.id);
+  }
+}
+
 function seedWorkerDetailState(processId) {
   const process = store.processes.find((candidate) => candidate.id === processId) || null;
   store.selectedProcessId = processId;
@@ -4512,14 +4658,121 @@ function openWorkerDetail(processId) {
   });
 }
 
+function workerOverviewRows(processes = store.processes) {
+  return processes.map((proc) => {
+    const stats = workerStats(proc);
+    const running = proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping';
+    return {
+      id: proc.id,
+      label: proc.label || proc.id,
+      status: proc.status || '',
+      pid: proc.pid || '',
+      os: proc.osAlive ? 'active' : 'inactive',
+      work: stats.currentListingId || 'waiting',
+      attempted: stats.attempted,
+      done: stats.done,
+      skipped: stats.bypassed,
+      review: stats.errors,
+      activity: latestWorkerAction(proc),
+      running,
+      selected: proc.id === store.selectedProcessId,
+    };
+  });
+}
+
+function renderWorkerOverviewTable(rows) {
+  const tableEl = document.getElementById('workerOverviewTable');
+  if (!tableEl) return;
+  const columns = [
+    {
+      title: 'Worker',
+      field: 'label',
+      minWidth: 190,
+      frozen: true,
+      formatter: (cell) => `<button type="button" class="table-row-action worker-row-open">${html(cell.getValue())}</button>`,
+      cellClick: (_event, cell) => openWorkerDetail(cell.getRow().getData().id),
+    },
+    {
+      title: 'Status',
+      field: 'status',
+      width: 112,
+      formatter: (cell) => `<span class="status ${html(cell.getValue())}">${html(cell.getValue())}</span>`,
+    },
+    { title: 'PID', field: 'pid', width: 84, hozAlign: 'right' },
+    { title: 'OS', field: 'os', width: 92 },
+    { title: 'Work', field: 'work', minWidth: 150, formatter: 'plaintext' },
+    { title: 'Attempted', field: 'attempted', width: 108, hozAlign: 'right' },
+    { title: 'Done', field: 'done', width: 86, hozAlign: 'right' },
+    { title: 'Skipped', field: 'skipped', width: 96, hozAlign: 'right' },
+    { title: 'Review', field: 'review', width: 94, hozAlign: 'right' },
+    { title: 'Activity', field: 'activity', minWidth: 280, formatter: 'plaintext' },
+    {
+      title: '',
+      field: 'actions',
+      width: 210,
+      headerSort: false,
+      formatter: (cell) => {
+        const row = cell.getRow().getData();
+        return '<div class="row-actions worker-row-actions">'
+          + '<button type="button" class="secondary worker-row-view">View</button>'
+          + '<button type="button" class="secondary worker-row-restart">Restart</button>'
+          + (row.running ? '<button type="button" class="danger worker-row-stop">End</button>' : '')
+          + '</div>';
+      },
+      cellClick: async (event, cell) => {
+        const row = cell.getRow().getData();
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        try {
+          if (target.closest('.worker-row-stop')) {
+            target.closest('button')?.setAttribute('disabled', 'disabled');
+            await stopWorkerById(row.id);
+          } else if (target.closest('.worker-row-restart')) {
+            target.closest('button')?.setAttribute('disabled', 'disabled');
+            await restartWorkerById(row.id);
+          } else if (target.closest('.worker-row-view')) {
+            openWorkerDetail(row.id);
+          }
+        } catch (error) {
+          alert(error.message || 'Worker action failed.');
+          target.closest('button')?.removeAttribute('disabled');
+        }
+      },
+    },
+  ];
+
+  if (!store.workerOverviewTable) {
+    store.workerOverviewTable = new Tabulator(tableEl, {
+      data: rows,
+      columns,
+      layout: 'fitDataStretch',
+      height: false,
+      rowFormatter: (row) => {
+        row.getElement().classList.toggle('selected-row', row.getData().selected === true);
+      },
+    });
+    store.workerOverviewTable.on('rowClick', (event, row) => {
+      if (event.target?.closest?.('button')) return;
+      openWorkerDetail(row.getData().id);
+    });
+  } else {
+    store.workerOverviewTable.setColumns(columns);
+    store.workerOverviewTable.replaceData(rows);
+  }
+}
+
 function renderProcesses(options = {}) {
   const scrollState = options.preserveScroll ? captureProcessScrollState() : null;
   if (!store.workflowsLoaded) {
+    store.workerOverviewTable?.destroy?.();
+    store.workerOverviewTable = null;
     renderProcessListSkeleton();
     restoreProcessScrollState(scrollState);
     return;
   }
   if (!store.processes.length) {
+    store.workerOverviewTable?.destroy?.();
+    store.workerOverviewTable = null;
     els.processList.innerHTML = '<div class="card"><div class="label">Workers</div><div>Managed workers appear here after they start.</div></div>';
     restoreProcessScrollState(scrollState);
     return;
@@ -4527,45 +4780,19 @@ function renderProcesses(options = {}) {
   if (store.selectedProcessId && !store.processes.some((proc) => proc.id === store.selectedProcessId)) {
     clearWorkerDetailState();
   }
-  const rows = store.processes.map((proc) => {
-    const running = proc.status === 'running' || proc.status === 'starting' || proc.status === 'stopping';
-    const selected = proc.id === store.selectedProcessId;
-    const stats = workerStats(proc);
-    return '<tr class="' + (selected ? 'selected-row' : '') + '">'
-      + `<td><button type="button" class="secondary process-select-button" data-id="${html(proc.id)}">${html(proc.label)}</button></td>`
-      + `<td><span class="status ${html(proc.status)}">${html(proc.status)}</span></td>`
-      + `<td>${html(proc.pid || '')}</td>`
-      + `<td>${proc.osAlive ? 'active' : 'inactive'}</td>`
-      + `<td>${html(stats.currentListingId || 'waiting')}</td>`
-      + `<td>${html(stats.attempted)}</td>`
-      + `<td>${html(stats.done)}</td>`
-      + `<td>${html(stats.bypassed)}</td>`
-      + `<td>${html(stats.errors)}</td>`
-      + `<td class="cell-text">${html(latestWorkerAction(proc))}</td>`
-      + '<td><div class="row-actions">'
-      + `<button type="button" class="secondary process-open-button" data-id="${html(proc.id)}">${selected ? 'View' : 'View'}</button>`
-      + `<button type="button" class="secondary restart-button" data-id="${html(proc.id)}">Restart</button>`
-      + (running ? `<button type="button" class="danger stop-button" data-id="${html(proc.id)}">End</button>` : '')
-      + '</div></td>'
-      + '</tr>';
-  }).join('');
+  const rows = workerOverviewRows();
   const selectedProcess = store.selectedProcessId
     ? (store.workerDetailProcess || activeProcess())
     : null;
   document.body.classList.toggle('worker-inspector-open', Boolean(selectedProcess));
+  store.workerOverviewTable?.destroy?.();
+  store.workerOverviewTable = null;
   els.processList.innerHTML = '<div class="card">'
     + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Worker status, current listing, and recent activity.</div></div></div>'
-    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Work</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
-    + rows
-    + '</tbody></table></div>'
+    + '<div class="tablewrap worker-table-wrap" tabindex="0"><div id="workerOverviewTable" class="utility-table worker-overview-tabulator"></div></div>'
     + '</div>'
     + (selectedProcess ? renderWorkerDetail(selectedProcess) : '');
-  for (const button of document.querySelectorAll('.process-open-button')) {
-    button.addEventListener('click', () => openWorkerDetail(button.dataset.id));
-  }
-  for (const button of document.querySelectorAll('.process-select-button')) {
-    button.addEventListener('click', () => openWorkerDetail(button.dataset.id));
-  }
+  renderWorkerOverviewTable(rows);
   for (const button of document.querySelectorAll('.worker-detail-close-button')) {
     button.addEventListener('click', () => {
       clearWorkerDetailState();
@@ -4635,12 +4862,7 @@ function renderProcesses(options = {}) {
     button.addEventListener('click', async () => {
       button.disabled = true;
       try {
-        await fetchJson('/api/workflows/stop', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ processId: button.dataset.id }),
-        });
-        await loadWorkflows({ light: true });
+        await stopWorkerById(button.dataset.id);
       } catch (error) {
         alert(error.message || 'Worker stop request could not be sent.');
         button.disabled = false;
@@ -4651,15 +4873,7 @@ function renderProcesses(options = {}) {
     button.addEventListener('click', async () => {
       button.disabled = true;
       try {
-        const payload = await fetchJson('/api/workflows/restart', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ processId: button.dataset.id }),
-        });
-        await loadWorkflows({ light: true });
-        if (payload.process?.id) {
-          openWorkerDetail(payload.process.id);
-        }
+        await restartWorkerById(button.dataset.id);
       } catch (error) {
         alert(error.message || 'Worker restart request could not be sent.');
         button.disabled = false;
@@ -5106,6 +5320,27 @@ async function loadSummary() {
   }
 }
 
+async function loadPerformanceReports(options = {}) {
+  if (store.performanceReportsLoading && !options.force) return;
+  if (store.performanceReportsLoaded && !options.force) {
+    renderSettings();
+    return;
+  }
+  store.performanceReportsLoading = true;
+  store.performanceReportsError = '';
+  renderSettings();
+  try {
+    const payload = await fetchJson('/api/performance/reports?limit=12');
+    store.performanceReports = payload.reports || [];
+    store.performanceReportsLoaded = true;
+  } catch (error) {
+    store.performanceReportsError = error.message || 'Performance reports could not be loaded.';
+  } finally {
+    store.performanceReportsLoading = false;
+    renderSettings();
+  }
+}
+
 async function loadWorkflows(options = {}) {
   const background = options.background === true;
   const light = options.light === true;
@@ -5318,6 +5553,9 @@ async function runRouteLoader(routePath) {
   } else if (route.panel === 'settingsPanel') {
     await loadCredentials({ render: false });
     renderSettings();
+    if (store.settingsView === 'performance') {
+      await loadPerformanceReports();
+    }
   }
 }
 

@@ -92,6 +92,7 @@ const {
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
 const WORKER_SCREENSHOT_ROOT = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'worker-screenshots');
+const PERFORMANCE_REPORT_DIR = path.join(process.cwd(), 'output', 'perf');
 const EVENT_REGISTRY_DEFAULT_LIMIT = 100;
 const EVENT_REGISTRY_MAX_LIMIT = 500;
 const EVENT_REGISTRY_ALL_SOURCE_WINDOW = 2500;
@@ -683,6 +684,81 @@ function logSlowSection(name, startedAt, details = {}) {
     .join(' ');
   process.stderr.write(`[${nowIso()}] slow_section name=${name} elapsed_ms=${elapsedMs}${detailText ? ` ${detailText}` : ''}\n`);
   return elapsedMs;
+}
+
+function compactPerformanceApiRows(rows = []) {
+  return rows.slice(0, 10).map((row) => ({
+    path: String(row.path || ''),
+    count: Number(row.count) || 0,
+    p50Ms: Number(row.p50Ms) || 0,
+    p95Ms: Number(row.p95Ms) || 0,
+    maxMs: Number(row.maxMs) || 0,
+  }));
+}
+
+function compactPerformanceStepRows(rows = []) {
+  return rows.map((row) => ({
+    name: String(row.name || ''),
+    attempts: Number(row.attempts) || 0,
+    ok: Number(row.ok) || 0,
+    failed: Number(row.failed) || 0,
+    skipped: Number(row.skipped) || 0,
+    p50Ms: Number(row.p50Ms) || 0,
+    p95Ms: Number(row.p95Ms) || 0,
+    maxMs: Number(row.maxMs) || 0,
+  }));
+}
+
+function normalizePerformanceReport(filePath, fileName) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const parsed = JSON.parse(raw);
+  const stat = fs.statSync(filePath);
+  return {
+    file: fileName,
+    updatedAt: stat.mtime.toISOString(),
+    suite: String(parsed.suite || ''),
+    timestamp: String(parsed.timestamp || stat.mtime.toISOString()),
+    target: {
+      url: String(parsed.target?.url || ''),
+    },
+    config: parsed.config || {},
+    summary: {
+      steps: compactPerformanceStepRows(parsed.summary?.steps || []),
+      api: compactPerformanceApiRows(parsed.summary?.api || []),
+      consoleIssueCount: Number(parsed.summary?.consoleIssueCount) || 0,
+      failedRequestCount: Number(parsed.summary?.failedRequestCount) || 0,
+      longTasks: parsed.summary?.longTasks || { count: 0, totalMs: 0, maxMs: 0 },
+      maxCumulativeLayoutShift: Number(parsed.summary?.maxCumulativeLayoutShift) || 0,
+    },
+  };
+}
+
+function listPerformanceReports(options = {}) {
+  const limit = Math.max(1, Math.min(Number.parseInt(options.limit || '10', 10) || 10, 50));
+  if (!fs.existsSync(PERFORMANCE_REPORT_DIR)) {
+    return { directory: PERFORMANCE_REPORT_DIR, reports: [] };
+  }
+  const files = fs.readdirSync(PERFORMANCE_REPORT_DIR)
+    .filter((fileName) => fileName.endsWith('.json'))
+    .map((fileName) => {
+      const filePath = path.join(PERFORMANCE_REPORT_DIR, fileName);
+      const stat = fs.statSync(filePath);
+      return { fileName, filePath, mtimeMs: stat.mtimeMs };
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, limit);
+  const reports = files.flatMap(({ fileName, filePath }) => {
+    try {
+      return [normalizePerformanceReport(filePath, fileName)];
+    } catch (error) {
+      return [{
+        file: fileName,
+        updatedAt: new Date().toISOString(),
+        error: error.message || 'Report could not be read.',
+      }];
+    }
+  });
+  return { directory: PERFORMANCE_REPORT_DIR, reports };
 }
 
 function attachRequestTiming(request, response, requestUrl) {
@@ -2927,6 +3003,12 @@ function createServer(options) {
 
     if (requestUrl.pathname.startsWith('/api/') && !access.role) {
       writeAuthError(response, access);
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/performance/reports' && request.method === 'GET') {
+      const limit = requestUrl.searchParams.get('limit') || '10';
+      writeJson(response, 200, listPerformanceReports({ limit }));
       return;
     }
 
