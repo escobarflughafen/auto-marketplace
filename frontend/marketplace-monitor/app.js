@@ -95,6 +95,9 @@ const store = {
   performanceReportsLoaded: false,
   performanceReportsLoading: false,
   performanceReportsError: '',
+  performanceRunLoading: false,
+  performanceRunStatus: '',
+  performanceRunError: '',
   historySort: { key: 'title', direction: 'asc' },
   lastHistoryQuery: '',
   lastHistoryQueryResult: null,
@@ -3970,6 +3973,25 @@ function latestPerformanceReport() {
   return store.performanceReports[0] || null;
 }
 
+function performanceRunStatusMarkup() {
+  if (store.performanceRunError) {
+    return `<div class="settings-note performance-run-status"><span class="status error">failed</span> ${html(store.performanceRunError)}</div>`;
+  }
+  if (store.performanceRunStatus) {
+    return `<div class="settings-note performance-run-status">${html(store.performanceRunStatus)}</div>`;
+  }
+  return '';
+}
+
+function renderPerformanceActions() {
+  const disabled = store.performanceRunLoading ? ' disabled' : '';
+  const label = store.performanceRunLoading ? 'Running test...' : 'Run test';
+  return '<div class="worker-control-actions performance-actions">'
+    + `<button type="button" id="performanceRunButton"${disabled}>${label}</button>`
+    + `<button type="button" class="secondary" id="performanceReportsRefreshButton"${disabled}>Refresh</button>`
+    + '</div>';
+}
+
 function renderPerformanceDashboard() {
   if (store.performanceReportsLoading) {
     return '<section class="settings-section"><div class="worker-control-section-title">Performance</div><div class="empty-state">Loading performance reports...</div></section>';
@@ -3977,14 +3999,16 @@ function renderPerformanceDashboard() {
   if (store.performanceReportsError) {
     return '<section class="settings-section"><div class="worker-control-section-title">Performance</div>'
       + `<div class="empty-state">${html(store.performanceReportsError)}</div>`
-      + '<div class="worker-control-actions"><button type="button" id="performanceReportsRefreshButton">Refresh</button></div>'
+      + renderPerformanceActions()
+      + performanceRunStatusMarkup()
       + '</section>';
   }
   const report = latestPerformanceReport();
   if (!report) {
     return '<section class="settings-section"><div class="worker-control-section-title">Performance</div>'
-      + '<div class="empty-state">No UX monitor reports found. Run <code>npm run marketplace:ux:monitor</code> to create one.</div>'
-      + '<div class="worker-control-actions"><button type="button" id="performanceReportsRefreshButton">Refresh</button></div>'
+      + '<div class="empty-state">No UX monitor reports found. Run a test to create the first report.</div>'
+      + renderPerformanceActions()
+      + performanceRunStatusMarkup()
       + '</section>';
   }
   const steps = report.summary?.steps || [];
@@ -4014,8 +4038,9 @@ function renderPerformanceDashboard() {
     + '<div class="settings-section-header">'
       + '<div><div class="worker-control-section-title">Performance</div>'
       + `<div class="process-meta">Latest report ${html(report.file || '')} / ${html(formatDate(report.timestamp || report.updatedAt))}</div></div>`
-      + '<div class="worker-control-actions"><button type="button" id="performanceReportsRefreshButton">Refresh</button></div>'
+      + renderPerformanceActions()
     + '</div>'
+    + performanceRunStatusMarkup()
     + '<div class="settings-grid performance-report-controls">'
       + `<label class="settings-field">Report<select id="performanceReportSelect">${reportOptions}</select></label>`
       + `<label class="settings-field">Target<input type="text" readonly value="${html(report.target?.url || '')}"></label>`
@@ -4078,6 +4103,9 @@ function renderSettings() {
   }
   document.getElementById('performanceReportsRefreshButton')?.addEventListener('click', () => {
     loadPerformanceReports({ force: true }).catch(() => {});
+  });
+  document.getElementById('performanceRunButton')?.addEventListener('click', () => {
+    runPerformanceTest().catch(() => {});
   });
   document.getElementById('performanceReportSelect')?.addEventListener('change', (event) => {
     const index = Number.parseInt(event.target.value || '0', 10);
@@ -4689,7 +4717,10 @@ function renderWorkerOverviewTable(rows) {
       field: 'label',
       minWidth: 190,
       frozen: true,
-      formatter: (cell) => `<button type="button" class="table-row-action worker-row-open">${html(cell.getValue())}</button>`,
+      formatter: (cell) => {
+        const row = cell.getRow().getData();
+        return `<button type="button" class="table-row-action worker-row-open" data-id="${html(row.id)}">${html(cell.getValue())}</button>`;
+      },
       cellClick: (_event, cell) => openWorkerDetail(cell.getRow().getData().id),
     },
     {
@@ -4714,9 +4745,9 @@ function renderWorkerOverviewTable(rows) {
       formatter: (cell) => {
         const row = cell.getRow().getData();
         return '<div class="row-actions worker-row-actions">'
-          + '<button type="button" class="secondary worker-row-view">View</button>'
-          + '<button type="button" class="secondary worker-row-restart">Restart</button>'
-          + (row.running ? '<button type="button" class="danger worker-row-stop">End</button>' : '')
+          + `<button type="button" class="secondary worker-row-view" data-id="${html(row.id)}">View</button>`
+          + `<button type="button" class="secondary worker-row-restart" data-id="${html(row.id)}">Restart</button>`
+          + (row.running ? `<button type="button" class="danger worker-row-stop" data-id="${html(row.id)}">End</button>` : '')
           + '</div>';
       },
       cellClick: async (event, cell) => {
@@ -5337,6 +5368,38 @@ async function loadPerformanceReports(options = {}) {
     store.performanceReportsError = error.message || 'Performance reports could not be loaded.';
   } finally {
     store.performanceReportsLoading = false;
+    renderSettings();
+  }
+}
+
+async function runPerformanceTest() {
+  if (store.performanceRunLoading) return;
+  store.performanceRunLoading = true;
+  store.performanceRunError = '';
+  store.performanceRunStatus = 'Running browser UX test...';
+  renderSettings();
+  try {
+    const payload = await fetchJson('/api/performance/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        iterations: 1,
+        timeoutMs: 30000,
+        skipWorkerDetail: true,
+      }),
+    });
+    store.performanceReports = payload.report
+      ? [payload.report, ...store.performanceReports.filter((report) => report.file !== payload.report.file)]
+      : store.performanceReports;
+    store.performanceReportsLoaded = false;
+    store.performanceRunStatus = payload.report?.file
+      ? `Created report ${payload.report.file}.`
+      : 'Performance test completed.';
+    await loadPerformanceReports({ force: true });
+  } catch (error) {
+    store.performanceRunError = error.message || 'Performance test could not be started.';
+  } finally {
+    store.performanceRunLoading = false;
     renderSettings();
   }
 }

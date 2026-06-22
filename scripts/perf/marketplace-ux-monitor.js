@@ -241,16 +241,18 @@ async function waitForHistoryReady(page, timeoutMs) {
 async function waitForWorkerList(page, timeoutMs, expectedWorkerCount = null) {
   await page.waitForSelector('#workerControl', { timeout: timeoutMs });
   if (expectedWorkerCount > 0) {
-    await page.waitForFunction(() => document.querySelectorAll('.process-open-button, .process-select-button').length > 0, null, {
+    await page.waitForFunction(() => document.querySelectorAll('.worker-row-open, .worker-row-view, .process-open-button, .process-select-button').length > 0, null, {
       timeout: timeoutMs,
     });
     return;
   }
   await page.waitForFunction(() => {
     const control = document.querySelector('#workerControl');
-    const table = document.querySelector('.worker-table');
+    const table = document.querySelector('#workerOverviewTable');
+    const tabulatorReady = Boolean(table?.querySelector('.tabulator-tableholder'));
+    const rows = Boolean(table?.querySelector('.tabulator-row'));
     const empty = document.body.textContent.includes('Managed workers appear here');
-    return Boolean(control) && (Boolean(table) || empty);
+    return Boolean(control) && (tabulatorReady || rows || empty);
   }, null, { timeout: timeoutMs });
 }
 
@@ -458,7 +460,7 @@ async function runIteration(browser, options, iteration) {
     }
     await waitForWorkerList(page, options.timeoutMs, apiWorkerCount);
     return {
-      workers: await page.locator('.process-open-button').count().catch(() => 0),
+      workers: await page.locator('.worker-row-open, .worker-row-view, .process-open-button').count().catch(() => 0),
       apiWorkers: apiWorkerCount,
     };
   });
@@ -466,8 +468,8 @@ async function runIteration(browser, options, iteration) {
   if (!options.skipWorkerDetail) {
     await timedStep(page, 'worker_detail_ready', steps, async () => {
       const selector = options.workerId
-        ? `.process-open-button[data-id="${cssString(options.workerId)}"], .process-select-button[data-id="${cssString(options.workerId)}"]`
-        : '.process-open-button, .process-select-button';
+        ? `.worker-row-open[data-id="${cssString(options.workerId)}"], .worker-row-view[data-id="${cssString(options.workerId)}"], .process-open-button[data-id="${cssString(options.workerId)}"], .process-select-button[data-id="${cssString(options.workerId)}"]`
+        : '.worker-row-open, .worker-row-view, .process-open-button, .process-select-button';
       const count = await page.locator(selector).count();
       if (count === 0) {
         return { skipped: true, reason: options.workerId ? 'worker not found' : 'no workers visible' };

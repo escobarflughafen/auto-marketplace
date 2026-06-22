@@ -761,6 +761,94 @@ function listPerformanceReports(options = {}) {
   return { directory: PERFORMANCE_REPORT_DIR, reports };
 }
 
+function performanceMonitorUrlForServer(options) {
+  const loopbackHost = options.host === '0.0.0.0' || options.host === '::' ? '127.0.0.1' : options.host;
+  const url = new URL(`http://${loopbackHost}:${options.port}/`);
+  url.searchParams.set('token', options.adminToken);
+  return url.toString();
+}
+
+function performanceReportFileName() {
+  return `marketplace-ux-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+}
+
+function runPerformanceMonitor(options, body = {}) {
+  const timeoutMs = Math.max(5_000, Math.min(Number.parseInt(body.timeoutMs || '30000', 10) || 30_000, 120_000));
+  const iterations = Math.max(1, Math.min(Number.parseInt(body.iterations || '1', 10) || 1, 3));
+  const outputFile = performanceReportFileName();
+  const outputPath = path.join(PERFORMANCE_REPORT_DIR, outputFile);
+  const args = [
+    path.join(process.cwd(), 'scripts', 'perf', 'marketplace-ux-monitor.js'),
+    '--url',
+    performanceMonitorUrlForServer(options),
+    '--iterations',
+    String(iterations),
+    '--timeout-ms',
+    String(timeoutMs),
+    '--output',
+    outputPath,
+  ];
+
+  if (body.skipWorkerDetail !== false) {
+    args.push('--skip-worker-detail');
+  }
+
+  const hardTimeoutMs = Math.max(timeoutMs * 4, 90_000);
+  fs.mkdirSync(PERFORMANCE_REPORT_DIR, { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Performance monitor timed out after ${Math.round(hardTimeoutMs / 1000)}s`));
+      }
+    }, hardTimeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8');
+      if (stdout.length > 20_000) stdout = stdout.slice(-20_000);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+      if (stderr.length > 20_000) stderr = stderr.slice(-20_000);
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `Performance monitor exited with code ${code}${signal ? ` signal ${signal}` : ''}`));
+        return;
+      }
+      const report = fs.existsSync(outputPath)
+        ? normalizePerformanceReport(outputPath, outputFile)
+        : null;
+      resolve({
+        report,
+        outputFile,
+        stdout: stdout.trim().split('\n').slice(-20),
+        stderr: stderr.trim().split('\n').filter(Boolean).slice(-20),
+      });
+    });
+  });
+}
+
 function attachRequestTiming(request, response, requestUrl) {
   const startedAt = process.hrtime.bigint();
   response.on('finish', () => {
@@ -768,7 +856,8 @@ function attachRequestTiming(request, response, requestUrl) {
     const pathName = requestUrl.pathname;
     const tracked = pathName === '/healthz'
       || pathName === '/api/workflows'
-      || pathName === '/api/workflows/start';
+      || pathName === '/api/workflows/start'
+      || pathName === '/api/performance/run';
     if (!tracked && elapsedMs < 250) {
       return;
     }
@@ -3009,6 +3098,27 @@ function createServer(options) {
     if (requestUrl.pathname === '/api/performance/reports' && request.method === 'GET') {
       const limit = requestUrl.searchParams.get('limit') || '10';
       writeJson(response, 200, listPerformanceReports({ limit }));
+      return;
+    }
+
+    if (requestUrl.pathname === '/api/performance/run' && request.method === 'POST') {
+      if (!access.canWrite) {
+        writeAuthError(response, access);
+        return;
+      }
+      try {
+        const body = await readRequestJson(request);
+        const result = await runPerformanceMonitor(options, body);
+        writeJson(response, 200, {
+          ok: true,
+          report: result.report,
+          outputFile: result.outputFile,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
+      } catch (error) {
+        writeJson(response, 500, { error: error.message || 'Performance monitor failed.' });
+      }
       return;
     }
 

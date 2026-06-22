@@ -1973,7 +1973,6 @@ a:hover { text-decoration: underline; }
   display: grid;
   gap: 0;
   background: #fff;
-  border-top: 1px solid var(--line);
 }
 .settings-section {
   border-bottom: 1px solid var(--line);
@@ -2014,6 +2013,12 @@ a:hover { text-decoration: underline; }
 }
 .performance-report-controls {
   grid-template-columns: minmax(220px, 320px) minmax(280px, 1fr);
+}
+.performance-actions {
+  margin: 0;
+}
+.performance-run-status {
+  padding-top: 8px;
 }
 .performance-metric-grid {
   display: grid;
