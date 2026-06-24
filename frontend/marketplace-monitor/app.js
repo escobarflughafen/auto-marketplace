@@ -18,6 +18,8 @@ const WORKFLOW_IDLE_POLL_MS = 15000;
 const WORKFLOW_HIDDEN_POLL_MS = 30000;
 const SUMMARY_ACTIVE_POLL_MS = 10000;
 const SUMMARY_HIDDEN_POLL_MS = 30000;
+const WORKER_LIVE_ACTIVE_POLL_MS = 2000;
+const WORKER_LIVE_HIDDEN_POLL_MS = 10000;
 const MATCH_MODE_PRELOAD_TARGET = 8;
 const MATCH_MODE_REFILL_AT = 4;
 const DEFAULT_ROUTE = '/listings';
@@ -109,6 +111,8 @@ const store = {
   summaryPollInFlight: false,
   workflowPollTimer: null,
   workflowPollInFlight: false,
+  workerLivePollTimer: null,
+  workerLivePollInFlight: false,
   summaryRequestSeq: 0,
   workflowRequestSeq: 0,
   workerDetailRequestSeq: 0,
@@ -2957,6 +2961,10 @@ function summaryPollDelayMs() {
   return document.hidden ? SUMMARY_HIDDEN_POLL_MS : SUMMARY_ACTIVE_POLL_MS;
 }
 
+function workerLivePollDelayMs() {
+  return document.hidden ? WORKER_LIVE_HIDDEN_POLL_MS : WORKER_LIVE_ACTIVE_POLL_MS;
+}
+
 function workerTypeLabel(value) {
   return value === 'resolver' ? 'Resolver'
     : value === 'collector' ? 'Collector'
@@ -4648,6 +4656,7 @@ function restoreProcessScrollState(state) {
 }
 
 function clearWorkerDetailState() {
+  clearWorkerLiveSync();
   store.selectedProcessId = '';
   store.workerDetailProcess = null;
   store.workerDetailStats = null;
@@ -4698,11 +4707,15 @@ function openWorkerDetail(processId) {
   if (!processId) return;
   seedWorkerDetailState(processId);
   renderProcesses({ preserveScroll: true });
-  loadWorkerDetail({ preserveScroll: true }).catch((error) => {
-    store.workerDetailLoading = false;
-    store.workerDetailError = error.message || 'Worker detail could not be loaded.';
-    renderProcesses({ preserveScroll: true });
-  });
+  loadWorkerDetail({ preserveScroll: true })
+    .then(() => {
+      scheduleWorkerLiveSync(workerLivePollDelayMs());
+    })
+    .catch((error) => {
+      store.workerDetailLoading = false;
+      store.workerDetailError = error.message || 'Worker detail could not be loaded.';
+      renderProcesses({ preserveScroll: true });
+    });
 }
 
 function workerOverviewRows(processes = store.processes) {
@@ -5030,6 +5043,7 @@ function renderWorkerScreenshotHistory(selectedProcess) {
     + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>'
     + tableRows([
       ['Latest', formatDate(latest.capturedAt)],
+      ['Live', shouldPollWorkerLiveView() ? `refreshing every ${Math.round(workerLivePollDelayMs() / 1000)}s` : 'paused'],
       ['History', screenshots.length],
       ['File', latest.name || ''],
     ])
@@ -5340,6 +5354,9 @@ async function loadWorkerDetail(options = {}) {
   if (render && (!onlyIfChanged || changed)) {
     renderProcesses({ preserveScroll: options.preserveScroll });
   }
+  if (!processOnly) {
+    scheduleWorkerLiveSync(workerLivePollDelayMs());
+  }
 }
 
 async function loadSummary() {
@@ -5499,6 +5516,25 @@ function scheduleWorkflowSync(delay = workflowsPollDelayMs()) {
   store.workflowPollTimer = setTimeout(syncWorkflowsInBackground, delay);
 }
 
+function clearWorkerLiveSync() {
+  if (store.workerLivePollTimer) {
+    clearTimeout(store.workerLivePollTimer);
+    store.workerLivePollTimer = null;
+  }
+}
+
+function shouldPollWorkerLiveView() {
+  return Boolean(hasApiToken() && store.selectedProcessId && isPanelActive('opsPanel'));
+}
+
+function scheduleWorkerLiveSync(delay = workerLivePollDelayMs()) {
+  clearWorkerLiveSync();
+  if (!shouldPollWorkerLiveView()) {
+    return;
+  }
+  store.workerLivePollTimer = setTimeout(syncWorkerLiveInBackground, delay);
+}
+
 function scheduleSummarySync(delay = summaryPollDelayMs()) {
   if (store.summaryPollTimer) {
     clearTimeout(store.summaryPollTimer);
@@ -5519,6 +5555,31 @@ async function syncSummaryInBackground() {
   } finally {
     store.summaryPollInFlight = false;
     scheduleSummarySync();
+  }
+}
+
+async function syncWorkerLiveInBackground() {
+  if (!shouldPollWorkerLiveView()) {
+    clearWorkerLiveSync();
+    return;
+  }
+  if (store.workerLivePollInFlight || store.workerDetailLoading) {
+    scheduleWorkerLiveSync();
+    return;
+  }
+  store.workerLivePollInFlight = true;
+  try {
+    await loadWorkerDetail({
+      render: true,
+      preserveScroll: true,
+      onlyIfChanged: true,
+      processOnly: true,
+    });
+  } catch (error) {
+    console.warn('Worker live view sync failed:', error.message || error);
+  } finally {
+    store.workerLivePollInFlight = false;
+    scheduleWorkerLiveSync();
   }
 }
 
@@ -5613,6 +5674,11 @@ function activateRouteView(routePath, options = {}) {
     setHistoryView(route.historyView);
   }
   updateLocationRoute(normalized, options);
+  if (route.panel === 'opsPanel') {
+    scheduleWorkerLiveSync(0);
+  } else {
+    clearWorkerLiveSync();
+  }
   return normalized;
 }
 
