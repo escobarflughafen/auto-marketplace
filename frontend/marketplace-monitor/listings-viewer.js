@@ -176,26 +176,6 @@ const COLUMNS = [
   { title: 'Seen', field: 'last_seen_at', width: 132, formatter: dateFormatter, responsive: 3, cellClick: detailCellClick },
   { title: 'Completed', field: 'detail_completed_at', width: 132, formatter: dateFormatter, responsive: 8, cellClick: detailCellClick },
   { title: 'Listing ID', field: 'listing_id', width: 142, responsive: 9, formatter: (cell) => `<code>${escapeHtml(cell.getValue())}</code>`, cellClick: detailCellClick },
-  {
-    title: 'Links',
-    field: 'actions',
-    width: 216,
-    responsive: 0,
-    headerSort: false,
-    formatter: actionsFormatter,
-    cellClick: (event, cell) => {
-      const viewer = cell.getTable()._marketplaceViewer;
-      const povButton = event.target.closest('.row-pov-button');
-      if (povButton) {
-        viewer?.showSnapshot(cell.getData());
-        return;
-      }
-      const resolveButton = event.target.closest('.row-resolve-button');
-      if (resolveButton) {
-        viewer?.resolveListing(cell.getData());
-      }
-    },
-  },
 ];
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -453,29 +433,6 @@ function renderPendingPriceDistributionHtml() {
 
 function dateFormatter(cell) {
   return escapeHtml(formatDate(cell.getValue()));
-}
-
-function actionsFormatter(cell) {
-  const row = cell.getData();
-  const actions = [];
-  const resolverStatus = listingResolverStatusText(row);
-  if (resolverStatus) {
-    actions.push(`<span class="resolver-live-status">${escapeHtml(resolverStatus)}</span>`);
-  }
-  if (row.listing_id) {
-    actions.push(`<button type="button" class="secondary row-resolve-button" data-listing-id="${escapeHtml(row.listing_id)}">${escapeHtml(listingResolveActionLabel(row))}</button>`);
-  }
-  actions.push(`<button type="button" class="secondary row-pov-button" data-listing-id="${escapeHtml(row.listing_id)}">View</button>`);
-  if (row.href) {
-    actions.push(`<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>`);
-  }
-  if (row.screenshotUrl) {
-    actions.push(`<a class="button-link compact" href="${escapeHtml(apiUrl(row.screenshotUrl))}" target="_blank" rel="noreferrer">Shot</a>`);
-  }
-  if (row.snapshotUrl) {
-    actions.push(`<a class="button-link compact" href="${escapeHtml(apiUrl(row.snapshotUrl))}" target="_blank" rel="noreferrer">MD</a>`);
-  }
-  return `<div class="row-actions">${actions.join('')}</div>`;
 }
 
 function isInteractiveTableTarget(target) {
@@ -1493,7 +1450,7 @@ export function createListingsViewer(config = {}) {
       els.backlogMeta.textContent = 'Preparing backlog...';
     }
     if (els.backlogTableBody && !state.backlogRows.length) {
-      els.backlogTableBody.innerHTML = renderSkeletonRows(6, 13);
+      els.backlogTableBody.innerHTML = renderSkeletonRows(6, 12);
     }
     renderResolveControls('Resolve queue is ready.');
   }
@@ -1599,12 +1556,6 @@ export function createListingsViewer(config = {}) {
           + `<td>${escapeHtml(item.detail_status || '')}</td>`
           + `<td>${escapeHtml(formatDate(item.queued_at))}</td>`
           + `<td>${escapeHtml(item.workflow_run_id || '')}</td>`
-          + '<td><div class="row-actions">'
-          + (item.status === 'queued' || item.status === 'failed'
-            ? `<button type="button" class="secondary resolve-queue-remove-button" data-listing-id="${escapeHtml(item.listing_id)}">Clear</button>`
-            : '')
-          + (item.href ? `<a class="button-link compact" href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
-          + '</div></td>'
         + '</tr>'
       )).join('');
 
@@ -1613,7 +1564,7 @@ export function createListingsViewer(config = {}) {
         + '<div><div class="label">Resolve Queue</div>'
         + `<div class="process-meta">${escapeHtml(counts.queued || 0)} queued · ${escapeHtml(counts.dispatched || 0)} dispatched · ${escapeHtml(counts.failed || 0)} review · ${escapeHtml(counts.completed || 0)} completed</div></div>`
         + '</div>'
-        + '<div class="tablewrap resolve-queue-tablewrap"><table class="resolve-queue-table"><thead><tr><th>Status</th><th>ID</th><th>Title</th><th>Row</th><th>Queued</th><th>Run</th><th></th></tr></thead><tbody>'
+        + '<div class="tablewrap resolve-queue-tablewrap"><table class="resolve-queue-table"><thead><tr><th>Status</th><th>ID</th><th>Title</th><th>Row</th><th>Queued</th><th>Run</th></tr></thead><tbody>'
         + itemRows
         + '</tbody></table></div>'
         + '</section>';
@@ -1706,7 +1657,7 @@ export function createListingsViewer(config = {}) {
     const queuedIds = new Set(state.resolveQueueIds);
     const rows = state.backlogRows;
     if (!rows.length) {
-      els.backlogTableBody.innerHTML = '<tr><td colspan="13" class="empty-state">Backlog candidates matching these controls appear here.</td></tr>';
+      els.backlogTableBody.innerHTML = '<tr><td colspan="12" class="empty-state">Backlog candidates matching these controls appear here.</td></tr>';
       syncBacklogSelectionControls();
       return;
     }
@@ -1728,10 +1679,6 @@ export function createListingsViewer(config = {}) {
         + `<td>${escapeHtml(formatDate(row.detail_started_at))}</td>`
         + `<td>${escapeHtml(formatDate(row.detail_completed_at))}</td>`
         + `<td class="cell-text">${escapeHtml(backlogTitle(row))}${queued ? ' · queued' : ''}</td>`
-        + '<td><div class="row-actions">'
-        + `<button type="button" class="secondary backlog-queue-one-button" data-listing-id="${escapeHtml(listingId)}"${queued || !state.resolveQueueAvailable ? ' disabled' : ''}>Add</button>`
-        + (row.href ? `<a class="button-link compact" href="${escapeHtml(row.href)}" target="_blank" rel="noreferrer">FB</a>` : '')
-        + '</div></td>'
         + '</tr>';
     }).join('');
     syncBacklogSelectionControls();
@@ -2164,6 +2111,24 @@ export function createListingsViewer(config = {}) {
     renderResolveControls();
   }
 
+  function isAllListingsResultView() {
+    return state.activeListingView === 'queryResultsView'
+      && !String(state.q || '').trim()
+      && queuedExclusionIds().length === 0;
+  }
+
+  async function refreshAllListingsIfTotalChanged(totalRows) {
+    const nextTotal = Number(totalRows);
+    if (!Number.isFinite(nextTotal) || !state.table || !isAllListingsResultView()) {
+      return false;
+    }
+    if (state.total === nextTotal) {
+      return false;
+    }
+    await loadRows();
+    return true;
+  }
+
   async function applyQuery(query, applyOptions = {}) {
     const nextQuery = String(query || '').trim();
     const querySource = querySourceFromText(nextQuery);
@@ -2367,14 +2332,6 @@ export function createListingsViewer(config = {}) {
         alert(error.message || 'Resolve queue could not be cleared.');
       });
     });
-    els.resolveQueuePanel.addEventListener('click', (event) => {
-      const button = event.target.closest('.resolve-queue-remove-button');
-      if (!button) return;
-      clearResolveQueue([button.dataset.listingId]).catch((error) => {
-        renderResolveControls(`Queue row update issue: ${error.message}`);
-        alert(error.message || 'Queued listing could not be cleared.');
-      });
-    });
     els.hideQueuedResolveCheckbox.addEventListener('change', async () => {
       state.hideQueuedResolve = els.hideQueuedResolveCheckbox.checked;
       await loadRows();
@@ -2460,14 +2417,6 @@ export function createListingsViewer(config = {}) {
         state.selectedBacklogQueueIds = state.selectedBacklogQueueIds.filter((id) => id !== listingId);
       }
       syncBacklogSelectionControls();
-    });
-    els.backlogTableBody.addEventListener('click', (event) => {
-      const button = event.target.closest('.backlog-queue-one-button');
-      if (!button) return;
-      queueBacklogIds([button.dataset.listingId], 'Backlog row').catch((error) => {
-        renderResolveControls(`Backlog queue issue: ${error.message}`);
-        alert(error.message || 'Backlog row could not be added.');
-      });
     });
     els.queueBacklogSelectedButton.addEventListener('click', () => {
       queueBacklogIds(state.selectedBacklogQueueIds, 'Backlog selection').catch((error) => {
@@ -2579,5 +2528,6 @@ export function createListingsViewer(config = {}) {
     toggleSavedQueryOverview,
     setListingView,
     activeListingView,
+    refreshAllListingsIfTotalChanged,
   };
 }

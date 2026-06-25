@@ -13,9 +13,12 @@
   --line-soft: rgba(13, 0, 21, 0.18);
   --fill: #f8f8fa;
   --fill-strong: #ececf1;
+  --badge-bg: #ffffff;
+  --badge-ink: #0d0015;
   --accent: #0039a6;
   --accent-soft: rgba(252, 204, 10, 0.26);
   --accent-strong: #fccc0a;
+  --highlight-ink: #0d0015;
   --warm: #9a6700;
   --bad: #ee352e;
   --good: #00933c;
@@ -63,9 +66,12 @@
   --line-soft: #eaeef2;
   --fill: #f6f8fa;
   --fill-strong: #f0f3f6;
+  --badge-bg: #ffffff;
+  --badge-ink: #24292f;
   --accent: #0969da;
   --accent-soft: #ddf4ff;
   --accent-strong: #0969da;
+  --highlight-ink: #24292f;
   --warm: #9a6700;
   --bad: #cf222e;
   --good: #1a7f37;
@@ -94,7 +100,7 @@
   --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="escobarflughafen-noir"] {
   --browser-color-scheme: dark;
   --bg: #090b0f;
   --panel: #0f141b;
@@ -109,9 +115,12 @@
   --line-soft: rgba(198, 211, 227, 0.18);
   --fill: #171e28;
   --fill-strong: #202936;
+  --badge-bg: #121821;
+  --badge-ink: #edf2f7;
   --accent: #80a8ff;
   --accent-soft: rgba(252, 204, 10, 0.18);
   --accent-strong: #fccc0a;
+  --highlight-ink: #0d0015;
   --warm: #e5ae35;
   --bad: #ff6e66;
   --good: #54d482;
@@ -1580,7 +1589,7 @@ button:not(:disabled):hover,
   padding: 3px 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  background: #f8fafc;
+  background: var(--badge-bg);
   color: var(--muted);
   font-size: 12px;
   line-height: 1.2;
@@ -1615,8 +1624,8 @@ button:not(:disabled):hover,
   padding: 4px 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--ink);
+  background: color-mix(in srgb, var(--badge-bg) 92%, transparent);
+  color: var(--badge-ink);
   font-size: 12px;
   font-weight: 700;
   text-transform: none;
@@ -1819,12 +1828,14 @@ button:not(:disabled):hover,
 .tabulator-row:hover .tabulator-cell,
 .tabulator-row:hover .tabulator-cell.tabulator-frozen {
   background: var(--accent-soft);
+  color: var(--highlight-ink);
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
 .tabulator-row.tabulator-selected:hover,
 .tabulator-row.tabulator-selected:hover .tabulator-cell,
 .tabulator-row.tabulator-selected:hover .tabulator-cell.tabulator-frozen {
   background: var(--accent-soft);
+  color: var(--highlight-ink);
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
 .tabulator .tabulator-footer {
@@ -1978,7 +1989,8 @@ td code {
   font-family: var(--mono);
   white-space: nowrap;
   border: 1px solid var(--line-soft);
-  background: var(--fill);
+  background: var(--badge-bg);
+  color: var(--badge-ink);
 }
 .status.pending { color: var(--warm); }
 .status.processing { color: var(--accent); }
@@ -2321,32 +2333,82 @@ a:hover { text-decoration: underline; }
 .worker-control-wide-row td {
   min-width: min(760px, 72vw);
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .worker-keyword-target-editor {
   display: grid;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
 }
-.worker-keyword-target-header,
-.worker-keyword-target-row {
-  display: grid;
-  grid-template-columns: minmax(128px, 1.5fr) minmax(110px, 1fr) 88px 88px 72px minmax(110px, 1fr) 72px 34px;
-  gap: 4px;
-  align-items: center;
-  min-width: 760px;
+.worker-keyword-target-tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  scrollbar-gutter: stable;
 }
-.worker-keyword-target-header {
+.worker-keyword-target-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+.worker-keyword-target-table col.keyword {
+  width: 18%;
+}
+.worker-keyword-target-table col.location,
+.worker-keyword-target-table col.condition {
+  width: 15%;
+}
+.worker-keyword-target-table col.price {
+  width: 10%;
+}
+.worker-keyword-target-table col.days,
+.worker-keyword-target-table col.items {
+  width: 8%;
+}
+.worker-keyword-target-table col.action {
+  width: 40px;
+}
+.worker-keyword-target-table th,
+.worker-keyword-target-table td {
+  padding: 5px;
+  border-bottom: 1px solid var(--line);
+}
+.worker-keyword-target-table th {
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
+  text-align: left;
+  background: var(--fill);
+}
+.worker-keyword-target-table td {
+  background: var(--surface);
+}
+.worker-keyword-target-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 .worker-keyword-target-row input {
   width: 100%;
   min-width: 0;
+  padding: 6px 7px;
 }
 .worker-keyword-target-remove {
   width: 34px;
   min-width: 34px;
   padding: 6px 8px;
+}
+.worker-keyword-target-action {
+  text-align: center;
 }
 .worker-keyword-target-add {
   justify-self: start;
@@ -2479,7 +2541,11 @@ textarea {
   border-radius: 0;
 }
 .worker-overview-tabulator {
-  min-width: 1320px;
+  width: 100%;
+  min-width: 0;
+}
+.worker-metric-note {
+  margin-top: 8px;
 }
 .worker-overview-tabulator .tabulator-row.selected-row,
 .worker-overview-tabulator .tabulator-row.selected-row .tabulator-cell,
@@ -2892,6 +2958,24 @@ textarea {
 .selected-row,
 .tabulator-row.tabulator-selected {
   background: var(--accent-soft);
+  color: var(--highlight-ink);
+}
+.tabulator-row:hover a,
+.tabulator-row:hover code,
+.tabulator-row:hover .process-meta,
+.tabulator-row:hover .cell-text,
+.tabulator-row:hover .cell-log,
+.tabulator-row.tabulator-selected a,
+.tabulator-row.tabulator-selected code,
+.tabulator-row.tabulator-selected .process-meta,
+.tabulator-row.tabulator-selected .cell-text,
+.tabulator-row.tabulator-selected .cell-log,
+.worker-overview-tabulator .tabulator-row.selected-row a,
+.worker-overview-tabulator .tabulator-row.selected-row code,
+.worker-overview-tabulator .tabulator-row.selected-row .process-meta,
+.worker-overview-tabulator .tabulator-row.selected-row .cell-text,
+.worker-overview-tabulator .tabulator-row.selected-row .cell-log {
+  color: var(--highlight-ink);
 }
 .compact-tablewrap {
   border: 0;
@@ -3084,266 +3168,267 @@ textarea {
   white-space: nowrap;
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="escobarflughafen-noir"] {
   scrollbar-color: var(--scrollbar-thumb) var(--fill);
 }
-:root[data-theme="dark"] .workspace-surface {
+:root[data-theme="escobarflughafen-noir"] .workspace-surface {
   background: var(--panel);
 }
-:root[data-theme="dark"] input,
-:root[data-theme="dark"] select,
-:root[data-theme="dark"] textarea {
+:root[data-theme="escobarflughafen-noir"] input,
+:root[data-theme="escobarflughafen-noir"] select,
+:root[data-theme="escobarflughafen-noir"] textarea {
   color: var(--ink);
   background: var(--field-bg);
   border-color: var(--line);
 }
-:root[data-theme="dark"] input::placeholder,
-:root[data-theme="dark"] textarea::placeholder {
+:root[data-theme="escobarflughafen-noir"] input::placeholder,
+:root[data-theme="escobarflughafen-noir"] textarea::placeholder {
   color: #8d99aa;
 }
-:root[data-theme="dark"] input[type="checkbox"] {
+:root[data-theme="escobarflughafen-noir"] input[type="checkbox"] {
   accent-color: var(--accent-strong);
 }
-:root[data-theme="dark"] option {
+:root[data-theme="escobarflughafen-noir"] option {
   color: var(--ink);
   background: var(--surface-overlay);
 }
-:root[data-theme="dark"] ::selection {
+:root[data-theme="escobarflughafen-noir"] ::selection {
   background: var(--selection-bg);
 }
-:root[data-theme="dark"] .query-input-shell,
-:root[data-theme="dark"] .query-editor,
-:root[data-theme="dark"] .query-highlight,
-:root[data-theme="dark"] .query-result-editor,
-:root[data-theme="dark"] .query-chart-section,
-:root[data-theme="dark"] .query-autocomplete,
-:root[data-theme="dark"] .query-suggestion,
-:root[data-theme="dark"] .query-tool-group,
-:root[data-theme="dark"] .query-tool-button,
-:root[data-theme="dark"] .query-row-control,
-:root[data-theme="dark"] .query-row-control select,
-:root[data-theme="dark"] .query-action-button:not(:disabled):hover,
-:root[data-theme="dark"] .query-action-button:not(:disabled):active,
-:root[data-theme="dark"] .query-action-button.active,
-:root[data-theme="dark"] .query-action-button:focus-visible,
-:root[data-theme="dark"] .querybar:focus-within .query-action-button,
-:root[data-theme="dark"] .tips code,
-:root[data-theme="dark"] .summary .card,
-:root[data-theme="dark"] .subtabs,
-:root[data-theme="dark"] .results-meta,
-:root[data-theme="dark"] .results-meta-button,
-:root[data-theme="dark"] .resolve-toolbar,
-:root[data-theme="dark"] .backlog-advanced,
-:root[data-theme="dark"] .history-table-section,
-:root[data-theme="dark"] .snapshot-text pre,
-:root[data-theme="dark"] .worker-control,
-:root[data-theme="dark"] .settings-content,
-:root[data-theme="dark"] .worker-type-select-label select,
-:root[data-theme="dark"] .worker-control-tablewrap,
-:root[data-theme="dark"] .worker-detail-tablewrap,
-:root[data-theme="dark"] .worker-detail-table > tbody > tr > th:first-child,
-:root[data-theme="dark"] .worker-detail-section-cell,
-:root[data-theme="dark"] .worker-detail-section-tablewrap,
-:root[data-theme="dark"] .worker-panel,
-:root[data-theme="dark"] .worker-shot-strip,
-:root[data-theme="dark"] .compact-tablewrap,
-:root[data-theme="dark"] .worker-table th:first-child,
-:root[data-theme="dark"] .worker-table td:first-child {
+:root[data-theme="escobarflughafen-noir"] .query-input-shell,
+:root[data-theme="escobarflughafen-noir"] .query-editor,
+:root[data-theme="escobarflughafen-noir"] .query-highlight,
+:root[data-theme="escobarflughafen-noir"] .query-result-editor,
+:root[data-theme="escobarflughafen-noir"] .query-chart-section,
+:root[data-theme="escobarflughafen-noir"] .query-autocomplete,
+:root[data-theme="escobarflughafen-noir"] .query-suggestion,
+:root[data-theme="escobarflughafen-noir"] .query-tool-group,
+:root[data-theme="escobarflughafen-noir"] .query-tool-button,
+:root[data-theme="escobarflughafen-noir"] .query-row-control,
+:root[data-theme="escobarflughafen-noir"] .query-row-control select,
+:root[data-theme="escobarflughafen-noir"] .query-action-button:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .query-action-button:not(:disabled):active,
+:root[data-theme="escobarflughafen-noir"] .query-action-button.active,
+:root[data-theme="escobarflughafen-noir"] .query-action-button:focus-visible,
+:root[data-theme="escobarflughafen-noir"] .querybar:focus-within .query-action-button,
+:root[data-theme="escobarflughafen-noir"] .tips code,
+:root[data-theme="escobarflughafen-noir"] .summary .card,
+:root[data-theme="escobarflughafen-noir"] .subtabs,
+:root[data-theme="escobarflughafen-noir"] .results-meta,
+:root[data-theme="escobarflughafen-noir"] .results-meta-button,
+:root[data-theme="escobarflughafen-noir"] .resolve-toolbar,
+:root[data-theme="escobarflughafen-noir"] .backlog-advanced,
+:root[data-theme="escobarflughafen-noir"] .history-table-section,
+:root[data-theme="escobarflughafen-noir"] .snapshot-text pre,
+:root[data-theme="escobarflughafen-noir"] .worker-control,
+:root[data-theme="escobarflughafen-noir"] .settings-content,
+:root[data-theme="escobarflughafen-noir"] .worker-type-select-label select,
+:root[data-theme="escobarflughafen-noir"] .worker-control-tablewrap,
+:root[data-theme="escobarflughafen-noir"] .worker-detail-tablewrap,
+:root[data-theme="escobarflughafen-noir"] .worker-detail-table > tbody > tr > th:first-child,
+:root[data-theme="escobarflughafen-noir"] .worker-detail-section-cell,
+:root[data-theme="escobarflughafen-noir"] .worker-detail-section-tablewrap,
+:root[data-theme="escobarflughafen-noir"] .worker-panel,
+:root[data-theme="escobarflughafen-noir"] .worker-shot-strip,
+:root[data-theme="escobarflughafen-noir"] .compact-tablewrap,
+:root[data-theme="escobarflughafen-noir"] .worker-table th:first-child,
+:root[data-theme="escobarflughafen-noir"] .worker-table td:first-child {
   background: var(--surface);
 }
-:root[data-theme="dark"] .query-result-editor .query-result-highlight,
-:root[data-theme="dark"] .query-highlight {
+:root[data-theme="escobarflughafen-noir"] .query-result-editor .query-result-highlight,
+:root[data-theme="escobarflughafen-noir"] .query-highlight {
   color: var(--muted);
 }
-:root[data-theme="dark"] .query-editor textarea::selection {
+:root[data-theme="escobarflughafen-noir"] .query-editor textarea::selection {
   background: var(--selection-bg);
 }
-:root[data-theme="dark"] .query-token-keyword,
-:root[data-theme="dark"] .query-token-operator {
+:root[data-theme="escobarflughafen-noir"] .query-token-keyword,
+:root[data-theme="escobarflughafen-noir"] .query-token-operator {
   color: #d8b4fe;
 }
-:root[data-theme="dark"] .query-token-source {
+:root[data-theme="escobarflughafen-noir"] .query-token-source {
   color: #80a8ff;
 }
-:root[data-theme="dark"] .query-token-field {
+:root[data-theme="escobarflughafen-noir"] .query-token-field {
   color: #edf2f7;
 }
-:root[data-theme="dark"] .query-token-string {
+:root[data-theme="escobarflughafen-noir"] .query-token-string {
   color: #72e09d;
 }
-:root[data-theme="dark"] .query-token-number {
+:root[data-theme="escobarflughafen-noir"] .query-token-number {
   color: #ffb86c;
 }
-:root[data-theme="dark"] .query-toolbar,
-:root[data-theme="dark"] .query-mode-tabs,
-:root[data-theme="dark"] .summary,
-:root[data-theme="dark"] .tabs,
-:root[data-theme="dark"] .tips,
-:root[data-theme="dark"] .backlog-toolbar,
-:root[data-theme="dark"] .history-document-bar,
-:root[data-theme="dark"] .worker-control-title,
-:root[data-theme="dark"] .worker-control-section-title,
-:root[data-theme="dark"] .worker-inspector-header,
-:root[data-theme="dark"] .worker-panel-title,
-:root[data-theme="dark"] .worker-panel-toolbar,
-:root[data-theme="dark"] .compact-kv-table th,
-:root[data-theme="dark"] th,
-:root[data-theme="dark"] .snapshot-grid > div:last-child > .label,
-:root[data-theme="dark"] .detail-list dt {
+:root[data-theme="escobarflughafen-noir"] .query-toolbar,
+:root[data-theme="escobarflughafen-noir"] .query-mode-tabs,
+:root[data-theme="escobarflughafen-noir"] .summary,
+:root[data-theme="escobarflughafen-noir"] .tabs,
+:root[data-theme="escobarflughafen-noir"] .tips,
+:root[data-theme="escobarflughafen-noir"] .backlog-toolbar,
+:root[data-theme="escobarflughafen-noir"] .history-document-bar,
+:root[data-theme="escobarflughafen-noir"] .worker-control-title,
+:root[data-theme="escobarflughafen-noir"] .worker-control-section-title,
+:root[data-theme="escobarflughafen-noir"] .worker-inspector-header,
+:root[data-theme="escobarflughafen-noir"] .worker-panel-title,
+:root[data-theme="escobarflughafen-noir"] .worker-panel-toolbar,
+:root[data-theme="escobarflughafen-noir"] .compact-kv-table th,
+:root[data-theme="escobarflughafen-noir"] th,
+:root[data-theme="escobarflughafen-noir"] .snapshot-grid > div:last-child > .label,
+:root[data-theme="escobarflughafen-noir"] .detail-list dt {
   background: var(--fill);
 }
-:root[data-theme="dark"] .querybar .query-mode-button.active,
-:root[data-theme="dark"] .summary .summary-card:not(:disabled):hover,
-:root[data-theme="dark"] .summary .summary-card:focus-visible,
-:root[data-theme="dark"] .summary-saved-query-card:focus-within,
-:root[data-theme="dark"] .summary-saved-query-card:hover,
-:root[data-theme="dark"] .summary-card:active,
-:root[data-theme="dark"] .summary-card-main:active,
-:root[data-theme="dark"] .query-suggestion.active,
-:root[data-theme="dark"] .query-suggestion:not(:disabled):hover,
-:root[data-theme="dark"] .query-chart-row-button:not(:disabled):hover,
-:root[data-theme="dark"] .query-chart-row-button:focus-visible,
-:root[data-theme="dark"] .results-meta-button:not(:disabled):hover,
-:root[data-theme="dark"] .results-meta-button:focus-visible {
+:root[data-theme="escobarflughafen-noir"] .querybar .query-mode-button.active,
+:root[data-theme="escobarflughafen-noir"] .summary .summary-card:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .summary .summary-card:focus-visible,
+:root[data-theme="escobarflughafen-noir"] .summary-saved-query-card:focus-within,
+:root[data-theme="escobarflughafen-noir"] .summary-saved-query-card:hover,
+:root[data-theme="escobarflughafen-noir"] .summary-card:active,
+:root[data-theme="escobarflughafen-noir"] .summary-card-main:active,
+:root[data-theme="escobarflughafen-noir"] .query-suggestion.active,
+:root[data-theme="escobarflughafen-noir"] .query-suggestion:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .query-chart-row-button:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .query-chart-row-button:focus-visible,
+:root[data-theme="escobarflughafen-noir"] .results-meta-button:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .results-meta-button:focus-visible {
   color: var(--ink);
   background: var(--fill-strong);
 }
-:root[data-theme="dark"] .query-tool-button:not(:disabled):hover,
-:root[data-theme="dark"] .query-tool-button:not(:disabled):active,
-:root[data-theme="dark"] .query-tool-button:focus-visible,
-:root[data-theme="dark"] .tabulator .tabulator-footer .tabulator-page-size:focus-visible,
-:root[data-theme="dark"] .tabulator .tabulator-footer .tabulator-page:not(:disabled):hover {
+:root[data-theme="escobarflughafen-noir"] .query-tool-button:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .query-tool-button:not(:disabled):active,
+:root[data-theme="escobarflughafen-noir"] .query-tool-button:focus-visible,
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-footer .tabulator-page-size:focus-visible,
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-footer .tabulator-page:not(:disabled):hover {
   color: #090b0f;
   background: var(--accent-strong);
 }
-:root[data-theme="dark"] .query-action-button {
+:root[data-theme="escobarflughafen-noir"] .query-action-button {
   color: var(--button-ink);
   background: var(--button-bg);
 }
-:root[data-theme="dark"] .query-action-button:not(:disabled):hover,
-:root[data-theme="dark"] .query-action-button:not(:disabled):active,
-:root[data-theme="dark"] .query-action-button.active,
-:root[data-theme="dark"] .query-action-button:focus-visible,
-:root[data-theme="dark"] .querybar:focus-within .query-action-button {
+:root[data-theme="escobarflughafen-noir"] .query-action-button:not(:disabled):hover,
+:root[data-theme="escobarflughafen-noir"] .query-action-button:not(:disabled):active,
+:root[data-theme="escobarflughafen-noir"] .query-action-button.active,
+:root[data-theme="escobarflughafen-noir"] .query-action-button:focus-visible,
+:root[data-theme="escobarflughafen-noir"] .querybar:focus-within .query-action-button {
   color: var(--button-hover-ink);
   background: var(--button-hover-bg);
 }
-:root[data-theme="dark"] .history-edit-dialog,
-:root[data-theme="dark"] .worker-inspector {
+:root[data-theme="escobarflughafen-noir"] .history-edit-dialog,
+:root[data-theme="escobarflughafen-noir"] .worker-inspector {
   color: var(--ink);
   background: var(--surface-overlay);
 }
-:root[data-theme="dark"] .history-edit-dialog::backdrop,
-:root[data-theme="dark"] .worker-inspector-backdrop {
+:root[data-theme="escobarflughafen-noir"] .history-edit-dialog::backdrop,
+:root[data-theme="escobarflughafen-noir"] .worker-inspector-backdrop {
   background: var(--backdrop-bg);
 }
-:root[data-theme="dark"] .snapshot-text {
+:root[data-theme="escobarflughafen-noir"] .snapshot-text {
   background: var(--code-bg);
 }
-:root[data-theme="dark"] pre,
-:root[data-theme="dark"] code,
-:root[data-theme="dark"] .cell-log {
+:root[data-theme="escobarflughafen-noir"] pre,
+:root[data-theme="escobarflughafen-noir"] code,
+:root[data-theme="escobarflughafen-noir"] .cell-log {
   color: var(--ink);
 }
-:root[data-theme="dark"] .tablewrap,
-:root[data-theme="dark"] .compact-tablewrap,
-:root[data-theme="dark"] .utility-table {
+:root[data-theme="escobarflughafen-noir"] .tablewrap,
+:root[data-theme="escobarflughafen-noir"] .compact-tablewrap,
+:root[data-theme="escobarflughafen-noir"] .utility-table {
   background: var(--surface);
 }
-:root[data-theme="dark"] .tablewrap::-webkit-scrollbar-track {
+:root[data-theme="escobarflughafen-noir"] .tablewrap::-webkit-scrollbar-track {
   background: var(--fill);
 }
-:root[data-theme="dark"] .tablewrap::-webkit-scrollbar-thumb {
+:root[data-theme="escobarflughafen-noir"] .tablewrap::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   border-color: var(--fill);
 }
-:root[data-theme="dark"] .tablewrap::-webkit-scrollbar-thumb:hover {
+:root[data-theme="escobarflughafen-noir"] .tablewrap::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
 }
-:root[data-theme="dark"] .tabulator {
+:root[data-theme="escobarflughafen-noir"] .tabulator {
   color: var(--ink);
   background: var(--surface);
 }
-:root[data-theme="dark"] .tabulator .tabulator-header,
-:root[data-theme="dark"] .tabulator .tabulator-header .tabulator-col {
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-header,
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-header .tabulator-col {
   background: var(--fill);
   color: var(--ink);
 }
-:root[data-theme="dark"] .tabulator .tabulator-header .tabulator-col .tabulator-col-title {
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-header .tabulator-col .tabulator-col-title {
   color: var(--muted);
 }
-:root[data-theme="dark"] .tabulator-row,
-:root[data-theme="dark"] .tabulator-row .tabulator-cell,
-:root[data-theme="dark"] .tabulator-row .tabulator-cell.tabulator-frozen {
+:root[data-theme="escobarflughafen-noir"] .tabulator-row,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row .tabulator-cell,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row .tabulator-cell.tabulator-frozen {
   color: var(--ink);
   background: var(--surface);
 }
-:root[data-theme="dark"] .tabulator-row.tabulator-row-even,
-:root[data-theme="dark"] .tabulator-row.tabulator-row-even .tabulator-cell,
-:root[data-theme="dark"] .tabulator-row.tabulator-row-even .tabulator-cell.tabulator-frozen {
+:root[data-theme="escobarflughafen-noir"] .tabulator-row.tabulator-row-even,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row.tabulator-row-even .tabulator-cell,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row.tabulator-row-even .tabulator-cell.tabulator-frozen {
   background: var(--surface-muted);
 }
-:root[data-theme="dark"] .tabulator-row:hover,
-:root[data-theme="dark"] .tabulator-row:hover .tabulator-cell,
-:root[data-theme="dark"] .tabulator-row:hover .tabulator-cell.tabulator-frozen,
-:root[data-theme="dark"] .tabulator-row.tabulator-selected,
-:root[data-theme="dark"] .tabulator-row.tabulator-selected .tabulator-cell,
-:root[data-theme="dark"] .tabulator-row.tabulator-selected .tabulator-cell.tabulator-frozen,
-:root[data-theme="dark"] .worker-overview-tabulator .tabulator-row.selected-row,
-:root[data-theme="dark"] .worker-overview-tabulator .tabulator-row.selected-row .tabulator-cell,
-:root[data-theme="dark"] .worker-overview-tabulator .tabulator-row.selected-row .tabulator-cell.tabulator-frozen {
+:root[data-theme="escobarflughafen-noir"] .tabulator-row:hover,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row:hover .tabulator-cell,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row:hover .tabulator-cell.tabulator-frozen,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row.tabulator-selected,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row.tabulator-selected .tabulator-cell,
+:root[data-theme="escobarflughafen-noir"] .tabulator-row.tabulator-selected .tabulator-cell.tabulator-frozen,
+:root[data-theme="escobarflughafen-noir"] .worker-overview-tabulator .tabulator-row.selected-row,
+:root[data-theme="escobarflughafen-noir"] .worker-overview-tabulator .tabulator-row.selected-row .tabulator-cell,
+:root[data-theme="escobarflughafen-noir"] .worker-overview-tabulator .tabulator-row.selected-row .tabulator-cell.tabulator-frozen {
   background: var(--accent-soft);
+  color: var(--highlight-ink);
   box-shadow: inset 0 -3px 0 var(--accent-strong);
 }
-:root[data-theme="dark"] .tabulator .tabulator-footer {
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-footer {
   background: var(--fill);
   color: var(--muted);
 }
-:root[data-theme="dark"] .tabulator .tabulator-footer .tabulator-page,
-:root[data-theme="dark"] .tabulator .tabulator-footer .tabulator-page-size {
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-footer .tabulator-page,
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-footer .tabulator-page-size {
   color: var(--ink);
   background: var(--surface);
 }
-:root[data-theme="dark"] .tabulator .tabulator-footer .tabulator-page.active {
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-footer .tabulator-page.active {
   color: var(--ink);
   background: var(--accent-soft);
 }
-:root[data-theme="dark"] .tabulator .tabulator-placeholder {
+:root[data-theme="escobarflughafen-noir"] .tabulator .tabulator-placeholder {
   color: var(--muted);
 }
-:root[data-theme="dark"] .status {
+:root[data-theme="escobarflughafen-noir"] .status {
   background: var(--fill);
 }
-:root[data-theme="dark"] .status.sold,
-:root[data-theme="dark"] .status.pending_sale {
+:root[data-theme="escobarflughafen-noir"] .status.sold,
+:root[data-theme="escobarflughafen-noir"] .status.pending_sale {
   color: #a8b2c1;
 }
-:root[data-theme="dark"] .status.exited,
-:root[data-theme="dark"] .status.terminated {
+:root[data-theme="escobarflughafen-noir"] .status.exited,
+:root[data-theme="escobarflughafen-noir"] .status.terminated {
   color: var(--good);
 }
-:root[data-theme="dark"] .results-price-bars,
-:root[data-theme="dark"] .query-chart-track {
+:root[data-theme="escobarflughafen-noir"] .results-price-bars,
+:root[data-theme="escobarflughafen-noir"] .query-chart-track {
   background: var(--field-bg);
 }
-:root[data-theme="dark"] .results-price-bar {
+:root[data-theme="escobarflughafen-noir"] .results-price-bar {
   border-color: rgba(252, 204, 10, 0.32);
 }
-:root[data-theme="dark"] .history-advanced-fields,
-:root[data-theme="dark"] .history-link-section,
-:root[data-theme="dark"] .performance-metric-card,
-:root[data-theme="dark"] .profile-onboarder-prompt,
-:root[data-theme="dark"] .worker-shot-thumb,
-:root[data-theme="dark"] .worker-preview-frame,
-:root[data-theme="dark"] .worker-live-screen-frame,
-:root[data-theme="dark"] .worker-detail-preview-frame,
-:root[data-theme="dark"] .snapshot-image-wrap {
+:root[data-theme="escobarflughafen-noir"] .history-advanced-fields,
+:root[data-theme="escobarflughafen-noir"] .history-link-section,
+:root[data-theme="escobarflughafen-noir"] .performance-metric-card,
+:root[data-theme="escobarflughafen-noir"] .profile-onboarder-prompt,
+:root[data-theme="escobarflughafen-noir"] .worker-shot-thumb,
+:root[data-theme="escobarflughafen-noir"] .worker-preview-frame,
+:root[data-theme="escobarflughafen-noir"] .worker-live-screen-frame,
+:root[data-theme="escobarflughafen-noir"] .worker-detail-preview-frame,
+:root[data-theme="escobarflughafen-noir"] .snapshot-image-wrap {
   background: var(--fill);
 }
-:root[data-theme="dark"] .worker-shot-thumb img {
+:root[data-theme="escobarflughafen-noir"] .worker-shot-thumb img {
   background: var(--code-bg);
 }
-:root[data-theme="dark"] a {
+:root[data-theme="escobarflughafen-noir"] a {
   color: var(--accent);
 }
 @media (min-width: 1180px) {

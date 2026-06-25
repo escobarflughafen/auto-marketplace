@@ -64,6 +64,7 @@ const store = {
   workerDetailEvents: [],
   workerDetailStats: null,
   workerDetailLoading: false,
+  workerDetailRefreshing: false,
   workerDetailError: '',
   credentials: null,
   purchaseHistoryDocuments: [],
@@ -207,14 +208,21 @@ const DEFAULT_CAPTURE_SETTINGS = {
 };
 
 function normalizeTheme(value) {
-  return ['parasols', 'classic', 'dark'].includes(value) ? value : 'parasols';
+  const aliases = {
+    parasols: 'escobarflughafen-blanc',
+    dark: 'escobarflughafen-noir',
+  };
+  const theme = aliases[value] || value;
+  return ['escobarflughafen-blanc', 'classic', 'escobarflughafen-noir'].includes(theme)
+    ? theme
+    : 'escobarflughafen-blanc';
 }
 
 function setTheme(value) {
   const theme = normalizeTheme(value);
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('marketplace-monitor-theme', theme);
-  document.querySelector('meta[name="color-scheme"]')?.setAttribute('content', theme === 'dark' ? 'dark' : 'light');
+  document.querySelector('meta[name="color-scheme"]')?.setAttribute('content', theme === 'escobarflughafen-noir' ? 'dark' : 'light');
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#000000');
   const themeSelect = document.getElementById('themeSelect');
   if (themeSelect) {
@@ -1527,19 +1535,6 @@ function recommendationPriceFormatter(cell) {
     + '</div>';
 }
 
-function recommendationOpenFormatter(cell) {
-  const item = cell.getData();
-  const href = item.href || '';
-  return '<div class="row-actions">'
-    + (item._resolver ? `<span class="resolver-live-status">${html(item._resolver)}</span>` : '')
-    + `<button type="button" class="secondary recommendation-resolve-button" data-listing-id="${html(item.listing_id || '')}">${html(listingResolveActionLabel(item))}</button>`
-    + `<button type="button" class="secondary recommendation-view-button" data-listing-id="${html(item.listing_id || '')}">View</button>`
-    + `<button type="button" class="secondary recommendation-save-button" data-listing-id="${html(item.listing_id || '')}">Save</button>`
-    + `<button type="button" class="secondary recommendation-dismiss-button" data-listing-id="${html(item.listing_id || '')}">Dismiss</button>`
-    + (href ? `<a class="button-link compact" href="${html(href)}" target="_blank" rel="noreferrer">FB</a>` : '')
-    + '</div>';
-}
-
 function recommendationTableColumns() {
   return [
     {
@@ -1585,30 +1580,6 @@ function recommendationTableColumns() {
       width: 170,
       responsive: 3,
       formatter: (cell) => formatDate(cell.getValue()),
-    },
-    {
-      title: '',
-      field: '_actions',
-      width: 78,
-      responsive: 0,
-      headerSort: false,
-      formatter: recommendationOpenFormatter,
-      cellClick: (event, cell) => {
-        if (event.target.closest('a')) return;
-        if (event.target.closest('.recommendation-resolve-button')) {
-          resolveListingItem(cell.getData());
-          return;
-        }
-        if (event.target.closest('.recommendation-save-button')) {
-          openRecommendationAction(cell.getData(), 'saved');
-          return;
-        }
-        if (event.target.closest('.recommendation-dismiss-button')) {
-          openRecommendationAction(cell.getData(), 'dismissed');
-          return;
-        }
-        openRecommendationDetail(cell.getData());
-      },
     },
   ];
 }
@@ -1667,7 +1638,6 @@ function renderRecommendationsTable(items) {
         if (element.dataset.recommendationRowClickBound === '1') return;
         element.dataset.recommendationRowClickBound = '1';
         element.addEventListener('click', (event) => {
-          if (event.target.closest('button,a')) return;
           openRecommendationDetail(row.getData());
         });
       },
@@ -2363,11 +2333,15 @@ function openRecommendationDetail(item) {
   )).join('');
   els.recommendationDetailLinks.innerHTML = [
     item.listing_id ? `<button type="button" class="secondary recommendation-detail-resolve-button" data-listing-id="${html(item.listing_id)}">${html(listingResolveActionLabel(item))}</button>` : '',
+    '<button type="button" class="secondary recommendation-detail-save-button">Save</button>',
+    '<button type="button" class="secondary recommendation-detail-dismiss-button">Dismiss</button>',
     item.href ? `<a class="button-link" href="${html(item.href)}" target="_blank" rel="noreferrer">Facebook</a>` : '',
     snapshotUrl ? `<a class="button-link" href="${html(snapshotUrl)}" target="_blank" rel="noreferrer">Snapshot</a>` : '',
     screenshotUrl ? `<a class="button-link" href="${html(screenshotUrl)}" target="_blank" rel="noreferrer">Screenshot</a>` : '',
   ].filter(Boolean).join('');
   els.recommendationDetailLinks.querySelector('.recommendation-detail-resolve-button')?.addEventListener('click', () => resolveListingItem(item));
+  els.recommendationDetailLinks.querySelector('.recommendation-detail-save-button')?.addEventListener('click', () => openRecommendationAction(item, 'saved'));
+  els.recommendationDetailLinks.querySelector('.recommendation-detail-dismiss-button')?.addEventListener('click', () => openRecommendationAction(item, 'dismissed'));
   if (!els.recommendationDetailDialog.open) {
     els.recommendationDetailDialog.showModal();
   }
@@ -3399,17 +3373,17 @@ function bindKeywordTargetRow(row) {
   }
   row.querySelector('.worker-keyword-target-remove')?.addEventListener('click', () => {
     const editor = row.closest('.worker-keyword-target-editor');
+    const body = editor?.querySelector('.worker-keyword-target-body');
     row.remove();
     if (editor && !editor.querySelector('.worker-keyword-target-row')) {
-      const addButton = editor.querySelector('.worker-keyword-target-add');
-      editor.insertBefore(createKeywordTargetRow(fieldId), addButton);
+      body?.append(createKeywordTargetRow(fieldId));
     }
     syncKeywordTargetField(fieldId);
   });
 }
 
 function createKeywordTargetRow(fieldId, item = {}) {
-  const row = document.createElement('div');
+  const row = document.createElement('tr');
   row.className = 'worker-keyword-target-row';
   row.dataset.keywordTargetFieldId = fieldId;
   const fields = [
@@ -3422,21 +3396,26 @@ function createKeywordTargetRow(fieldId, item = {}) {
     ['maxItems', 'Items', item.maxItems || ''],
   ];
   for (const [name, placeholder, value] of fields) {
+    const cell = document.createElement('td');
     const input = document.createElement('input');
     input.dataset.keywordTargetName = name;
     input.type = ['minPrice', 'maxPrice', 'daysSinceListed', 'maxItems'].includes(name) ? 'number' : 'text';
     input.placeholder = placeholder;
     input.value = value;
     if (input.type === 'number') input.min = '1';
-    row.append(input);
+    cell.append(input);
+    row.append(cell);
   }
+  const actionCell = document.createElement('td');
+  actionCell.className = 'worker-keyword-target-action';
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.className = 'secondary worker-keyword-target-remove';
   remove.title = 'Remove keyword target';
   remove.setAttribute('aria-label', 'Remove keyword target');
   remove.textContent = '-';
-  row.append(remove);
+  actionCell.append(remove);
+  row.append(actionCell);
   bindKeywordTargetRow(row);
   return row;
 }
@@ -3449,7 +3428,7 @@ function bindKeywordTargetEditors(root = els.workerControl) {
     add.addEventListener('click', () => {
       const fieldId = add.dataset.keywordTargetFieldId;
       const row = createKeywordTargetRow(fieldId);
-      add.parentElement?.insertBefore(row, add);
+      add.closest('.worker-keyword-target-editor')?.querySelector('.worker-keyword-target-body')?.append(row);
       row.querySelector('[data-keyword-target-name="keyword"]')?.focus();
     });
   }
@@ -3684,7 +3663,7 @@ function renderSkeletonRows(rowCount, columnCount) {
 function renderHistoryTableSkeleton() {
   if (!els.historyTable || store.historyTable) return;
   els.historyTable.innerHTML = '<div class="tablewrap prerender-tablewrap">'
-    + '<table class="history-table"><thead><tr><th>Item</th><th>Kind</th><th>Package</th><th>Cost</th><th>Net cost</th><th>Price</th><th>Status</th><th>Profit / ROI</th><th>Margin</th><th>Days</th><th>Result</th><th>Dates</th><th></th></tr></thead><tbody>'
+    + '<table class="history-table"><thead><tr><th>Item</th><th>Kind</th><th>Package</th><th>Cost</th><th>Net cost</th><th>Price</th><th>Status</th><th>Profit / ROI</th><th>Margin</th><th>Days</th><th>Result</th><th>Dates</th></tr></thead><tbody>'
     + renderSkeletonRows(7, 13)
     + '</tbody></table></div>';
 }
@@ -3722,7 +3701,7 @@ function renderProcessListSkeleton() {
   if (!els.processList) return;
   els.processList.innerHTML = '<div class="card">'
     + '<div class="process-header"><div><div class="label">Worker overview</div><div class="process-meta">Preparing worker status.</div></div></div>'
-    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Work</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Activity</th><th></th></tr></thead><tbody>'
+    + '<div class="tablewrap worker-table-wrap" tabindex="0"><table class="worker-table"><thead><tr><th>Worker</th><th>Status</th><th>PID</th><th>OS</th><th>Work</th><th>Attempted</th><th>Done</th><th>Skipped</th><th>Review</th><th>Appended</th><th>Activity</th></tr></thead><tbody>'
     + renderSkeletonRows(4, 11)
     + '</tbody></table></div>'
     + '</div>';
@@ -3809,26 +3788,31 @@ function renderField(field, draft) {
     if (field.editor === 'keywordTargets') {
       const items = keywordTargetItems(value);
       const rows = (items.length ? items : [{}]).map((item) => (
-        '<div class="worker-keyword-target-row" data-keyword-target-field-id="' + html(field.id) + '">'
-        + `<input data-keyword-target-name="keyword" type="text" value="${html(item.keyword || '')}" placeholder="Keyword">`
-        + `<input data-keyword-target-name="location" type="text" value="${html(item.location || '')}" placeholder="Location">`
-        + `<input data-keyword-target-name="minPrice" type="number" min="1" value="${html(item.minPrice || '')}" placeholder="Min price">`
-        + `<input data-keyword-target-name="maxPrice" type="number" min="1" value="${html(item.maxPrice || '')}" placeholder="Max price">`
-        + `<input data-keyword-target-name="daysSinceListed" type="number" min="1" value="${html(item.daysSinceListed || '')}" placeholder="Days">`
-        + `<input data-keyword-target-name="itemCondition" type="text" value="${html(item.itemCondition || '')}" placeholder="Condition">`
-        + `<input data-keyword-target-name="maxItems" type="number" min="1" value="${html(item.maxItems || '')}" placeholder="Items">`
-        + '<button type="button" class="secondary worker-keyword-target-remove" title="Remove keyword target" aria-label="Remove keyword target">&minus;</button>'
-        + '</div>'
+        '<tr class="worker-keyword-target-row" data-keyword-target-field-id="' + html(field.id) + '">'
+        + `<td><input data-keyword-target-name="keyword" type="text" value="${html(item.keyword || '')}" placeholder="Keyword"></td>`
+        + `<td><input data-keyword-target-name="location" type="text" value="${html(item.location || '')}" placeholder="Location"></td>`
+        + `<td><input data-keyword-target-name="minPrice" type="number" min="1" value="${html(item.minPrice || '')}" placeholder="Min"></td>`
+        + `<td><input data-keyword-target-name="maxPrice" type="number" min="1" value="${html(item.maxPrice || '')}" placeholder="Max"></td>`
+        + `<td><input data-keyword-target-name="daysSinceListed" type="number" min="1" value="${html(item.daysSinceListed || '')}" placeholder="Days"></td>`
+        + `<td><input data-keyword-target-name="itemCondition" type="text" value="${html(item.itemCondition || '')}" placeholder="Condition"></td>`
+        + `<td><input data-keyword-target-name="maxItems" type="number" min="1" value="${html(item.maxItems || '')}" placeholder="Items"></td>`
+        + '<td class="worker-keyword-target-action"><button type="button" class="secondary worker-keyword-target-remove" title="Remove keyword target" aria-label="Remove keyword target">&minus;</button></td>'
+        + '</tr>'
       )).join('');
       return '<tr class="worker-control-wide-row">'
         + `<th><label for="${html(id)}">${html(field.label)}</label></th>`
         + '<td>'
         + `<input id="${html(id)}" data-field-id="${html(field.id)}" type="hidden" value="${html(value)}">`
         + '<div class="worker-keyword-target-editor">'
-        + '<div class="worker-keyword-target-header" aria-hidden="true">'
-        + '<span>Keyword</span><span>Location</span><span>Min price</span><span>Max price</span><span>Days</span><span>Condition</span><span>Items</span><span></span>'
-        + '</div>'
+        + '<div class="worker-keyword-target-tablewrap" tabindex="0">'
+        + '<table class="worker-keyword-target-table">'
+        + '<colgroup><col class="keyword"><col class="location"><col class="price"><col class="price"><col class="days"><col class="condition"><col class="items"><col class="action"></colgroup>'
+        + '<thead><tr><th>Keyword</th><th>Location</th><th>Min</th><th>Max</th><th>Days</th><th>Condition</th><th>Items</th><th><span class="sr-only">Actions</span></th></tr></thead>'
+        + '<tbody class="worker-keyword-target-body">'
         + rows
+        + '</tbody>'
+        + '</table>'
+        + '</div>'
         + `<button type="button" class="secondary worker-keyword-target-add" data-keyword-target-field-id="${html(field.id)}" title="Add keyword target" aria-label="Add keyword target">Add keyword</button>`
         + '</div>'
         + '<div class="settings-note">Generic Marketplace search only. Rental category URLs are intentionally not generated here.</div>'
@@ -4063,7 +4047,7 @@ function renderPerformanceDashboard() {
     + '<div class="worker-control-section-title">Saved Query Count Model</div>'
     + '<div class="settings-note">'
       + `Server saved queries loaded in this browser: ${html(savedQueries.length)}; pinned/overview candidates: ${html(pinnedQueries.length)}. `
-      + 'Current overview counts are live query counts from <code>/api/query/counts</code>. For large data, the next step is a server-side count cache keyed by query hash, data version, and invalidation time, with stale counts shown immediately and exact counts refreshed in the background.'
+      + 'Overview counts are served through <code>/api/summary</code> using a summary projection cache and per-query count cache keyed by query hash and listing data version. Direct <code>/api/query/counts</code> calls reuse the same cache for ad hoc count checks.'
     + '</div>'
     + '</section>';
 }
@@ -4074,9 +4058,9 @@ function renderGeneralSettings() {
     + '<div class="worker-control-section-title">Display</div>'
     + '<div class="settings-grid">'
     + '<label class="settings-field" for="themeSelect">Style<select id="themeSelect">'
-    + `<option value="parasols"${currentTheme === 'parasols' ? ' selected' : ''}>Parasols</option>`
+    + `<option value="escobarflughafen-blanc"${currentTheme === 'escobarflughafen-blanc' ? ' selected' : ''}>Escobarflughafen Blanc</option>`
     + `<option value="classic"${currentTheme === 'classic' ? ' selected' : ''}>Classic</option>`
-    + `<option value="dark"${currentTheme === 'dark' ? ' selected' : ''}>Escobar Flughafen Dark</option>`
+    + `<option value="escobarflughafen-noir"${currentTheme === 'escobarflughafen-noir' ? ' selected' : ''}>Escobarflughafen Noir</option>`
     + '</select></label>'
     + '</div>'
     + '</section>'
@@ -4225,12 +4209,11 @@ async function refreshWorkerPanel(options = {}) {
   if (status) status.textContent = 'Refreshing worker status...';
   try {
     await loadWorkflows({ light: options.light !== false });
-    if (store.selectedProcessId && !store.workerDetailLoading) {
-      await loadWorkerDetail({
+    if (store.selectedProcessId) {
+      await loadWorkerLiveStatus({
         render: true,
         preserveScroll: true,
         onlyIfChanged: true,
-        processOnly: true,
       });
     }
     scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
@@ -4251,12 +4234,11 @@ async function reconcileWorkerPanel() {
   try {
     await fetchJson('/api/workflows/reconcile', { method: 'POST' });
     await loadWorkflows({ light: true });
-    if (store.selectedProcessId && !store.workerDetailLoading) {
-      await loadWorkerDetail({
+    if (store.selectedProcessId) {
+      await loadWorkerLiveStatus({
         render: true,
         preserveScroll: true,
         onlyIfChanged: true,
-        processOnly: true,
       });
     }
     scheduleWorkflowSync(WORKFLOW_ACTIVE_POLL_MS);
@@ -4576,9 +4558,28 @@ function latestWorkerAction(proc) {
 function workerStats(proc) {
   if (proc?.runtimeStats) return proc.runtimeStats;
   const logs = proc.logs || [];
-  const stats = { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
+  const stats = {
+    attempted: 0,
+    done: 0,
+    bypassed: 0,
+    errors: 0,
+    sleeps: 0,
+    currentListingId: '',
+    observed: 0,
+    appended: 0,
+    updated: 0,
+    unchanged: 0,
+    rejected: 0,
+    collectorErrors: 0,
+  };
   for (const line of logs) {
     const listingMatch = line.match(/listing_id=([^\s]+)/);
+    const collectedMatch = line.match(/\bcollected=(\d+)/);
+    const newMatch = line.match(/\bnew=(\d+)/);
+    const sameMatch = line.match(/\bexisting_same=(\d+)/);
+    const updatedMatch = line.match(/\bexisting_updated=(\d+)/);
+    const filteredMatch = line.match(/\b(?:filtered|ignored|rejected)=(\d+)/);
+    const queryMatch = line.match(/\bquery="([^"]+)"/);
     if (/job_start/.test(line)) {
       stats.attempted += 1;
       stats.currentListingId = listingMatch?.[1] || stats.currentListingId;
@@ -4593,6 +4594,32 @@ function workerStats(proc) {
       stats.currentListingId = '';
     } else if (/backlog_sleep|backlog_item_sleep/.test(line)) {
       stats.sleeps += 1;
+    } else if (/cycle_start/.test(line)) {
+      stats.attempted += 1;
+      stats.currentListingId = 'feed';
+    } else if (/round_start/.test(line)) {
+      stats.attempted += 1;
+      stats.currentListingId = queryMatch?.[1] ? `search: ${queryMatch[1]}` : 'search';
+    } else if (/cycle_done|round_done/.test(line)) {
+      const observed = collectedMatch ? Number.parseInt(collectedMatch[1], 10) : 0;
+      const appended = newMatch ? Number.parseInt(newMatch[1], 10) : 0;
+      const unchanged = sameMatch ? Number.parseInt(sameMatch[1], 10) : 0;
+      const updated = updatedMatch ? Number.parseInt(updatedMatch[1], 10) : 0;
+      const rejected = filteredMatch ? Number.parseInt(filteredMatch[1], 10) : 0;
+      stats.observed += observed;
+      stats.appended += appended;
+      stats.updated += updated;
+      stats.unchanged += unchanged;
+      stats.rejected += rejected;
+      stats.done += observed;
+      stats.bypassed += unchanged + rejected;
+      stats.currentListingId = newMatch ? `${newMatch[1]} new` : '';
+    } else if (/collector_sleep|search_explorer_sleep/.test(line)) {
+      stats.sleeps += 1;
+      stats.currentListingId = 'sleeping';
+    } else if (/collect_marketplace_search_explorer_error|collector_.*error|search_explorer_.*error/.test(line)) {
+      stats.errors += 1;
+      stats.collectorErrors += 1;
     }
   }
   return stats;
@@ -4707,6 +4734,7 @@ function openWorkerDetail(processId) {
   if (!processId) return;
   seedWorkerDetailState(processId);
   renderProcesses({ preserveScroll: true });
+  scheduleWorkerLiveSync(0);
   loadWorkerDetail({ preserveScroll: true })
     .then(() => {
       scheduleWorkerLiveSync(workerLivePollDelayMs());
@@ -4733,6 +4761,11 @@ function workerOverviewRows(processes = store.processes) {
       done: stats.done,
       skipped: stats.bypassed,
       review: stats.errors,
+      observed: stats.observed || 0,
+      appended: stats.appended || 0,
+      updated: stats.updated || 0,
+      unchanged: stats.unchanged || 0,
+      rejected: stats.rejected || 0,
       activity: latestWorkerAction(proc),
       running,
       selected: proc.id === store.selectedProcessId,
@@ -4743,64 +4776,47 @@ function workerOverviewRows(processes = store.processes) {
 function renderWorkerOverviewTable(rows) {
   const tableEl = document.getElementById('workerOverviewTable');
   if (!tableEl) return;
+  const metricColumn = (title, field, tooltip, width = 86) => ({
+    title,
+    field,
+    width,
+    minWidth: 72,
+    hozAlign: 'right',
+    headerHozAlign: 'right',
+    headerTooltip: tooltip,
+  });
   const columns = [
     {
       title: 'Worker',
       field: 'label',
-      minWidth: 190,
+      minWidth: 170,
+      widthGrow: 2,
       frozen: true,
-      formatter: (cell) => {
-        const row = cell.getRow().getData();
-        return `<button type="button" class="table-row-action worker-row-open" data-id="${html(row.id)}">${html(cell.getValue())}</button>`;
-      },
+      formatter: 'plaintext',
       cellClick: (_event, cell) => openWorkerDetail(cell.getRow().getData().id),
     },
     {
       title: 'Status',
       field: 'status',
-      width: 112,
+      width: 102,
+      minWidth: 88,
       formatter: (cell) => `<span class="status ${html(cell.getValue())}">${html(cell.getValue())}</span>`,
     },
-    { title: 'PID', field: 'pid', width: 84, hozAlign: 'right' },
-    { title: 'OS', field: 'os', width: 92 },
-    { title: 'Work', field: 'work', minWidth: 150, formatter: 'plaintext' },
-    { title: 'Attempted', field: 'attempted', width: 108, hozAlign: 'right' },
-    { title: 'Done', field: 'done', width: 86, hozAlign: 'right' },
-    { title: 'Skipped', field: 'skipped', width: 96, hozAlign: 'right' },
-    { title: 'Review', field: 'review', width: 94, hozAlign: 'right' },
-    { title: 'Activity', field: 'activity', minWidth: 280, formatter: 'plaintext' },
+    { title: 'PID', field: 'pid', width: 70, minWidth: 58, hozAlign: 'right', responsive: 3 },
+    { title: 'OS', field: 'os', width: 82, minWidth: 68, responsive: 3 },
+    { title: 'Work', field: 'work', minWidth: 110, widthGrow: 1.4, formatter: 'plaintext' },
+    metricColumn('Attempted', 'attempted', 'Work attempts or observed listing events. Collector workers count listings observed; resolver workers count detail attempts.', 102),
+    metricColumn('Done', 'done', 'Successful terminal work. Collector workers include appended and updated observations.', 78),
+    metricColumn('Skipped', 'skipped', 'Known no-op outcomes such as unchanged, duplicate, unavailable, filtered, or bypassed work.', 88),
+    metricColumn('Review', 'review', 'Failed, interrupted, or error events that need inspection.', 82),
+    metricColumn('Appended', 'appended', 'Actual new listing rows appended by collector observations.', 96),
     {
-      title: '',
-      field: 'actions',
-      width: 210,
-      headerSort: false,
-      formatter: (cell) => {
-        const row = cell.getRow().getData();
-        return '<div class="row-actions worker-row-actions">'
-          + `<button type="button" class="secondary worker-row-view" data-id="${html(row.id)}">View</button>`
-          + `<button type="button" class="secondary worker-row-restart" data-id="${html(row.id)}">Restart</button>`
-          + (row.running ? `<button type="button" class="danger worker-row-stop" data-id="${html(row.id)}">End</button>` : '')
-          + '</div>';
-      },
-      cellClick: async (event, cell) => {
-        const row = cell.getRow().getData();
-        const target = event.target;
-        if (!(target instanceof HTMLElement)) return;
-        try {
-          if (target.closest('.worker-row-stop')) {
-            target.closest('button')?.setAttribute('disabled', 'disabled');
-            await stopWorkerById(row.id);
-          } else if (target.closest('.worker-row-restart')) {
-            target.closest('button')?.setAttribute('disabled', 'disabled');
-            await restartWorkerById(row.id);
-          } else if (target.closest('.worker-row-view')) {
-            openWorkerDetail(row.id);
-          }
-        } catch (error) {
-          alert(error.message || 'Worker action failed.');
-          target.closest('button')?.removeAttribute('disabled');
-        }
-      },
+      title: 'Activity',
+      field: 'activity',
+      minWidth: 160,
+      widthGrow: 2,
+      formatter: 'plaintext',
+      responsive: 2,
     },
   ];
 
@@ -4808,14 +4824,14 @@ function renderWorkerOverviewTable(rows) {
     store.workerOverviewTable = new Tabulator(tableEl, {
       data: rows,
       columns,
-      layout: 'fitDataStretch',
+      layout: 'fitColumns',
+      responsiveLayout: 'hide',
       height: false,
       rowFormatter: (row) => {
         row.getElement().classList.toggle('selected-row', row.getData().selected === true);
       },
     });
     store.workerOverviewTable.on('rowClick', (event, row) => {
-      if (event.target?.closest?.('button')) return;
       openWorkerDetail(row.getData().id);
     });
   } else {
@@ -4860,6 +4876,52 @@ function renderProcesses(options = {}) {
     button.addEventListener('click', () => {
       clearWorkerDetailState();
       renderProcesses();
+    });
+  }
+  for (const button of document.querySelectorAll('.worker-detail-restart-button')) {
+    button.addEventListener('click', async () => {
+      if (!store.selectedProcessId) return;
+      button.disabled = true;
+      try {
+        await restartWorkerById(store.selectedProcessId);
+      } catch (error) {
+        alert(error.message || 'Worker could not be restarted.');
+        button.disabled = false;
+      }
+    });
+  }
+  for (const button of document.querySelectorAll('.worker-detail-refresh-button')) {
+    button.addEventListener('click', async () => {
+      if (!store.selectedProcessId) return;
+      store.workerDetailRefreshing = true;
+      store.workerDetailLoading = true;
+      store.workerDetailError = '';
+      renderProcesses({ preserveScroll: true });
+      try {
+        await loadWorkerDetail({
+          preserveScroll: true,
+          reconcile: true,
+          force: true,
+        });
+      } catch (error) {
+        store.workerDetailError = error.message || 'Worker refresh failed.';
+        renderProcesses({ preserveScroll: true });
+      } finally {
+        store.workerDetailRefreshing = false;
+        renderProcesses({ preserveScroll: true });
+      }
+    });
+  }
+  for (const button of document.querySelectorAll('.worker-detail-stop-button')) {
+    button.addEventListener('click', async () => {
+      if (!store.selectedProcessId) return;
+      button.disabled = true;
+      try {
+        await stopWorkerById(store.selectedProcessId);
+      } catch (error) {
+        alert(error.message || 'Worker could not be stopped.');
+        button.disabled = false;
+      }
     });
   }
   for (const backdrop of document.querySelectorAll('.worker-inspector-backdrop')) {
@@ -4976,14 +5038,6 @@ function workerDetailSectionRow(section, contentHtml) {
     + '</tr>';
 }
 
-function workerEventLinks(event) {
-  return [
-    event?.screenshotUrl ? `<a class="button-link compact" href="${html(apiUrl(event.screenshotUrl))}" target="_blank" rel="noreferrer">Shot</a>` : '',
-    event?.snapshotUrl ? `<a class="button-link compact" href="${html(apiUrl(event.snapshotUrl))}" target="_blank" rel="noreferrer">MD</a>` : '',
-    event?.source_url ? `<a class="button-link compact" href="${html(event.source_url)}" target="_blank" rel="noreferrer">FB</a>` : '',
-  ].filter(Boolean).join('');
-}
-
 function workerEventDetail(event) {
   return [
     eventPrice(event) ? `Price: ${eventPrice(event)}` : '',
@@ -4999,6 +5053,8 @@ function workerDetailRenderSignature(process, stats, events) {
     status: process?.status || '',
     pid: process?.pid || '',
     osAlive: Boolean(process?.osAlive),
+    osCheckedAt: process?.osCheckedAt || '',
+    updatedAt: process?.updatedAt || '',
     logCount: process?.logCount || 0,
     runtimeStats: process?.runtimeStats || null,
     eventStats: process?.eventStats || null,
@@ -5019,6 +5075,54 @@ function workerDetailRenderSignature(process, stats, events) {
     latestScreenshot: screenshots[0]?.name || screenshots[0]?.url || '',
     screenshotCount: screenshots.length,
   });
+}
+
+function mergeWorkerDetailProcess(nextProcess, fallbackProcess) {
+  const current = store.workerDetailProcess || fallbackProcess || activeProcess() || {};
+  if (!nextProcess) {
+    return current;
+  }
+  return {
+    ...current,
+    ...nextProcess,
+    args: nextProcess.args?.length ? nextProcess.args : current.args,
+    runtimeStats: nextProcess.runtimeStats || current.runtimeStats,
+    latestAction: nextProcess.latestAction || current.latestAction,
+    failureSummary: nextProcess.failureSummary || current.failureSummary,
+    eventStats: nextProcess.eventStats || current.eventStats,
+    logs: nextProcess.logs || current.logs || [],
+    screenshots: Array.isArray(nextProcess.screenshots) ? nextProcess.screenshots : (current.screenshots || []),
+  };
+}
+
+function applyWorkerProcessUpdate(nextProcess) {
+  if (!nextProcess?.id) return;
+  const index = store.processes.findIndex((proc) => proc.id === nextProcess.id);
+  if (index === -1) return;
+  const current = store.processes[index] || {};
+  store.processes[index] = {
+    ...current,
+    ...nextProcess,
+    args: nextProcess.args?.length ? nextProcess.args : current.args,
+    runtimeStats: nextProcess.runtimeStats || current.runtimeStats,
+    latestAction: nextProcess.latestAction || current.latestAction,
+    failureSummary: nextProcess.failureSummary || current.failureSummary,
+    eventStats: nextProcess.eventStats || current.eventStats,
+    logs: nextProcess.logs || current.logs || [],
+    screenshots: Array.isArray(nextProcess.screenshots) ? nextProcess.screenshots : (current.screenshots || []),
+  };
+  store.processSignature = processRenderSignature(store.processes);
+}
+
+function workerLiveUrl(workerId, options = {}) {
+  const params = new URLSearchParams({
+    screenshots: String(options.screenshots || 24),
+    stats: '1',
+  });
+  if (options.reconcile) {
+    params.set('reconcile', '1');
+  }
+  return `/api/workflows/${encodeURIComponent(workerId)}/live?${params.toString()}`;
 }
 
 function renderWorkerScreenshotHistory(selectedProcess) {
@@ -5136,8 +5240,10 @@ function renderWorkerDetail(selectedProcess) {
   if (store.workerDetailEventType !== 'all' && !eventTypeOptions.some((item) => item.eventType === store.workerDetailEventType)) {
     store.workerDetailEventType = 'all';
   }
+  const collectorStats = detailStats.collector || {};
   const latestEvent = detailStats.latestEvent || null;
   const previewEvent = detailStats.latestPreviewEvent || latestEvent;
+  const workerDetailRunning = ['running', 'starting', 'stopping'].includes(selectedProcess?.status || '');
   const categoryButtons = [
     ['all', 'All', detailStats.total || 0],
     ['workflow', 'Workflow', detailStats.workflow || 0],
@@ -5162,6 +5268,8 @@ function renderWorkerDetail(selectedProcess) {
     ['Status', selectedProcess?.status || ''],
     ['PID', selectedProcess?.pid || ''],
     ['OS', selectedProcess?.osAlive ? 'active' : 'inactive'],
+    ['OS checked', formatDate(selectedProcess?.osCheckedAt)],
+    ['Updated', formatDate(selectedProcess?.updatedAt)],
     ['Managed', selectedProcess?.managed ? 'managed' : 'recovered'],
     ['Detail', detailStateText],
     ['Started', formatDate(selectedProcess?.startedAt)],
@@ -5173,6 +5281,11 @@ function renderWorkerDetail(selectedProcess) {
     ['Done', stats.done],
     ['Skipped', stats.bypassed],
     ['Review', stats.errors],
+    ['Appended items', stats.appended || collectorStats.appended || 0],
+    ['Updated existing', stats.updated || collectorStats.updated || 0],
+    ['Unchanged existing', stats.unchanged || collectorStats.unchanged || 0],
+    ['Collector observed', stats.observed || collectorStats.observed || 0],
+    ['Rejected / filtered', stats.rejected || collectorStats.rejected || 0],
     ['Sleeps', stats.sleeps],
     ['Audit events', detailStats.total || 0],
     ['Workflow events', detailStats.workflow || 0],
@@ -5185,7 +5298,8 @@ function renderWorkerDetail(selectedProcess) {
     workerDetailSectionRow('Status', '<div class="worker-status-grid">'
       + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + statusRows + '</tbody></table></div>'
       + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + countRows + '</tbody></table></div>'
-      + '</div>'),
+      + '</div>'
+      + '<div class="settings-note worker-metric-note">Attempted, done, skipped, and review are semantic buckets shared by worker types. Appended items is collector-specific and counts actual new listing rows; updated and unchanged are existing listing observations.</div>'),
     workerDetailSectionRow('Live Screen', renderWorkerScreenshotHistory(selectedProcess)),
   ];
   const interactiveControls = renderProfileOnboarderControls(selectedProcess, detailStats);
@@ -5212,14 +5326,14 @@ function renderWorkerDetail(selectedProcess) {
         ? `<a href="${html(apiUrl(previewEvent.screenshotUrl))}" target="_blank" rel="noreferrer"><img class="worker-preview-image" src="${html(apiUrl(previewEvent.screenshotUrl))}" alt="Latest worker screenshot"></a>`
         : '<div class="empty-state">Screenshot preview appears after capture.</div>')
       + '</div>'
-      + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + previewRows + (workerEventLinks(previewEvent) ? `<tr><th>Links</th><td><div class="row-actions">${workerEventLinks(previewEvent)}</div></td></tr>` : '') + '</tbody></table></div>'
+      + '<div class="worker-detail-section-tablewrap"><table class="compact-kv-table"><tbody>' + previewRows + '</tbody></table></div>'
       + '</div>'));
   } else {
     detailRows.push(workerDetailSectionRow('Latest Preview', '<div class="empty-state">Event preview appears after worker activity.</div>'));
   }
 
   const eventRows = store.workerDetailLoading
-    ? '<tr><td colspan="9" class="empty-state">Loading worker events...</td></tr>'
+    ? '<tr><td colspan="8" class="empty-state">Loading worker events...</td></tr>'
     : store.workerDetailEvents.length
     ? store.workerDetailEvents.map((event) => (
       '<tr>'
@@ -5231,15 +5345,14 @@ function renderWorkerDetail(selectedProcess) {
         + `<td>${html(eventPrice(event))}</td>`
         + `<td class="cell-text">${html(eventTitle(event))}</td>`
         + `<td class="cell-text">${html(eventReason(event))}</td>`
-        + '<td><div class="row-actions">' + workerEventLinks(event) + '</div></td>'
       + '</tr>'
     )).join('')
-    : `<tr><td colspan="9" class="empty-state">${html(store.workerDetailError || 'Events for this category appear here.')}</td></tr>`;
+    : `<tr><td colspan="8" class="empty-state">${html(store.workerDetailError || 'Events for this category appear here.')}</td></tr>`;
   detailRows.push(workerDetailSectionRow('Audit Events', '<div class="worker-panel-toolbar worker-detail-section-toolbar">'
     + '<div class="worker-panel-title">Audit Events</div>'
     + `<div class="worker-event-filter-row"><div class="segmented worker-categories">${categoryButtons}</div>${eventTypeSelect}</div>`
     + '</div>'
-    + '<div class="worker-detail-section-tablewrap"><table class="worker-events-table"><thead><tr><th>Time</th><th>Scope</th><th>Subject</th><th>Event</th><th>Status</th><th>Price</th><th>Title</th><th>Reason</th><th>Links</th></tr></thead><tbody>'
+    + '<div class="worker-detail-section-tablewrap"><table class="worker-events-table"><thead><tr><th>Time</th><th>Scope</th><th>Subject</th><th>Event</th><th>Status</th><th>Price</th><th>Title</th><th>Reason</th></tr></thead><tbody>'
     + eventRows
     + '</tbody></table></div>'));
 
@@ -5264,8 +5377,13 @@ function renderWorkerDetail(selectedProcess) {
     + '<header class="worker-inspector-header">'
     + '<div><div class="label">Worker Workspace</div>'
     + `<div class="worker-inspector-title">${html(selectedProcess?.label || 'Worker')}</div>`
-    + `<div class="process-meta">${html(selectedProcess?.id || '')}${store.workerDetailLoading ? ' / loading detail' : ''}</div></div>`
-    + '<button type="button" class="secondary worker-detail-close-button">Close</button>'
+    + `<div class="process-meta">${html(selectedProcess?.id || '')}${store.workerDetailLoading ? ' / loading detail' : ''}${store.workerDetailRefreshing ? ' / refreshing health' : ''}</div></div>`
+    + '<div class="row-actions worker-inspector-actions">'
+      + `<button type="button" class="secondary worker-detail-refresh-button"${store.workerDetailRefreshing ? ' disabled' : ''}>Refresh</button>`
+      + '<button type="button" class="secondary worker-detail-restart-button">Restart</button>'
+      + (workerDetailRunning ? '<button type="button" class="danger worker-detail-stop-button">End</button>' : '')
+      + '<button type="button" class="secondary worker-detail-close-button">Close</button>'
+    + '</div>'
     + '</header>'
     + '<div class="worker-inspector-body worker-detail-table-body">'
     + '<div class="tablewrap worker-detail-tablewrap" tabindex="0">'
@@ -5294,7 +5412,7 @@ async function loadWorkerDetail(options = {}) {
   const selectedCategory = store.workerDetailCategory;
   let selectedEventType = store.workerDetailEventType;
   const requestSeq = ++store.workerDetailRequestSeq;
-  const workerId = encodeURIComponent(selectedProcessId);
+  const workerId = selectedProcessId;
   if (!processOnly) {
     store.workerDetailLoading = true;
     store.workerDetailError = '';
@@ -5304,19 +5422,33 @@ async function loadWorkerDetail(options = {}) {
   let eventsPayload;
   try {
     if (processOnly) {
-      detailPayload = await fetchJson(`/api/workflows/${workerId}?stats=0`);
+      detailPayload = await fetchJson(workerLiveUrl(workerId, {
+        reconcile: options.reconcile === true,
+      }));
     } else {
       const eventTypeParam = selectedEventType === 'all' ? '' : `&eventType=${encodeURIComponent(selectedEventType)}`;
-      [detailPayload, statsPayload, eventsPayload] = await Promise.all([
-        fetchJson(`/api/workflows/${workerId}`),
-        fetchJson(`/api/workflows/${workerId}/stats`),
-        fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=50`),
+      detailPayload = await fetchJson(workerLiveUrl(workerId, {
+        reconcile: options.reconcile === true,
+      }));
+      if (
+        requestSeq === store.workerDetailRequestSeq
+        && store.selectedProcessId === selectedProcessId
+      ) {
+        applyWorkerProcessUpdate(detailPayload.process);
+        store.workerDetailProcess = mergeWorkerDetailProcess(detailPayload.process, selectedProcess);
+        if (render) {
+          renderProcesses({ preserveScroll: options.preserveScroll });
+        }
+      }
+      [statsPayload, eventsPayload] = await Promise.all([
+        fetchJson(`/api/workflows/${encodeURIComponent(workerId)}/stats?cache=1`),
+        fetchJson(`/api/workflows/${encodeURIComponent(workerId)}/events?category=${encodeURIComponent(selectedCategory)}${eventTypeParam}&limit=25`),
       ]);
       const availableEventTypes = workerEventTypeOptions(statsPayload.stats || {});
       if (selectedEventType !== 'all' && !availableEventTypes.some((item) => item.eventType === selectedEventType)) {
         selectedEventType = 'all';
         store.workerDetailEventType = 'all';
-        eventsPayload = await fetchJson(`/api/workflows/${workerId}/events?category=${encodeURIComponent(selectedCategory)}&limit=50`);
+        eventsPayload = await fetchJson(`/api/workflows/${encodeURIComponent(workerId)}/events?category=${encodeURIComponent(selectedCategory)}&limit=25`);
       }
     }
   } catch (error) {
@@ -5337,7 +5469,8 @@ async function loadWorkerDetail(options = {}) {
   ) {
     return;
   }
-  store.workerDetailProcess = detailPayload.process || selectedProcess;
+  applyWorkerProcessUpdate(detailPayload.process);
+  store.workerDetailProcess = mergeWorkerDetailProcess(detailPayload.process, selectedProcess);
   if (!processOnly) {
     store.workerDetailStats = statsPayload.stats || null;
     store.workerDetailEvents = eventsPayload.events || [];
@@ -5361,40 +5494,38 @@ async function loadWorkerDetail(options = {}) {
 
 async function loadSummary() {
   const requestSeq = ++store.summaryRequestSeq;
+  const summaryUrl = store.savedQueryOverviewMode === 'all'
+    ? '/api/summary?savedQueries=all'
+    : '/api/summary';
   const [summary] = await Promise.all([
-    fetchJson('/api/summary'),
+    fetchJson(summaryUrl),
     listingsViewer.ensureSavedQueriesLoaded?.().catch((error) => {
       console.warn('Saved query load failed:', error.message || error);
       return [];
     }),
   ]);
-  const savedQueries = listingsViewer.savedQueriesForOverview({
-    includeAll: store.savedQueryOverviewMode === 'all',
-  });
-  if (savedQueries.length) {
-    try {
-      const counts = await fetchJson('/api/query/counts', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ queries: savedQueries }),
-      });
-      summary.savedQueryCards = counts.cards || [];
-    } catch (error) {
-      summary.savedQueryCards = savedQueries.map((item) => ({
-        ...item,
-        value: 0,
-        error: error.message || 'Saved query count failed.',
-      }));
-    }
-  } else {
-    summary.savedQueryCards = [];
+  if (!Array.isArray(summary.savedQueryCards)) {
+    const savedQueries = listingsViewer.savedQueriesForOverview({
+      includeAll: store.savedQueryOverviewMode === 'all',
+    });
+    summary.savedQueryCards = savedQueries.length ? savedQueries.map((item) => ({
+      ...item,
+      value: 0,
+      error: 'Saved query count is not available from this server.',
+    })) : [];
   }
   if (requestSeq !== store.summaryRequestSeq) return;
   const nextSignature = summaryRenderSignature(summary);
+  const previousTotalRows = store.summary?.totalRows || 0;
   store.summary = summary;
   if (nextSignature !== store.summarySignature) {
     store.summarySignature = nextSignature;
     renderSummary();
+  }
+  if ((summary.totalRows || 0) !== previousTotalRows) {
+    listingsViewer.refreshAllListingsIfTotalChanged?.(summary.totalRows).catch((error) => {
+      console.warn('All listings refresh after summary update failed:', error.message || error);
+    });
   }
 }
 
@@ -5558,22 +5689,47 @@ async function syncSummaryInBackground() {
   }
 }
 
+async function loadWorkerLiveStatus(options = {}) {
+  const selectedProcess = activeProcess() || store.workerDetailProcess;
+  const selectedProcessId = store.selectedProcessId || selectedProcess?.id;
+  if (!selectedProcessId) {
+    return;
+  }
+  const payload = await fetchJson(workerLiveUrl(selectedProcessId, {
+    reconcile: options.reconcile === true,
+  }));
+  if (store.selectedProcessId !== selectedProcessId) {
+    return;
+  }
+  applyWorkerProcessUpdate(payload.process);
+  store.workerDetailProcess = mergeWorkerDetailProcess(payload.process, selectedProcess);
+  const nextSignature = workerDetailRenderSignature(
+    store.workerDetailProcess,
+    store.workerDetailStats,
+    store.workerDetailEvents,
+  );
+  const changed = nextSignature !== store.workerDetailSignature;
+  store.workerDetailSignature = nextSignature;
+  if (options.render !== false && (!options.onlyIfChanged || changed)) {
+    renderProcesses({ preserveScroll: options.preserveScroll });
+  }
+}
+
 async function syncWorkerLiveInBackground() {
   if (!shouldPollWorkerLiveView()) {
     clearWorkerLiveSync();
     return;
   }
-  if (store.workerLivePollInFlight || store.workerDetailLoading) {
+  if (store.workerLivePollInFlight) {
     scheduleWorkerLiveSync();
     return;
   }
   store.workerLivePollInFlight = true;
   try {
-    await loadWorkerDetail({
+    await loadWorkerLiveStatus({
       render: true,
       preserveScroll: true,
       onlyIfChanged: true,
-      processOnly: true,
     });
   } catch (error) {
     console.warn('Worker live view sync failed:', error.message || error);
@@ -5594,12 +5750,11 @@ async function syncWorkflowsInBackground() {
       background: true,
       light: true,
     });
-    if (isPanelActive('opsPanel') && store.selectedProcessId && !store.workerDetailLoading) {
-      await loadWorkerDetail({
+    if (isPanelActive('opsPanel') && store.selectedProcessId) {
+      await loadWorkerLiveStatus({
         render: true,
         preserveScroll: true,
         onlyIfChanged: true,
-        processOnly: true,
       });
     }
   } catch (error) {
