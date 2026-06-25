@@ -262,17 +262,32 @@ function parseComparableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function firstPriceTokenExpression(textSql) {
+  const priceTail = `
+    CASE
+      WHEN ${textSql} LIKE '%CA$%' THEN SUBSTR(${textSql}, INSTR(${textSql}, 'CA$') + 3)
+      WHEN ${textSql} LIKE '%$%' THEN SUBSTR(${textSql}, INSTR(${textSql}, '$') + 1)
+      ELSE ''
+    END
+  `;
+  const normalizedTail = `
+    TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((${priceTail}), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+  `;
+  return `
+    CASE
+      WHEN INSTR((${normalizedTail}), ' ') > 0
+        THEN SUBSTR((${normalizedTail}), 1, INSTR((${normalizedTail}), ' ') - 1)
+      ELSE (${normalizedTail})
+    END
+  `;
+}
+
 function buildPriceExpression() {
   return `
     COALESCE(
       CAST(NULLIF(REPLACE(REPLACE(REPLACE(detail_price, 'CA$', ''), '$', ''), ',', ''), '') AS INTEGER),
-      CAST(NULLIF(REPLACE(REPLACE(
-        CASE
-          WHEN card_text LIKE '%CA$ %'
-            THEN TRIM(SUBSTR(SUBSTR(card_text, INSTR(card_text, 'CA$ ') + 4), 1, INSTR(SUBSTR(card_text, INSTR(card_text, 'CA$ ') + 4), ' |') - 1))
-          ELSE ''
-        END
-      , ',', ''), ' ', ''), '') AS INTEGER)
+      CAST(NULLIF((${firstPriceTokenExpression('detail_price')}), '') AS INTEGER),
+      CAST(NULLIF((${firstPriceTokenExpression('card_text')}), '') AS INTEGER)
     )
   `;
 }

@@ -1,13 +1,84 @@
 const LISTING_PRICE_SQL = `
   COALESCE(
     CAST(NULLIF(REPLACE(REPLACE(REPLACE(detail_price, 'CA$', ''), '$', ''), ',', ''), '') AS INTEGER),
-    CAST(NULLIF(REPLACE(REPLACE(
+    CAST(NULLIF((
       CASE
-        WHEN card_text LIKE '%CA$ %'
-          THEN TRIM(SUBSTR(SUBSTR(card_text, INSTR(card_text, 'CA$ ') + 4), 1, INSTR(SUBSTR(card_text, INSTR(card_text, 'CA$ ') + 4), ' |') - 1))
-        ELSE ''
+        WHEN INSTR((
+          TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+            CASE
+              WHEN detail_price LIKE '%CA$%' THEN SUBSTR(detail_price, INSTR(detail_price, 'CA$') + 3)
+              WHEN detail_price LIKE '%$%' THEN SUBSTR(detail_price, INSTR(detail_price, '$') + 1)
+              ELSE ''
+            END
+          ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+        ), ' ') > 0
+          THEN SUBSTR((
+            TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+              CASE
+                WHEN detail_price LIKE '%CA$%' THEN SUBSTR(detail_price, INSTR(detail_price, 'CA$') + 3)
+                WHEN detail_price LIKE '%$%' THEN SUBSTR(detail_price, INSTR(detail_price, '$') + 1)
+                ELSE ''
+              END
+            ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+          ), 1, INSTR((
+            TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+              CASE
+                WHEN detail_price LIKE '%CA$%' THEN SUBSTR(detail_price, INSTR(detail_price, 'CA$') + 3)
+                WHEN detail_price LIKE '%$%' THEN SUBSTR(detail_price, INSTR(detail_price, '$') + 1)
+                ELSE ''
+              END
+            ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+          ), ' ') - 1)
+        ELSE (
+          TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+            CASE
+              WHEN detail_price LIKE '%CA$%' THEN SUBSTR(detail_price, INSTR(detail_price, 'CA$') + 3)
+              WHEN detail_price LIKE '%$%' THEN SUBSTR(detail_price, INSTR(detail_price, '$') + 1)
+              ELSE ''
+            END
+          ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+        )
       END
-    , ',', ''), ' ', ''), '') AS INTEGER)
+    ), '') AS INTEGER),
+    CAST(NULLIF((
+      CASE
+        WHEN INSTR((
+          TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+            CASE
+              WHEN card_text LIKE '%CA$%' THEN SUBSTR(card_text, INSTR(card_text, 'CA$') + 3)
+              WHEN card_text LIKE '%$%' THEN SUBSTR(card_text, INSTR(card_text, '$') + 1)
+              ELSE ''
+            END
+          ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+        ), ' ') > 0
+          THEN SUBSTR((
+            TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+              CASE
+                WHEN card_text LIKE '%CA$%' THEN SUBSTR(card_text, INSTR(card_text, 'CA$') + 3)
+                WHEN card_text LIKE '%$%' THEN SUBSTR(card_text, INSTR(card_text, '$') + 1)
+                ELSE ''
+              END
+            ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+          ), 1, INSTR((
+            TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+              CASE
+                WHEN card_text LIKE '%CA$%' THEN SUBSTR(card_text, INSTR(card_text, 'CA$') + 3)
+                WHEN card_text LIKE '%$%' THEN SUBSTR(card_text, INSTR(card_text, '$') + 1)
+                ELSE ''
+              END
+            ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+          ), ' ') - 1)
+        ELSE (
+          TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE((
+            CASE
+              WHEN card_text LIKE '%CA$%' THEN SUBSTR(card_text, INSTR(card_text, 'CA$') + 3)
+              WHEN card_text LIKE '%$%' THEN SUBSTR(card_text, INSTR(card_text, '$') + 1)
+              ELSE ''
+            END
+          ), ',', ''), '|', ' '), '。', ' '), '，', ' '), ':', ' '))
+        )
+      END
+    ), '') AS INTEGER)
   )
 `;
 

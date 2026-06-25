@@ -11,6 +11,7 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   upsertHomepageListing,
+  upsertSavedQuery,
 } = require('../scripts/marketplace-homepage-db');
 
 function createTempDbPath() {
@@ -117,6 +118,103 @@ test('listings API result stats describe the full query result, not only the cur
     assert.equal(resultStats.priceMedian, 2000);
     assert.equal(resultStats.priceHistogram.reduce((sum, bin) => sum + bin.count, 0), 3);
     assert.deepEqual(resultStats.statusCounts, [['done', 2], ['pending', 1]]);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('summary API reuses projection and saved query count caches', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+  try {
+    seedListing(db, 'pentax-summary-1000', 1000, 'pending');
+    seedListing(db, 'pentax-summary-2000', 2000, 'done');
+    seedListing(db, 'leica-summary-3000', 3000, 'done');
+    db.prepare(`
+      UPDATE homepage_listings
+      SET card_title = 'Leica listing leica-summary-3000',
+          card_text = 'CA$3000 | Leica listing leica-summary-3000'
+      WHERE listing_id = 'leica-summary-3000'
+    `).run();
+    upsertSavedQuery(db, {
+      label: 'Pentax',
+      query: 'listings | where title contains "Pentax"',
+      showInOverview: true,
+    });
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+
+  try {
+    const first = await getJson(baseUrl, '/api/summary?token=admin-token');
+    assert.equal(first.status, 200);
+    assert.equal(first.body.cache.cached, false);
+    assert.equal(first.body.totalRows, 3);
+    assert.equal(first.body.savedQueryCards.length, 1);
+    assert.equal(first.body.savedQueryCards[0].value, 2);
+    assert.equal(first.body.savedQueryCards[0].cache.cached, false);
+
+    const second = await getJson(baseUrl, '/api/summary?token=admin-token');
+    assert.equal(second.status, 200);
+    assert.equal(second.body.cache.cached, true);
+    assert.equal(second.body.totalRows, 3);
+    assert.equal(second.body.savedQueryCards[0].value, 2);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('listings API extracts localized card text prices for numeric filters', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+  try {
+    upsertHomepageListing(db, {
+      listingId: 'localized-price-950',
+      href: 'https://www.facebook.com/marketplace/item/localized-price-950/',
+      title: 'AF-S NIKKOR 14-24MM f/2.8G ED',
+      text: '未读AF-S NIKKOR 14-24MM f/2.8G ED 上架了，价格：CA$ 950.00。21小时·附近',
+      rank: 1,
+      source: 'search',
+    }, { source: 'search' });
+    upsertHomepageListing(db, {
+      listingId: 'pipe-price-85',
+      href: 'https://www.facebook.com/marketplace/item/pipe-price-85/',
+      title: 'Nikon Nikkor Non-Ai 50mm f/2 F mount Lens',
+      text: '刚刚上架 | CA$ 85 | Nikon Nikkor Non-Ai 50mm f/2 F mount Lens | BCVictoria',
+      rank: 2,
+      source: 'search',
+    }, { source: 'search' });
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+
+  try {
+    const response = await getJson(
+      baseUrl,
+      '/api/listings?token=admin-token&q=listings%20%7C%20where%20price%20%3E%3D%20900%20%7C%20sort%20by%20price%20desc&limit=10&offset=0',
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.body.total, 1);
+    assert.equal(response.body.rows[0].listing_id, 'localized-price-950');
+    assert.equal(response.body.rows[0].numeric_price, 950);
   } finally {
     await closeServer(server);
     fs.rmSync(tempDir, { recursive: true, force: true });

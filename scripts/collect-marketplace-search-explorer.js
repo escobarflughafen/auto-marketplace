@@ -101,6 +101,34 @@ function uniqueKeywords(keywords) {
   return result;
 }
 
+function cleanBagKeyword(value) {
+  let keyword = normalizeKeyword(value);
+  if (!keyword) {
+    return '';
+  }
+
+  keyword = keyword
+    .replace(/^未读\s*/i, '')
+    .replace(/\s+上架了[，,].*$/i, '')
+    .replace(/\s+[·•]\s*(?:附近|降价|.*项收藏).*$/i, '')
+    .replace(/\s+\d+\s*(?:项收藏|人收藏).*$/i, '')
+    .trim();
+
+  if (!keyword || isPriceLine(keyword) || isFreshnessLine(keyword)) {
+    return '';
+  }
+  if (keyword.includes('|')) {
+    keyword = normalizeKeyword(pickSearchCardTitle(keyword.split('|').map((item) => item.trim()).filter(Boolean)));
+  }
+  if (/上架了|价格[:：]|附近|降价|项收藏|人收藏/.test(keyword)) {
+    return '';
+  }
+  if ((keyword.match(/[，。]/g) || []).length > 1) {
+    return '';
+  }
+  return keyword;
+}
+
 function parseSearchQueryTargets(value, flagName = '--query-targets') {
   const text = String(value || '').trim();
   if (!text) {
@@ -778,10 +806,11 @@ function summarizeUpsertOutcomes(results) {
 }
 
 function filterBagKeywordsFromItems(items, options) {
+  const maxKeywordLength = Math.min(options.bagMaxKeywordLength, 80);
   return items
-    .map((item) => normalizeKeyword(item.title))
+    .map((item) => cleanBagKeyword(item.title))
     .filter((title) => title.length >= options.bagMinKeywordLength)
-    .filter((title) => title.length <= options.bagMaxKeywordLength);
+    .filter((title) => title.length <= maxKeywordLength);
 }
 
 function randomIntegerBetween(minimum, maximum) {

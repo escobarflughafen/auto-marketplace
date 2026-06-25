@@ -238,6 +238,23 @@ test('filterBagKeywordsFromItems keeps titles within configured length', () => {
   assert.deepEqual(keywords, ['Nikon D850 body']);
 });
 
+test('filterBagKeywordsFromItems cleans Marketplace card UI text', () => {
+  const keywords = filterBagKeywordsFromItems([
+    { title: '未读Lenovo ThinkPad X13 Gen 5 Ultra 7 165 上架了，价格：CA$ 949.00。2周·降价' },
+    { title: 'CA$ 950 | AF-S NIKKOR 14-24MM f/2.8G ED | Vancouver' },
+    { title: '未读Various Lenses 上架了，价格：CA$ 50.00。1周·附近' },
+  ], {
+    bagMinKeywordLength: 5,
+    bagMaxKeywordLength: 160,
+  });
+
+  assert.deepEqual(keywords, [
+    'Lenovo ThinkPad X13 Gen 5 Ultra 7 165',
+    'AF-S NIKKOR 14-24MM f/2.8G ED',
+    'Various Lenses',
+  ]);
+});
+
 test('computeNextSeedRound stays within configured reseed interval', () => {
   for (let index = 0; index < 20; index += 1) {
     const nextRound = computeNextSeedRound(5, 10, 20);
