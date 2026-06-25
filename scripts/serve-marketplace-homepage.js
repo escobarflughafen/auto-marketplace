@@ -1524,8 +1524,8 @@ function getListingsDataVersion(db) {
   ].join('|'));
 }
 
-function getSummaryDataVersion(db) {
-  const listingVersion = getListingsDataVersion(db);
+function getSummaryDataVersion(db, options = {}) {
+  const listingVersion = options.listingsDataVersion || getListingsDataVersion(db);
   const saved = db.prepare(`
     SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS latest_updated_at
     FROM saved_queries
@@ -1631,8 +1631,8 @@ function countListingsForSummaryQueryCached(db, query, options = {}) {
   };
 }
 
-function listSummaryQueryCardsWithCounts(db) {
-  const dataVersion = getListingsDataVersion(db);
+function listSummaryQueryCardsWithCounts(db, options = {}) {
+  const dataVersion = options.dataVersion || getListingsDataVersion(db);
   return listSummaryQueryCards(db).map((card) => {
     try {
       const result = countListingsForSummaryQueryCached(db, card.query, { dataVersion, source: 'summary-card' });
@@ -1705,7 +1705,7 @@ function computeSummaryPayload(db, options = {}) {
     latestSeenAt: latest.latest_seen_at,
     queueCounts: getHomepageListingCounts(db),
     resolveQueueCounts: getResolveQueueCounts(db),
-    summaryCards: listSummaryQueryCardsWithCounts(db),
+    summaryCards: listSummaryQueryCardsWithCounts(db, { dataVersion: listingsDataVersion }),
     savedQueryCards: listSavedQueriesWithCachedCounts(db, {
       dataVersion: listingsDataVersion,
       includeAll: options.savedQueriesIncludeAll === true,
@@ -3504,8 +3504,8 @@ function createServer(options) {
       if (access.canWrite) {
         refreshResolveQueueRunStatuses(db);
       }
-      const summaryDataVersion = getSummaryDataVersion(db);
       const listingsDataVersion = getListingsDataVersion(db);
+      const summaryDataVersion = getSummaryDataVersion(db, { listingsDataVersion });
       const savedQueriesIncludeAll = requestUrl.searchParams.get('savedQueries') === 'all';
       writeJson(response, 200, getSummaryProjection(db, {
         dbPath: options.dbPath,
