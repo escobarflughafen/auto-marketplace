@@ -30,6 +30,7 @@ const {
   runTransaction,
   updateWorkflowRun,
   getWorkflowRun,
+  getWorkflowRunLive,
   listWorkflowRuns,
   listWorkerParameterProfiles,
   getWorkerParameterProfile,
@@ -1193,6 +1194,27 @@ function publicWorkflowRunRecord(run, options = {}) {
   };
 }
 
+function publicWorkflowRunLiveRecord(run) {
+  return {
+    id: run.run_id,
+    workflowId: run.workflow_id,
+    workerType: workflowTypeForId(run.workflow_id),
+    label: run.label,
+    script: run.script,
+    pid: run.pid,
+    status: run.status,
+    startedAt: run.started_at,
+    updatedAt: run.updated_at,
+    exitedAt: run.exited_at,
+    exitCode: run.exit_code,
+    signal: run.signal,
+    osCheckedAt: run.os_checked_at,
+    osAlive: run.os_alive,
+    managed: managedProcesses.has(run.run_id),
+    logCount: run.log_count || 0,
+  };
+}
+
 function publicWorkflowRunRecordWithStats(db, run, options = {}) {
   const record = publicWorkflowRunRecord(run, options);
   const includeLatestEvents = options.includeLatestEvents === true;
@@ -1211,6 +1233,7 @@ function publicWorkflowRunRecordWithStats(db, run, options = {}) {
       skipped: eventStats.skipped,
       error: eventStats.error,
       started: eventStats.started,
+      collector: eventStats.collector,
       workerIds: eventStats.workerIds,
     };
   return record;
@@ -1233,13 +1256,27 @@ function failureSummaryFromLogs(logs = []) {
 }
 
 function runtimeStatsFromLogs(logs = []) {
-  const stats = { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
+  const stats = {
+    attempted: 0,
+    done: 0,
+    bypassed: 0,
+    errors: 0,
+    sleeps: 0,
+    currentListingId: '',
+    observed: 0,
+    appended: 0,
+    updated: 0,
+    unchanged: 0,
+    rejected: 0,
+    collectorErrors: 0,
+  };
   for (const line of logs) {
     const listingMatch = line.match(/listing_id=([^\s]+)/);
     const collectedMatch = line.match(/\bcollected=(\d+)/);
     const newMatch = line.match(/\bnew=(\d+)/);
     const sameMatch = line.match(/\bexisting_same=(\d+)/);
     const updatedMatch = line.match(/\bexisting_updated=(\d+)/);
+    const filteredMatch = line.match(/\b(?:filtered|ignored|rejected)=(\d+)/);
     const queryMatch = line.match(/\bquery="([^"]+)"/);
     if (/job_start/.test(line)) {
       stats.attempted += 1;
@@ -1262,9 +1299,18 @@ function runtimeStatsFromLogs(logs = []) {
       stats.attempted += 1;
       stats.currentListingId = queryMatch?.[1] ? `search: ${queryMatch[1]}` : 'search';
     } else if (/cycle_done|round_done/.test(line)) {
-      stats.done += collectedMatch ? Number.parseInt(collectedMatch[1], 10) : 0;
-      stats.bypassed += (sameMatch ? Number.parseInt(sameMatch[1], 10) : 0)
-        + (updatedMatch ? Number.parseInt(updatedMatch[1], 10) : 0);
+      const collected = collectedMatch ? Number.parseInt(collectedMatch[1], 10) : 0;
+      const appended = newMatch ? Number.parseInt(newMatch[1], 10) : 0;
+      const unchanged = sameMatch ? Number.parseInt(sameMatch[1], 10) : 0;
+      const updated = updatedMatch ? Number.parseInt(updatedMatch[1], 10) : 0;
+      const rejected = filteredMatch ? Number.parseInt(filteredMatch[1], 10) : 0;
+      stats.observed += collected;
+      stats.appended += appended;
+      stats.updated += updated;
+      stats.unchanged += unchanged;
+      stats.rejected += rejected;
+      stats.done += collected;
+      stats.bypassed += unchanged + rejected;
       if (newMatch) {
         stats.currentListingId = `${newMatch[1]} new`;
       } else {
@@ -1277,12 +1323,14 @@ function runtimeStatsFromLogs(logs = []) {
       stats.currentListingId = '';
     } else if (/collect_marketplace_search_explorer_error|collector_.*error|search_explorer_.*error/.test(line)) {
       stats.errors += 1;
+      stats.collectorErrors += 1;
     }
   }
   return stats;
 }
 
 function runtimeStatsFromEventStats(eventStats, fallbackStats = {}) {
+  const collector = eventStats?.collector || {};
   const hasAuditStats = Boolean(eventStats && (
     eventStats.listingTotal > 0
     || eventStats.workflow > 0
@@ -1290,6 +1338,7 @@ function runtimeStatsFromEventStats(eventStats, fallbackStats = {}) {
     || eventStats.done > 0
     || eventStats.skipped > 0
     || eventStats.error > 0
+    || collector.observed > 0
   ));
   if (!hasAuditStats) {
     return fallbackStats || { attempted: 0, done: 0, bypassed: 0, errors: 0, sleeps: 0, currentListingId: '' };
@@ -1301,6 +1350,12 @@ function runtimeStatsFromEventStats(eventStats, fallbackStats = {}) {
     errors: eventStats.error || 0,
     sleeps: fallbackStats.sleeps || 0,
     currentListingId: fallbackStats.currentListingId || '',
+    observed: collector.observed || fallbackStats.observed || 0,
+    appended: collector.appended || fallbackStats.appended || 0,
+    updated: collector.updated || fallbackStats.updated || 0,
+    unchanged: collector.unchanged || fallbackStats.unchanged || 0,
+    rejected: collector.rejected || fallbackStats.rejected || 0,
+    collectorErrors: collector.errors || fallbackStats.collectorErrors || 0,
     source: 'events',
   };
 }
@@ -1353,6 +1408,47 @@ function reconcileWorkflowRuns(db, options = {}) {
   return publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), options);
 }
 
+function reconcileWorkflowRunById(db, runId) {
+  const run = getWorkflowRun(db, runId);
+  if (!run) {
+    return null;
+  }
+  const now = nowIso();
+  const managed = managedProcesses.get(run.run_id);
+  const alive = pidIsAlive(managed?.pid || run.pid);
+
+  if (managed) {
+    managed.osAlive = alive;
+    managed.osCheckedAt = now;
+    syncWorkflowRun(db, managed, { osCheckedAt: now, osAlive: alive });
+    return getWorkflowRunLive(db, run.run_id);
+  }
+
+  if (isManagedStatusActive(run.status) && !alive) {
+    const nextStatus = run.status === 'stopping' ? 'terminated' : 'lost';
+    updateWorkflowRunWithLifecycleEvent(db, run.run_id, {
+      status: nextStatus,
+      exitedAt: now,
+      osCheckedAt: now,
+      osAlive: false,
+      logs: [
+        ...(run.logs || []),
+        `[${now}] workflow_reconciled status=${nextStatus} reason=process_missing previous_status=${run.status || ''} pid=${run.pid || ''}`,
+      ],
+    }, {
+      eventAt: now,
+      reason: 'process_missing',
+    });
+  } else {
+    updateWorkflowRun(db, run.run_id, {
+      osCheckedAt: now,
+      osAlive: alive,
+    });
+  }
+
+  return getWorkflowRunLive(db, run.run_id);
+}
+
 function listManagedProcesses(db, options = {}) {
   if (options.reconcile === false) {
     return publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), options);
@@ -1397,14 +1493,159 @@ function countListingsForSummaryQuery(db, query) {
   };
 }
 
+function compactHash(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function getListingsDataVersion(db) {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS listing_count,
+      COALESCE(MAX(last_seen_at), '') AS latest_seen_at,
+      COALESCE(MAX(detail_completed_at), '') AS latest_completed_at
+    FROM homepage_listings
+  `).get();
+  const statusRows = db.prepare(`
+    SELECT
+      detail_status AS status,
+      COUNT(*) AS count,
+      COALESCE(SUM(detail_attempts), 0) AS attempts,
+      COALESCE(MAX(detail_started_at), '') AS latest_started_at,
+      COALESCE(MAX(detail_completed_at), '') AS latest_completed_at
+    FROM homepage_listings
+    GROUP BY detail_status
+    ORDER BY detail_status ASC
+  `).all();
+  return compactHash([
+    row.listing_count || 0,
+    row.latest_seen_at || '',
+    row.latest_completed_at || '',
+    JSON.stringify(statusRows),
+  ].join('|'));
+}
+
+function getSummaryDataVersion(db) {
+  const listingVersion = getListingsDataVersion(db);
+  const saved = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS latest_updated_at
+    FROM saved_queries
+  `).get();
+  const cards = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS latest_updated_at
+    FROM summary_query_cards
+  `).get();
+  const resolve = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS latest_updated_at
+    FROM resolve_queue_items
+  `).get();
+  return compactHash(JSON.stringify({
+    listingVersion,
+    savedCount: saved.count || 0,
+    savedUpdatedAt: saved.latest_updated_at || '',
+    cardCount: cards.count || 0,
+    cardUpdatedAt: cards.latest_updated_at || '',
+    resolveCount: resolve.count || 0,
+    resolveUpdatedAt: resolve.latest_updated_at || '',
+  }));
+}
+
+function queryCountCacheKey(source, query, dataVersion) {
+  return compactHash(JSON.stringify({
+    source: String(source || 'listings'),
+    query: String(query || '').trim(),
+    dataVersion,
+  }));
+}
+
+function countListingsForSummaryQueryCached(db, query, options = {}) {
+  const source = String(options.source || 'listings').trim() || 'listings';
+  const normalizedQuery = String(query || '').trim();
+  const dataVersion = options.dataVersion || getListingsDataVersion(db);
+  const queryHash = compactHash(normalizedQuery);
+  const cacheKey = queryCountCacheKey(source, normalizedQuery, dataVersion);
+  const cached = db.prepare(`
+    SELECT *
+    FROM query_count_cache
+    WHERE cache_key = ?
+  `).get(cacheKey);
+  if (cached) {
+    return {
+      total: cached.count || 0,
+      cached: true,
+      cacheKey,
+      dataVersion,
+      computedAt: cached.computed_at,
+      elapsedMs: cached.elapsed_ms || 0,
+      error: cached.error || '',
+    };
+  }
+
+  const startedAt = process.hrtime.bigint();
+  const counted = countListingsForSummaryQuery(db, normalizedQuery);
+  const elapsedMs = elapsedMsSince(startedAt);
+  const computedAt = nowIso();
+  db.prepare(`
+    INSERT INTO query_count_cache (
+      cache_key,
+      source,
+      query,
+      query_hash,
+      data_version,
+      count,
+      computed_at,
+      elapsed_ms,
+      error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
+    ON CONFLICT(cache_key) DO UPDATE SET
+      count = excluded.count,
+      computed_at = excluded.computed_at,
+      elapsed_ms = excluded.elapsed_ms,
+      error = ''
+  `).run(
+    cacheKey,
+    source,
+    normalizedQuery,
+    queryHash,
+    dataVersion,
+    counted.total || 0,
+    computedAt,
+    elapsedMs,
+  );
+  db.prepare(`
+    DELETE FROM query_count_cache
+    WHERE cache_key NOT IN (
+      SELECT cache_key
+      FROM query_count_cache
+      ORDER BY computed_at DESC
+      LIMIT 2000
+    )
+  `).run();
+  return {
+    ...counted,
+    cached: false,
+    cacheKey,
+    dataVersion,
+    computedAt,
+    elapsedMs,
+    error: '',
+  };
+}
+
 function listSummaryQueryCardsWithCounts(db) {
+  const dataVersion = getListingsDataVersion(db);
   return listSummaryQueryCards(db).map((card) => {
     try {
-      const result = countListingsForSummaryQuery(db, card.query);
+      const result = countListingsForSummaryQueryCached(db, card.query, { dataVersion, source: 'summary-card' });
       return {
         ...card,
         value: result.total,
         error: '',
+        cache: {
+          cached: result.cached === true,
+          computedAt: result.computedAt,
+          elapsedMs: result.elapsedMs,
+          dataVersion: result.dataVersion,
+        },
       };
     } catch (error) {
       return {
@@ -1414,6 +1655,143 @@ function listSummaryQueryCardsWithCounts(db) {
       };
     }
   });
+}
+
+function listSavedQueriesWithCachedCounts(db, options = {}) {
+  const dataVersion = options.dataVersion || getListingsDataVersion(db);
+  const includeAll = options.includeAll === true;
+  return listSavedQueries(db)
+    .filter((item) => includeAll || item.showInOverview === true)
+    .map((item) => {
+      const query = String(item.query || '').trim();
+      try {
+        const counted = countListingsForSummaryQueryCached(db, query, { dataVersion, source: 'saved-query' });
+        return {
+          id: item.id,
+          label: item.label,
+          query,
+          value: counted.total,
+          showInOverview: item.showInOverview === true,
+          source: 'saved-query',
+          error: '',
+          cache: {
+            cached: counted.cached === true,
+            computedAt: counted.computedAt,
+            elapsedMs: counted.elapsedMs,
+            dataVersion: counted.dataVersion,
+          },
+        };
+      } catch (error) {
+        return {
+          id: item.id,
+          label: item.label,
+          query,
+          value: 0,
+          showInOverview: item.showInOverview === true,
+          source: 'saved-query',
+          error: error.message || 'Query could not be counted.',
+        };
+      }
+    });
+}
+
+function computeSummaryPayload(db, options = {}) {
+  const total = db.prepare('SELECT COUNT(*) AS total FROM homepage_listings').get().total;
+  const latest = db.prepare('SELECT MAX(last_seen_at) AS latest_seen_at FROM homepage_listings').get();
+  const listingsDataVersion = options.listingsDataVersion || getListingsDataVersion(db);
+  return {
+    dbPath: options.dbPath,
+    totalRows: total,
+    latestSeenAt: latest.latest_seen_at,
+    queueCounts: getHomepageListingCounts(db),
+    resolveQueueCounts: getResolveQueueCounts(db),
+    summaryCards: listSummaryQueryCardsWithCounts(db),
+    savedQueryCards: listSavedQueriesWithCachedCounts(db, {
+      dataVersion: listingsDataVersion,
+      includeAll: options.savedQueriesIncludeAll === true,
+    }),
+  };
+}
+
+function getSummaryProjection(db, options = {}) {
+  const dataVersion = options.dataVersion || getSummaryDataVersion(db);
+  const savedQueryScope = options.savedQueriesIncludeAll === true ? 'all' : 'pinned';
+  const cacheKey = `summary:${savedQueryScope}:${dataVersion}`;
+  const cached = db.prepare(`
+    SELECT *
+    FROM summary_projection_cache
+    WHERE cache_key = ?
+  `).get(cacheKey);
+  if (cached) {
+    try {
+      return {
+        ...JSON.parse(cached.summary_json),
+        workerStats: getWorkflowRuntimeSummary(db, { reconcile: options.reconcile }),
+        auth: options.auth,
+        cache: {
+          type: 'summary-projection',
+          cached: true,
+          savedQueryScope,
+          computedAt: cached.computed_at,
+          elapsedMs: cached.elapsed_ms || 0,
+          dataVersion,
+          error: cached.error || '',
+        },
+      };
+    } catch (error) {
+      // Fall through and recompute if an older cache row is malformed.
+    }
+  }
+
+  const startedAt = process.hrtime.bigint();
+  const summary = computeSummaryPayload(db, options);
+  const elapsedMs = elapsedMsSince(startedAt);
+  const computedAt = nowIso();
+  const payload = {
+    ...summary,
+    workerStats: getWorkflowRuntimeSummary(db, { reconcile: options.reconcile }),
+    auth: options.auth,
+    cache: {
+      type: 'summary-projection',
+      cached: false,
+      savedQueryScope,
+      computedAt,
+      elapsedMs,
+      dataVersion,
+      error: '',
+    },
+  };
+  db.prepare(`
+    INSERT INTO summary_projection_cache (
+      cache_key,
+      data_version,
+      summary_json,
+      computed_at,
+      elapsed_ms,
+      error
+    ) VALUES (?, ?, ?, ?, ?, '')
+    ON CONFLICT(cache_key) DO UPDATE SET
+      summary_json = excluded.summary_json,
+      computed_at = excluded.computed_at,
+      elapsed_ms = excluded.elapsed_ms,
+      error = ''
+  `).run(
+    cacheKey,
+    dataVersion,
+    JSON.stringify(summary),
+    computedAt,
+    elapsedMs,
+  );
+  db.prepare(`
+    DELETE FROM summary_projection_cache
+    WHERE cache_key NOT IN (
+      SELECT cache_key
+      FROM summary_projection_cache
+      ORDER BY computed_at DESC
+      LIMIT 200
+    )
+  `).run();
+  return payload;
 }
 
 function ensureManagedWorkerIdArg(args, runId, workflow) {
@@ -3126,18 +3504,17 @@ function createServer(options) {
       if (access.canWrite) {
         refreshResolveQueueRunStatuses(db);
       }
-      const total = db.prepare('SELECT COUNT(*) AS total FROM homepage_listings').get().total;
-      const latest = db.prepare('SELECT MAX(last_seen_at) AS latest_seen_at FROM homepage_listings').get();
-      writeJson(response, 200, {
+      const summaryDataVersion = getSummaryDataVersion(db);
+      const listingsDataVersion = getListingsDataVersion(db);
+      const savedQueriesIncludeAll = requestUrl.searchParams.get('savedQueries') === 'all';
+      writeJson(response, 200, getSummaryProjection(db, {
         dbPath: options.dbPath,
-        totalRows: total,
-        latestSeenAt: latest.latest_seen_at,
-        queueCounts: getHomepageListingCounts(db),
-        resolveQueueCounts: getResolveQueueCounts(db),
-        workerStats: getWorkflowRuntimeSummary(db, { reconcile: access.canWrite }),
-        summaryCards: listSummaryQueryCardsWithCounts(db),
+        dataVersion: summaryDataVersion,
+        listingsDataVersion,
+        savedQueriesIncludeAll,
+        reconcile: access.canWrite,
         auth: authPayloadForAccess(access),
-      });
+      }));
       return;
     }
 
@@ -3150,7 +3527,7 @@ function createServer(options) {
         const body = await readRequestJson(request);
         const label = String(body.label || body.name || '').trim();
         const query = String(body.query || '').trim();
-        const counted = countListingsForSummaryQuery(db, query);
+        const counted = countListingsForSummaryQueryCached(db, query, { source: 'summary-card' });
         const card = upsertSummaryQueryCard(db, {
           cardId: body.cardId || body.card_id,
           label,
@@ -3162,6 +3539,12 @@ function createServer(options) {
             ...card,
             value: counted.total,
             error: '',
+            cache: {
+              cached: counted.cached === true,
+              computedAt: counted.computedAt,
+              elapsedMs: counted.elapsedMs,
+              dataVersion: counted.dataVersion,
+            },
           },
         });
       } catch (error) {
@@ -3214,11 +3597,15 @@ function createServer(options) {
       try {
         const body = await readRequestJson(request);
         const queries = Array.isArray(body.queries) ? body.queries.slice(0, 40) : [];
+        const dataVersion = getListingsDataVersion(db);
         writeJson(response, 200, {
           cards: queries.map((item) => {
             const query = String(item.query || '').trim();
             try {
-              const counted = countListingsForSummaryQuery(db, query);
+              const counted = countListingsForSummaryQueryCached(db, query, {
+                dataVersion,
+                source: item.source || 'saved-query',
+              });
               return {
                 id: String(item.id || '').trim(),
                 label: String(item.label || '').trim(),
@@ -3227,6 +3614,12 @@ function createServer(options) {
                 showInOverview: item.showInOverview === true,
                 source: item.source || '',
                 error: '',
+                cache: {
+                  cached: counted.cached === true,
+                  computedAt: counted.computedAt,
+                  elapsedMs: counted.elapsedMs,
+                  dataVersion: counted.dataVersion,
+                },
               };
             } catch (error) {
               return {
@@ -4020,6 +4413,46 @@ function createServer(options) {
       return;
     }
 
+    const workerLiveMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)\/live$/);
+    if (workerLiveMatch && request.method === 'GET') {
+      const workerId = decodeURIComponent(workerLiveMatch[1]);
+      const shouldReconcile = requestUrl.searchParams.get('reconcile') === '1';
+      const includeStats = requestUrl.searchParams.get('stats') === '1'
+        || requestUrl.searchParams.get('fastStats') === '1';
+      const run = access.canWrite && shouldReconcile
+        ? reconcileWorkflowRunById(db, workerId)
+        : getWorkflowRunLive(db, workerId);
+      if (!run) {
+        writeJson(response, 404, { error: `Unknown workflow run: ${workerId}` });
+        return;
+      }
+      const screenshotLimit = Number.parseInt(requestUrl.searchParams.get('screenshots') || '24', 10);
+      const processRecord = publicWorkflowRunLiveRecord(run);
+      if (includeStats) {
+        const stats = getWorkerAuditEventStats(db, workerId, { cacheOnly: true });
+        processRecord.runtimeStats = runtimeStatsFromEventStats(stats, {});
+        processRecord.eventStats = {
+          total: stats.total,
+          listingTotal: stats.listingTotal,
+          workflow: stats.workflow,
+          done: stats.done,
+          skipped: stats.skipped,
+          error: stats.error,
+          started: stats.started,
+          collector: stats.collector,
+          workerIds: stats.workerIds,
+          source: stats.source,
+        };
+      }
+      processRecord.screenshots = listWorkerScreenshots(workerId, {
+        limit: Number.isFinite(screenshotLimit) ? Math.max(1, Math.min(screenshotLimit, 48)) : 24,
+      });
+      writeJson(response, 200, {
+        process: processRecord,
+      });
+      return;
+    }
+
     const workerDetailMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)$/);
     if (workerDetailMatch && request.method === 'GET') {
       const workerId = decodeURIComponent(workerDetailMatch[1]);
@@ -4045,8 +4478,12 @@ function createServer(options) {
     const workerStatsMatch = requestUrl.pathname.match(/^\/api\/workflows\/([^/]+)\/stats$/);
     if (workerStatsMatch && request.method === 'GET') {
       const workerId = decodeURIComponent(workerStatsMatch[1]);
-      const workerIds = resolveWorkerEventIdsForRun(db, workerId);
-      const stats = getWorkerAuditEventStats(db, workerId, { workerIds });
+      const cacheOnly = requestUrl.searchParams.get('cache') === '1'
+        || requestUrl.searchParams.get('fast') === '1';
+      const workerIds = cacheOnly ? [workerId] : resolveWorkerEventIdsForRun(db, workerId);
+      const stats = cacheOnly
+        ? getWorkerAuditEventStats(db, workerId, { cacheOnly: true })
+        : getWorkerAuditEventStats(db, workerId, { workerIds });
       writeJson(response, 200, {
         workerId,
         stats: {

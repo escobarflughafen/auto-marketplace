@@ -311,6 +311,24 @@ test('collector worker stats use listing outcomes for shared columns', () => {
     assert.equal(stats.skipped, 1);
     assert.equal(stats.error, 1);
     assert.equal(stats.workflowReview, 1);
+    assert.deepEqual(stats.collector, {
+      observed: 3,
+      appended: 1,
+      updated: 1,
+      unchanged: 1,
+      rejected: 0,
+      errors: 0,
+    });
+
+    const cachedStats = getWorkerAuditEventStats(db, 'collector-run-1', { cacheOnly: true });
+    assert.deepEqual(cachedStats.collector, {
+      observed: 3,
+      appended: 1,
+      updated: 1,
+      unchanged: 1,
+      rejected: 0,
+      errors: 0,
+    });
 
     assert.equal(listWorkerAuditEvents(db, 'collector-run-1', { category: 'started' }).length, 3);
     assert.equal(listWorkerAuditEvents(db, 'collector-run-1', { category: 'done' }).length, 2);

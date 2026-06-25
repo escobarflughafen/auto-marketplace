@@ -400,6 +400,46 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS query_count_cache (
+      cache_key TEXT PRIMARY KEY,
+      source TEXT NOT NULL DEFAULT 'listings',
+      query TEXT NOT NULL,
+      query_hash TEXT NOT NULL,
+      data_version TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      computed_at TEXT NOT NULL,
+      elapsed_ms INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT ''
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_query_count_cache_lookup
+    ON query_count_cache (source, query_hash, data_version);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_query_count_cache_computed
+    ON query_count_cache (computed_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS summary_projection_cache (
+      cache_key TEXT PRIMARY KEY,
+      data_version TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      computed_at TEXT NOT NULL,
+      elapsed_ms INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT ''
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_summary_projection_cache_version
+    ON summary_projection_cache (data_version, computed_at DESC);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS resolve_queue_items (
       listing_id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'queued',
@@ -4368,6 +4408,37 @@ function listingEventSemanticBuckets(eventType, status) {
   return buckets;
 }
 
+function collectorOutcomeStatsFromRows(rows = []) {
+  const stats = {
+    observed: 0,
+    appended: 0,
+    updated: 0,
+    unchanged: 0,
+    rejected: 0,
+    errors: 0,
+  };
+  for (const row of rows) {
+    if (row.event_type !== COLLECTOR_OBSERVED_EVENT_TYPE) {
+      continue;
+    }
+    const count = Number(row.count) || 0;
+    const status = String(row.status || '').trim();
+    stats.observed += count;
+    if (status === 'new' || status === 'queued' || status === 'match_queued') {
+      stats.appended += count;
+    } else if (status === 'existing_updated' || status === 'updated') {
+      stats.updated += count;
+    } else if (status === 'existing_same' || status === 'duplicate' || status === 'already_seen') {
+      stats.unchanged += count;
+    } else if (status === 'filtered' || status === 'ignored') {
+      stats.rejected += count;
+    } else if (COLLECTOR_ERROR_STATUSES.includes(status)) {
+      stats.errors += count;
+    }
+  }
+  return stats;
+}
+
 function uniqueStrings(values) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
@@ -4557,6 +4628,7 @@ function getWorkerListingEventStats(db, workerId, options = {}) {
     skipped: 0,
     error: 0,
     started: 0,
+    collector: collectorOutcomeStatsFromRows(rows),
     workerIds,
     eventTypes: [],
     statusTypes: rows.map((row) => ({
@@ -4652,6 +4724,7 @@ function getWorkerAuditEventStatsFromCache(db, workerId) {
     skipped: 0,
     error: 0,
     started: 0,
+    collector: collectorOutcomeStatsFromRows(rows),
     workerIds: [String(workerId || '').trim()].filter(Boolean),
     eventTypes: [],
     statusTypes: [],
@@ -4736,6 +4809,14 @@ function getWorkerAuditEventStats(db, workerId, options = {}) {
         skipped: 0,
         error: 0,
         started: 0,
+        collector: {
+          observed: 0,
+          appended: 0,
+          updated: 0,
+          unchanged: 0,
+          rejected: 0,
+          errors: 0,
+        },
         workerIds: [String(workerId || '').trim()].filter(Boolean),
         eventTypes: [],
         statusTypes: [],
@@ -4887,6 +4968,52 @@ function getWorkflowRun(db, runId) {
     FROM workflow_runs
     WHERE run_id = ?
   `).get(String(runId)));
+}
+
+function getWorkflowRunLive(db, runId) {
+  const row = db.prepare(`
+    SELECT
+      run_id,
+      workflow_id,
+      label,
+      script,
+      pid,
+      status,
+      started_at,
+      updated_at,
+      exited_at,
+      exit_code,
+      signal,
+      os_checked_at,
+      os_alive,
+      CASE
+        WHEN logs_json IS NULL OR logs_json = '' OR logs_json = '[]' THEN 0
+        ELSE 1 + LENGTH(logs_json) - LENGTH(REPLACE(logs_json, '","', ''))
+      END AS log_count
+    FROM workflow_runs
+    WHERE run_id = ?
+  `).get(String(runId));
+  if (!row) {
+    return null;
+  }
+  return {
+    run_id: row.run_id,
+    workflow_id: row.workflow_id,
+    label: row.label,
+    script: row.script,
+    args: [],
+    pid: row.pid,
+    status: row.status,
+    started_at: row.started_at,
+    updated_at: row.updated_at,
+    exited_at: row.exited_at,
+    exit_code: row.exit_code,
+    signal: row.signal,
+    os_checked_at: row.os_checked_at,
+    os_alive: Boolean(row.os_alive),
+    logs: [],
+    log_count: row.log_count || 0,
+  };
 }
 
 function listWorkflowRuns(db, options = {}) {
@@ -5063,6 +5190,7 @@ module.exports = {
   insertWorkflowRun,
   updateWorkflowRun,
   getWorkflowRun,
+  getWorkflowRunLive,
   listWorkflowRuns,
   listWorkerParameterProfiles,
   getWorkerParameterProfile,
