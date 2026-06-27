@@ -54,7 +54,7 @@ function parseArgs(argv) {
   const options = {
     hostUrl: process.env.REMOTE_WORKER_HOST_URL || '',
     tokenFile: process.env.REMOTE_WORKER_TOKEN_FILE || '',
-    workerToken: process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || '',
+    workerToken: process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || process.env.MARKETPLACE_WORKER_TOKEN || '',
     localDbPath: process.env.REMOTE_WORKER_DB_PATH || '',
     workerId: process.env.REMOTE_WORKER_ID || '',
     workerType: 'backlog_indexer',

@@ -14,6 +14,7 @@ const {
   upsertHomepageListing,
 } = require('../scripts/marketplace-homepage-db');
 const {
+  parseArgs,
   run,
   RemoteWorkerRuntime,
 } = require('../scripts/remote-worker-runtime');
@@ -363,5 +364,28 @@ test('remote worker runtime applies artifact spool backpressure before claiming 
     runtime.close();
     await closeServer(server);
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+
+test('parseArgs accepts legacy worker token env for container compatibility', () => {
+  const previousRemoteToken = process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
+  const previousLegacyToken = process.env.MARKETPLACE_WORKER_TOKEN;
+  delete process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
+  process.env.MARKETPLACE_WORKER_TOKEN = 'legacy-runtime-token';
+  try {
+    const options = parseArgs(['--host-url', 'http://127.0.0.1:3080', '--local-db', '/tmp/worker.db']);
+    assert.equal(options.workerToken, 'legacy-runtime-token');
+  } finally {
+    if (previousRemoteToken === undefined) {
+      delete process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
+    } else {
+      process.env.MARKETPLACE_REMOTE_WORKER_TOKEN = previousRemoteToken;
+    }
+    if (previousLegacyToken === undefined) {
+      delete process.env.MARKETPLACE_WORKER_TOKEN;
+    } else {
+      process.env.MARKETPLACE_WORKER_TOKEN = previousLegacyToken;
+    }
   }
 });

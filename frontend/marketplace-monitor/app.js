@@ -2944,6 +2944,7 @@ function workerTypeLabel(value) {
     : value === 'collector' ? 'Collector'
       : value === 'backlog_indexer' ? 'Backlog Indexer'
         : value === 'profile_onboarder' ? 'Profile Onboarder'
+          : value === 'remote_worker' ? 'Remote Worker'
       : value || 'Worker';
 }
 
@@ -2964,6 +2965,10 @@ function workflowModeLabel(workflow) {
     return workflow.strategy === 'resolved_metadata' ? 'Resolved Metadata'
       : workflow.label;
   }
+  if (workflow.workerType === 'remote_worker') {
+    return workflow.strategy === 'backlog_indexer' ? 'Backlog Indexer'
+      : workflow.label;
+  }
   if (workflow.workerType === 'profile_onboarder') {
     return workflow.strategy === 'guided_login' ? 'Guided Login'
       : workflow.label;
@@ -2971,8 +2976,13 @@ function workflowModeLabel(workflow) {
   return workflow.label;
 }
 
+function workflowDisplayLabel(workflow) {
+  const label = workflowModeLabel(workflow);
+  return workflow?.deprecated ? `${label} (Legacy)` : label;
+}
+
 function workflowWorkerTypes() {
-  const preferred = ['collector', 'resolver', 'profile_onboarder', 'backlog_indexer'];
+  const preferred = ['collector', 'resolver', 'remote_worker', 'profile_onboarder', 'backlog_indexer'];
   const source = selectedWorkflowSource();
   const available = new Set(store.workflows
     .filter((workflow) => workflowSource(workflow) === source)
@@ -3216,7 +3226,7 @@ async function saveCurrentWorkerProfile() {
   const nameInput = document.getElementById('workerProfileNameInput');
   const select = document.getElementById('workerProfileSelect');
   const selected = workerProfilesForWorkflow(workflow.id).find((profile) => profile.profile_id === select?.value);
-  const label = String(nameInput?.value || selected?.label || `${workflowModeLabel(workflow)} profile`).trim();
+  const label = String(nameInput?.value || selected?.label || `${workflowDisplayLabel(workflow)} profile`).trim();
   if (!label) {
     markWorkerConfigSaved('Enter a profile name before saving.');
     return;
@@ -3791,7 +3801,7 @@ function summaryRenderSignature(summary = store.summary) {
 function renderWorkflowOptions() {
   const selected = store.selectedWorkflowId;
   els.workflowSelect.innerHTML = store.workflows.map((workflow) => (
-    `<option value="${html(workflow.id)}">${html(workerSourceLabel(workflowSource(workflow)))} / ${html(workflow.label)}</option>`
+    `<option value="${html(workflow.id)}">${html(workerSourceLabel(workflowSource(workflow)))} / ${html(workflow.deprecated ? `${workflow.label} (Legacy)` : workflow.label)}</option>`
   )).join('');
   if (selected && store.workflows.some((workflow) => workflow.id === selected)) {
     els.workflowSelect.value = selected;
@@ -4331,11 +4341,16 @@ function renderWorkerControl() {
     `<option value="${html(workerType)}"${workerType === selectedType ? ' selected' : ''}>${html(workerTypeLabel(workerType))}</option>`
   )).join('');
   const modeOptions = workflowsForType(selectedType, selectedSource).map((item) => (
-    `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(workflowModeLabel(item))}</option>`
+    `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(workflowDisplayLabel(item))}</option>`
   )).join('');
   const profileOptions = workerProfilesForWorkflow(workflow.id).map((profile) => (
     `<option value="${html(profile.profile_id)}">${html(profile.label)}</option>`
   )).join('');
+  const workflowNotice = workflow.deprecated
+    ? `<div class="settings-note workflow-deprecated-note">Legacy direct-DB worker. ${html(workflow.deprecationReason || 'Kept for compatibility during remote worker rollout.')}</div>`
+    : workflow.runtimeModel === 'remote_outbox'
+      ? '<div class="settings-note workflow-remote-note">Remote runtime path: local durable outbox, host API sync, heartbeat, and leases.</div>'
+      : '';
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker setup</div><div class="process-meta">Profiles save worker parameters and image capture defaults.</div></div>'
     + '<label class="worker-type-select-label" for="workerControlSourceSelect">Source'
@@ -4348,6 +4363,7 @@ function renderWorkerControl() {
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
     + `<div class="worker-control-section-title">${html(workerSourceLabel(selectedSource))} ${html(workerTypeLabel(selectedType))} Mode</div>`
+    + workflowNotice
     + '<div class="tablewrap worker-control-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + '<tr><th><label for="workerControlWorkflowSelect">Mode</label></th><td><select id="workerControlWorkflowSelect">'
     + modeOptions
@@ -5660,6 +5676,9 @@ async function loadWorkflows(options = {}) {
     workerType: workflow.workerType,
     strategy: workflow.strategy,
     fields: workflow.fields,
+    deprecated: workflow.deprecated,
+    replacementWorkflowId: workflow.replacementWorkflowId,
+    runtimeModel: workflow.runtimeModel,
   }))) : store.workflowSignature;
   const workflowDefinitionsChanged = hasWorkflowPayload && nextWorkflowSignature !== store.workflowSignature;
   const nextProcessSignature = processRenderSignature(payload.processes || []);
@@ -6207,7 +6226,7 @@ function bindEvents() {
     persistSelectedWorkflow();
     const args = buildWorkflowArgs(workflow);
     const startedAt = performance.now();
-    setWorkerStartPending(true, `Starting ${workflowModeLabel(workflow)} worker...`);
+    setWorkerStartPending(true, `Starting ${workflowDisplayLabel(workflow)} worker...`);
     try {
       await fetchJson('/api/workflows/start', {
         method: 'POST',
@@ -6217,7 +6236,7 @@ function bindEvents() {
       await loadWorkflows({ light: true });
       await loadSummary();
       const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
-      setWorkerStartPending(false, `Started ${workflowModeLabel(workflow)} in ${elapsedSeconds}s.`);
+      setWorkerStartPending(false, `Started ${workflowDisplayLabel(workflow)} in ${elapsedSeconds}s.`);
     } catch (error) {
       const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
       setWorkerStartPending(false, `Start failed after ${elapsedSeconds}s: ${error.message || 'Workflow could not be started.'}`);

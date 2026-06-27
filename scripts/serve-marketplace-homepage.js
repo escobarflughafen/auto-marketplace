@@ -512,6 +512,9 @@ const WORKFLOWS = {
     source: 'internal',
     workerType: 'backlog_indexer',
     strategy: 'resolved_metadata',
+    deprecated: true,
+    deprecationReason: 'Legacy direct-DB worker. Prefer the remote backlog indexer runtime for new deployments.',
+    replacementWorkflowId: 'remote-backlog-indexer',
     fields: [
       { id: 'limit', label: 'Batch size', kind: 'number', flag: '--limit', defaultValue: 250, min: 1 },
       { id: 'pollIntervalSeconds', label: 'Check for work every (seconds)', kind: 'number', flag: '--poll-interval-seconds', defaultValue: 300, min: 1 },
@@ -520,6 +523,43 @@ const WORKFLOWS = {
       { id: 'allRows', label: 'Re-index all resolved rows', kind: 'boolean', flag: '--all', defaultValue: false },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
       { id: 'workerId', label: 'Worker id', kind: 'text', flag: '--worker-id', defaultValue: '' },
+    ],
+  },
+  'remote-backlog-indexer': {
+    label: 'Remote Backlog Indexer',
+    script: 'remote-worker',
+    source: 'internal',
+    workerType: 'remote_worker',
+    strategy: 'backlog_indexer',
+    runtimeModel: 'remote_outbox',
+    fields: [
+      { id: 'hostUrl', label: 'Host API URL', kind: 'text', flag: '--host-url', defaultValue: '' },
+      {
+        id: 'remoteWorkerType',
+        label: 'Remote worker type',
+        kind: 'choice',
+        defaultValue: 'backlog_indexer',
+        options: [
+          { value: 'backlog_indexer', label: 'Backlog Indexer', args: ['--worker-type', 'backlog_indexer'] },
+        ],
+      },
+      {
+        id: 'remoteStrategy',
+        label: 'Strategy',
+        kind: 'choice',
+        defaultValue: 'resolved_metadata',
+        options: [
+          { value: 'resolved_metadata', label: 'Resolved metadata', args: ['--strategy', 'resolved_metadata'] },
+        ],
+      },
+      { id: 'sourceId', label: 'Source id', kind: 'text', flag: '--source-id', defaultValue: 'host-managed-remote-worker' },
+      { id: 'capacity', label: 'Claim capacity', kind: 'number', flag: '--capacity', defaultValue: 1, min: 1, max: 5 },
+      { id: 'batchSize', label: 'Claim batch size', kind: 'number', flag: '--batch-size', defaultValue: 10, min: 1, max: 100 },
+      { id: 'pollIntervalMs', label: 'Poll interval (ms)', kind: 'number', flag: '--poll-interval-ms', defaultValue: 5000, min: 1000 },
+      { id: 'heartbeatIntervalMs', label: 'Heartbeat interval (ms)', kind: 'number', flag: '--heartbeat-interval-ms', defaultValue: 30000, min: 5000 },
+      { id: 'maxPendingArtifactBytes', label: 'Artifact backpressure bytes', kind: 'number', flag: '--max-pending-artifact-bytes', defaultValue: 1073741824, min: 0 },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+      { id: 'localDbPath', label: 'Local worker DB path', kind: 'text', flag: '--local-db', defaultValue: '' },
     ],
   },
   'profile-onboarder': {
@@ -562,6 +602,7 @@ const WORKFLOW_SCRIPTS_WITH_WORKER_ID = new Set([
   'marketplace:ebay:search:collect',
   'marketplace:home:process',
   'marketplace:home:index',
+  'remote-worker',
   'marketplace:auth:profile-onboarder',
 ]);
 const COMMON_WORKER_SCREENSHOT_VALUE_FLAGS = new Set([
@@ -598,6 +639,14 @@ const QUERY_FIELDS = [
 ];
 
 const managedProcesses = new Map();
+const serverRuntimeOptions = { port: Number.parseInt(process.env.MARKETPLACE_PORT || '21435', 10) || 21435 };
+
+function defaultRemoteWorkerHostUrl(options = {}) {
+  const configured = String(process.env.MARKETPLACE_REMOTE_WORKER_HOST_URL || '').trim();
+  if (configured) return configured;
+  const port = Number.parseInt(String(options.port || serverRuntimeOptions.port || process.env.MARKETPLACE_PORT || '21435'), 10) || 21435;
+  return `http://127.0.0.1:${port}`;
+}
 
 function getCredentialProfilesForUi() {
   try {
@@ -632,6 +681,12 @@ function credentialProfileOptions(credentials = getCredentialProfilesForUi()) {
 
 function fieldsForWorkflow(workflow, options = {}) {
   return (workflow.fields || []).map((field) => {
+    if (workflow.script === 'remote-worker' && field.id === 'hostUrl') {
+      return {
+        ...field,
+        defaultValue: field.defaultValue || defaultRemoteWorkerHostUrl(options),
+      };
+    }
     if (field.id !== CREDENTIAL_PROFILE_FIELD.id) {
       return field;
     }
@@ -644,7 +699,7 @@ function fieldsForWorkflow(workflow, options = {}) {
   });
 }
 
-function buildWorkflowDefinitions() {
+function buildWorkflowDefinitions(options = {}) {
   let credentialOptionsCache = null;
   const getCredentialOptions = () => {
     if (!credentialOptionsCache) {
@@ -655,6 +710,7 @@ function buildWorkflowDefinitions() {
   return Object.entries(WORKFLOWS).map(([id, workflow]) => {
     const fields = fieldsForWorkflow(workflow, {
       credentialOptions: getCredentialOptions,
+      port: options.port,
     });
     return {
       id,
@@ -663,6 +719,10 @@ function buildWorkflowDefinitions() {
       source: workflow.source || 'facebook',
       workerType: workflow.workerType || '',
       strategy: workflow.strategy || '',
+      runtimeModel: workflow.runtimeModel || 'managed_process',
+      deprecated: workflow.deprecated === true,
+      deprecationReason: workflow.deprecationReason || '',
+      replacementWorkflowId: workflow.replacementWorkflowId || '',
       fields,
       defaultArgs: buildDefaultArgsFromFields(fields),
     };
@@ -4680,6 +4740,9 @@ function startPurchaseHistoryMatchScanner(db, options = {}) {
 }
 
 function createServer(options) {
+  if (Number.isFinite(options.port)) {
+    serverRuntimeOptions.port = options.port;
+  }
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
   const stopPurchaseHistoryMatchScanner = startPurchaseHistoryMatchScanner(db);
 
@@ -5530,7 +5593,7 @@ function createServer(options) {
 
     if (requestUrl.pathname === '/api/workflows/config' && request.method === 'GET') {
       writeJson(response, 200, {
-        workflows: buildWorkflowDefinitions(),
+        workflows: buildWorkflowDefinitions({ port: options.port }),
       });
       return;
     }
@@ -5549,7 +5612,7 @@ function createServer(options) {
           : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats }),
       };
       if (includeConfig) {
-        payload.workflows = buildWorkflowDefinitions();
+        payload.workflows = buildWorkflowDefinitions({ port: options.port });
       }
       logSlowSection('api_workflows_build', sectionStartedAt, { reconcile, includeStats, includeConfig });
       writeJson(response, 200, payload);
