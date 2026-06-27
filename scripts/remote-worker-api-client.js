@@ -70,6 +70,10 @@ class RemoteWorkerApiClient {
     return this.request('POST', `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/events`, body);
   }
 
+  uploadArtifacts(sessionId, body) {
+    return this.request('POST', `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/artifacts`, body);
+  }
+
   pollCommands(sessionId, options = {}) {
     const limit = Number.isFinite(options.limit) ? `?limit=${encodeURIComponent(String(options.limit))}` : '';
     return this.request('GET', `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/commands${limit}`);

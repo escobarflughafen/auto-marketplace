@@ -238,3 +238,130 @@ test('remote worker runtime uploads pending local outbox events after restart', 
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('remote worker runtime uploads artifact manifests and persists local ACKs', async () => {
+  const tempDir = createTempDir();
+  const dbPath = path.join(tempDir, 'marketplace.db');
+  const workerDbPath = path.join(tempDir, 'worker-artifacts.db');
+  const workerToken = 'runtime-worker-token';
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const runtime = new RemoteWorkerRuntime({
+    hostUrl: `http://${address.address}:${address.port}`,
+    workerToken,
+    localDbPath: workerDbPath,
+    workerId: 'runtime-artifacts-1',
+    workerType: 'backlog_indexer',
+    strategy: 'resolved_metadata',
+    sourceId: 'runtime-artifact-test',
+    once: true,
+    artifactBatchSize: 5,
+  });
+
+  try {
+    await runtime.registerSession();
+    runtime.appendArtifactManifest({
+      exchangeType: 'artifact_manifest',
+      schemaVersion: 'remote-worker-artifact@1',
+      artifactId: 'runtime-artifact-1',
+      eventId: 'runtime-artifact-event-1',
+      artifactType: 'image',
+      mediaRole: 'listing_photo',
+      contentType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      sizeBytes: 2048,
+      width: 640,
+      height: 480,
+      metadata: {
+        listingId: 'runtime-artifact-listing',
+        position: 0,
+      },
+    });
+    const result = await runtime.uploadPendingArtifacts();
+    assert.deepEqual(result.accepted.map((artifact) => artifact.artifactId), ['runtime-artifact-1']);
+    assert.deepEqual(result.duplicates, []);
+  } finally {
+    runtime.close();
+    await closeServer(server);
+  }
+
+  try {
+    const db = new DatabaseSync(dbPath);
+    const artifact = db.prepare('SELECT * FROM remote_worker_artifacts WHERE artifact_id = ?').get('runtime-artifact-1');
+    assert.equal(artifact.worker_id, 'runtime-artifacts-1');
+    assert.equal(artifact.event_id, 'runtime-artifact-event-1');
+    assert.equal(artifact.upload_status, 'manifest_accepted');
+    assert.equal(artifact.sha256, 'b'.repeat(64));
+    db.close();
+
+    const workerDb = new DatabaseSync(workerDbPath);
+    const row = workerDb.prepare('SELECT sync_status, acked_at, last_error FROM worker_artifact_spool WHERE artifact_id = ?').get('runtime-artifact-1');
+    assert.equal(row.sync_status, 'acked');
+    assert.notEqual(row.acked_at, '');
+    assert.equal(row.last_error, '');
+    workerDb.close();
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('remote worker runtime applies artifact spool backpressure before claiming work', async () => {
+  const tempDir = createTempDir();
+  const dbPath = path.join(tempDir, 'marketplace.db');
+  const workerDbPath = path.join(tempDir, 'worker-artifact-backpressure.db');
+  const workerToken = 'runtime-worker-token';
+  seedResolvedListing(dbPath, 'runtime-backpressure-listing');
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const runtime = new RemoteWorkerRuntime({
+    hostUrl: `http://${address.address}:${address.port}`,
+    workerToken,
+    localDbPath: workerDbPath,
+    workerId: 'runtime-artifact-backpressure-1',
+    workerType: 'backlog_indexer',
+    strategy: 'resolved_metadata',
+    sourceId: 'runtime-artifact-test',
+    once: true,
+    capacity: 1,
+    batchSize: 1,
+    maxPendingArtifactBytes: 1024,
+  });
+
+  try {
+    await runtime.registerSession();
+    runtime.appendArtifactManifest({
+      exchangeType: 'artifact_manifest',
+      schemaVersion: 'remote-worker-artifact@1',
+      artifactId: 'runtime-large-artifact-1',
+      eventId: 'runtime-large-artifact-event-1',
+      artifactType: 'image',
+      mediaRole: 'listing_photo',
+      contentType: 'image/jpeg',
+      sha256: 'c'.repeat(64),
+      sizeBytes: 2048,
+      metadata: {
+        listingId: 'runtime-backpressure-listing',
+      },
+    });
+    const result = await runtime.claimWork();
+    assert.deepEqual(result.claims, []);
+    assert.equal(result.backpressure.reason, 'pending_artifact_bytes');
+    assert.equal(result.backpressure.pendingArtifactBytes, 2048);
+  } finally {
+    runtime.close();
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

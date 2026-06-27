@@ -14,6 +14,11 @@ const {
   markOutboxEventsFailed,
   countPendingOutboxEvents,
   appendLocalCommand,
+  appendArtifactManifest,
+  listPendingArtifactManifests,
+  markArtifactsAcked,
+  markArtifactsFailed,
+  countPendingArtifacts,
 } = require('./remote-worker-local-store');
 
 function usage() {
@@ -28,6 +33,9 @@ Options:
   --once                     Run one claim/sync cycle and exit.
   --capacity N               Claim capacity. Default: 1
   --batch-size N             Listing batch size per claim. Default: 10
+  --artifact-batch-size N    Artifact manifests per upload. Default: 25
+  --max-pending-artifact-bytes N
+                            Stop claiming above this local spool size. Default: 1073741824
   --heartbeat-interval-ms N  Continuous mode heartbeat interval. Default: 30000
   --poll-interval-ms N       Continuous mode poll interval. Default: 5000
   --json                     Print JSON summary.
@@ -55,6 +63,8 @@ function parseArgs(argv) {
     once: false,
     capacity: 1,
     batchSize: 10,
+    artifactBatchSize: 25,
+    maxPendingArtifactBytes: 1024 * 1024 * 1024,
     heartbeatIntervalMs: 30000,
     pollIntervalMs: 5000,
     json: false,
@@ -103,6 +113,14 @@ function parseArgs(argv) {
         options.batchSize = Number.parseInt(readArg(argv, index, arg), 10);
         index += 1;
         break;
+      case '--artifact-batch-size':
+        options.artifactBatchSize = Number.parseInt(readArg(argv, index, arg), 10);
+        index += 1;
+        break;
+      case '--max-pending-artifact-bytes':
+        options.maxPendingArtifactBytes = Number.parseInt(readArg(argv, index, arg), 10);
+        index += 1;
+        break;
       case '--heartbeat-interval-ms':
         options.heartbeatIntervalMs = Number.parseInt(readArg(argv, index, arg), 10);
         index += 1;
@@ -134,6 +152,11 @@ function parseArgs(argv) {
   }
   options.capacity = Math.max(1, Math.min(Number.isFinite(options.capacity) ? options.capacity : 1, 5));
   options.batchSize = Math.max(1, Math.min(Number.isFinite(options.batchSize) ? options.batchSize : 10, 100));
+  options.artifactBatchSize = Math.max(1, Math.min(Number.isFinite(options.artifactBatchSize) ? options.artifactBatchSize : 25, 100));
+  options.maxPendingArtifactBytes = Math.max(
+    0,
+    Number.isFinite(options.maxPendingArtifactBytes) ? options.maxPendingArtifactBytes : 1024 * 1024 * 1024,
+  );
   return options;
 }
 
@@ -210,12 +233,15 @@ class RemoteWorkerRuntime {
 
   async sendHeartbeat(runtimeState = 'working') {
     const pendingEventCount = countPendingOutboxEvents(this.db);
+    const pendingArtifacts = countPendingArtifacts(this.db);
     return this.api.heartbeat(this.sessionId, {
       workerId: this.options.workerId,
       runtimeState,
       lastLocalSequence: getState(this.db, 'checkpoint', { lastLocalSequence: 0 })?.lastLocalSequence || 0,
       lastAckedSequence: getState(this.db, 'checkpoint', { lastAckedSequence: 0 })?.lastAckedSequence || 0,
       pendingEventCount,
+      pendingArtifactCount: pendingArtifacts.count,
+      pendingArtifactBytes: pendingArtifacts.bytes,
     });
   }
 
@@ -268,6 +294,44 @@ class RemoteWorkerRuntime {
     }
   }
 
+  appendArtifactManifest(manifest) {
+    return appendArtifactManifest(this.db, {
+      ...manifest,
+      workerId: manifest.workerId || this.options.workerId,
+      sessionId: manifest.sessionId || this.sessionId,
+      storage: {
+        requestedBackend: 'local_fs',
+        uploadMode: 'metadata_only',
+        ...(manifest.storage || {}),
+      },
+    });
+  }
+
+  async uploadPendingArtifacts() {
+    const artifacts = listPendingArtifactManifests(this.db, {
+      limit: this.options.artifactBatchSize,
+    });
+    if (artifacts.length === 0) {
+      return { accepted: [], duplicates: [] };
+    }
+    const artifactIds = artifacts.map((artifact) => artifact.artifactId);
+    try {
+      const result = await this.api.uploadArtifacts(this.sessionId, {
+        workerId: this.options.workerId,
+        artifacts: artifacts.map((artifact) => artifact.manifest),
+      });
+      const ackedIds = [
+        ...(result.accepted || []).map((artifact) => artifact.artifactId),
+        ...(result.duplicates || []).map((artifact) => artifact.artifactId),
+      ];
+      markArtifactsAcked(this.db, ackedIds);
+      return result;
+    } catch (error) {
+      markArtifactsFailed(this.db, artifactIds, error);
+      throw error;
+    }
+  }
+
   async pollCommands() {
     const result = await this.api.pollCommands(this.sessionId, { limit: 25 });
     const commands = result.commands || [];
@@ -292,6 +356,17 @@ class RemoteWorkerRuntime {
   async claimWork() {
     if (this.drainRequested || this.shutdownRequested) {
       return { claims: [], drainRequested: this.drainRequested };
+    }
+    const pendingArtifacts = countPendingArtifacts(this.db);
+    if (pendingArtifacts.bytes > this.options.maxPendingArtifactBytes) {
+      return {
+        claims: [],
+        backpressure: {
+          reason: 'pending_artifact_bytes',
+          pendingArtifactBytes: pendingArtifacts.bytes,
+          maxPendingArtifactBytes: this.options.maxPendingArtifactBytes,
+        },
+      };
     }
     return this.api.claim(this.sessionId, {
       workerId: this.options.workerId,
@@ -413,6 +488,7 @@ class RemoteWorkerRuntime {
     await this.registerSession();
     await this.sendHeartbeat('starting');
     await this.uploadPendingEvents();
+    await this.uploadPendingArtifacts();
     const commands = await this.pollCommands();
     const claimsResult = await this.claimWork();
     const claimResults = [];
@@ -426,6 +502,7 @@ class RemoteWorkerRuntime {
       claims: claimsResult.claims || [],
       claimResults,
       drainRequested: this.drainRequested || claimsResult.drainRequested === true,
+      backpressure: claimsResult.backpressure || null,
     };
   }
 

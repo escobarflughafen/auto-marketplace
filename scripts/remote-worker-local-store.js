@@ -61,11 +61,28 @@ function ensureRemoteWorkerLocalSchema(db) {
       artifact_id TEXT PRIMARY KEY,
       event_id TEXT NOT NULL DEFAULT '',
       manifest_json TEXT NOT NULL DEFAULT '{}',
+      size_bytes INTEGER NOT NULL DEFAULT 0,
       sync_status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL,
-      acked_at TEXT NOT NULL DEFAULT ''
+      acked_at TEXT NOT NULL DEFAULT '',
+      last_error TEXT NOT NULL DEFAULT ''
     );
   `);
+  ensureColumn(db, 'worker_artifact_spool', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'worker_artifact_spool', 'last_error', "TEXT NOT NULL DEFAULT ''");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_worker_artifact_spool_pending
+    ON worker_artifact_spool (sync_status, created_at);
+  `);
+}
+
+function listColumns(db, tableName) {
+  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name));
+}
+
+function ensureColumn(db, tableName, columnName, definition) {
+  if (listColumns(db, tableName).has(columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
 }
 
 function openRemoteWorkerLocalStore(dbPath) {
@@ -225,6 +242,104 @@ function appendLocalCommand(db, command) {
   );
 }
 
+function appendArtifactManifest(db, manifest) {
+  const now = new Date().toISOString();
+  const artifactId = String(manifest.artifactId || '').trim();
+  if (!artifactId) {
+    throw new Error('artifactId is required');
+  }
+  db.prepare(`
+    INSERT INTO worker_artifact_spool (
+      artifact_id,
+      event_id,
+      manifest_json,
+      size_bytes,
+      sync_status,
+      created_at
+    ) VALUES (?, ?, ?, ?, 'pending', ?)
+    ON CONFLICT(artifact_id) DO UPDATE SET
+      event_id = excluded.event_id,
+      manifest_json = excluded.manifest_json,
+      size_bytes = excluded.size_bytes,
+      sync_status = CASE
+        WHEN worker_artifact_spool.sync_status = 'acked' THEN worker_artifact_spool.sync_status
+        ELSE 'pending'
+      END,
+      last_error = ''
+  `).run(
+    artifactId,
+    String(manifest.eventId || ''),
+    serializeJson(manifest),
+    Number.isFinite(Number(manifest.sizeBytes)) ? Number(manifest.sizeBytes) : 0,
+    now,
+  );
+  return {
+    ...manifest,
+    artifactId,
+  };
+}
+
+function listPendingArtifactManifests(db, options = {}) {
+  const limit = Math.max(1, Math.min(Number.parseInt(options.limit, 10) || 25, 100));
+  return db.prepare(`
+    SELECT *
+    FROM worker_artifact_spool
+    WHERE sync_status = 'pending'
+    ORDER BY created_at ASC, artifact_id ASC
+    LIMIT ?
+  `).all(limit).map((row) => ({
+    artifactId: row.artifact_id,
+    eventId: row.event_id,
+    manifest: parseJson(row.manifest_json, {}),
+    sizeBytes: Number(row.size_bytes || 0),
+  }));
+}
+
+function markArtifactsAcked(db, artifactIds = []) {
+  if (!artifactIds.length) return;
+  const now = new Date().toISOString();
+  const update = db.prepare(`
+    UPDATE worker_artifact_spool
+    SET sync_status = 'acked', acked_at = ?, last_error = ''
+    WHERE artifact_id = ?
+  `);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const artifactId of artifactIds) {
+      update.run(now, String(artifactId));
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function markArtifactsFailed(db, artifactIds = [], error) {
+  if (!artifactIds.length) return;
+  const update = db.prepare(`
+    UPDATE worker_artifact_spool
+    SET last_error = ?
+    WHERE artifact_id = ?
+  `);
+  const message = String(error?.message || error || '').trim();
+  for (const artifactId of artifactIds) {
+    update.run(message, String(artifactId));
+  }
+}
+
+function countPendingArtifacts(db) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes
+    FROM worker_artifact_spool
+    WHERE sync_status = 'pending'
+  `).get();
+  return {
+    count: Number(row?.count || 0),
+    bytes: Number(row?.bytes || 0),
+  };
+}
+
 module.exports = {
   openRemoteWorkerLocalStore,
   ensureRemoteWorkerLocalSchema,
@@ -236,4 +351,9 @@ module.exports = {
   markOutboxEventsFailed,
   countPendingOutboxEvents,
   appendLocalCommand,
+  appendArtifactManifest,
+  listPendingArtifactManifests,
+  markArtifactsAcked,
+  markArtifactsFailed,
+  countPendingArtifacts,
 };
