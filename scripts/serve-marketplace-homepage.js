@@ -159,6 +159,7 @@ function parseArgs(argv) {
     dbPath: DEFAULT_DB_PATH,
     adminToken: process.env.MARKETPLACE_MONITOR_ADMIN_TOKEN || '',
     readOnlyToken: process.env.MARKETPLACE_MONITOR_READONLY_TOKEN || '',
+    workerToken: process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || process.env.MARKETPLACE_WORKER_TOKEN || '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -3254,7 +3255,7 @@ function writeRemoteWorkerAuthError(response, code = 'invalid_worker_token', mes
 }
 
 function remoteWorkerTokenForOptions(options) {
-  return String(options.workerToken || process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || '').trim();
+  return String(options.workerToken || process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || process.env.MARKETPLACE_WORKER_TOKEN || '').trim();
 }
 
 function remoteWorkerAccessForRequest(options, request) {

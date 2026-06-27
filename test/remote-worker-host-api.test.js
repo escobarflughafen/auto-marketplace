@@ -55,6 +55,49 @@ async function requestJson(baseUrl, pathname, options = {}) {
   };
 }
 
+test('remote worker host API accepts legacy worker token env name for restarted containers', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const previousRemoteToken = process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
+  const previousLegacyToken = process.env.MARKETPLACE_WORKER_TOKEN;
+  delete process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
+  process.env.MARKETPLACE_WORKER_TOKEN = 'legacy-worker-token';
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+
+  try {
+    const registered = await requestJson(baseUrl, '/api/v2/remote-workers/sessions', {
+      method: 'POST',
+      token: 'legacy-worker-token',
+      body: {
+        workerId: 'legacy-env-worker',
+        workerType: 'backlog_indexer',
+        strategy: 'resolved_metadata',
+      },
+    });
+    assert.equal(registered.status, 201);
+    assert.match(registered.body.sessionId, /^remote-session-/);
+  } finally {
+    await closeServer(server);
+    if (previousRemoteToken === undefined) {
+      delete process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
+    } else {
+      process.env.MARKETPLACE_REMOTE_WORKER_TOKEN = previousRemoteToken;
+    }
+    if (previousLegacyToken === undefined) {
+      delete process.env.MARKETPLACE_WORKER_TOKEN;
+    } else {
+      process.env.MARKETPLACE_WORKER_TOKEN = previousLegacyToken;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('remote worker host API registers, heartbeats, ingests events, and projects compatibility events', async () => {
   const { tempDir, dbPath } = createTempDbPath();
   const workerToken = 'test-worker-token';
