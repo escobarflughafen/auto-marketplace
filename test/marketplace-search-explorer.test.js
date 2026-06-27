@@ -1,6 +1,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const http = require('http');
+const { chromium } = require('playwright');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -8,6 +10,7 @@ const {
   openMarketplaceHomepageDatabase,
   closeMarketplaceHomepageDatabase,
   upsertSearchTitleBagKeyword,
+  listListingMedia,
 } = require('../scripts/marketplace-homepage-db');
 const {
   parseArgs,
@@ -18,6 +21,7 @@ const {
   filterBagKeywordsFromItems,
   computeNextSeedRound,
   chooseRoundQuery,
+  runRound,
 } = require('../scripts/collect-marketplace-search-explorer');
 
 function createTempDbPath() {
@@ -396,5 +400,161 @@ test('chooseRoundQuery falls back to title bag when previous round has no random
     assert.equal(query.randomWalksRemaining, 0);
   } finally {
     closeMarketplaceHomepageDatabase(db);
+  }
+});
+
+
+function createSearchFixtureServer() {
+  const html = [
+    '<!doctype html><html><head><title>Marketplace Search Fixture</title></head><body>',
+    '<main role="main">',
+    '<h1>Marketplace search fixture with enough visible text for readiness checks and collector extraction</h1>',
+    '<div role="article"><a href="https://www.facebook.com/marketplace/item/333333333333333/">',
+    '<img src="/media/leica-m6.jpg" alt="Leica M6 black body" width="640" height="480">',
+    '<div>CA$ 3,800</div><div>Leica M6 Classic 0.72 Black</div><div>刚刚上架</div>',
+    '</a></div>',
+    '<div role="article"><a href="https://www.facebook.com/marketplace/item/444444444444444/?ref=search">',
+    '<img src="/media/summicron.jpg" alt="Summicron lens photo" width="800" height="600">',
+    '<div>CA$ 2,400</div><div>Leica Summicron 35mm ASPH lens</div><div>Today</div>',
+    '</a></div>',
+    '<div role="article"><a href="https://www.facebook.com/marketplace/item/333333333333333/?duplicate=1">Duplicate Leica M6 card should be ignored</a></div>',
+    '</main></body></html>',
+  ].join('');
+  const image = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGOSHzRgAAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  return http.createServer((request, response) => {
+    if (request.url.startsWith('/media/')) {
+      response.writeHead(200, { 'content-type': 'image/png' });
+      response.end(image);
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(html);
+  });
+}
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve(server.address());
+    });
+  });
+}
+
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+test('search explorer round stores result rows, media, search mappings, title bag, events, and snapshot', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marketplace-search-round-regression-'));
+  const dbPath = path.join(tempDir, 'search-round.db');
+  const logFile = path.join(tempDir, 'search-round.log');
+  const snapshotFile = path.join(tempDir, 'search-round.json');
+  const server = createSearchFixtureServer();
+  const address = await listen(server);
+  const baseUrl = 'http://' + address.address + ':' + address.port;
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+
+  try {
+    const options = parseArgs([
+      '--query', 'leica m6',
+      '--area', 'vancouver',
+      '--search-url-template', baseUrl + '/marketplace/%AREA%/search?query=%QUERY%&exact=false',
+      '--min-price', '1000',
+      '--max-price', '5000',
+      '--days-since-listed', '7',
+      '--item-condition', 'used_like_new',
+      '--max-items', '2',
+      '--first-load-only',
+      '--initial-load-wait-ms', '0',
+      '--max-runtime-seconds', '5',
+      '--db-path', dbPath,
+      '--log-file', logFile,
+      '--snapshot-file', snapshotFile,
+      '--worker-id', 'search-explorer-regression',
+      '--once',
+    ]);
+    const state = {
+      roundNumber: 1,
+      nextSeedRound: 1,
+      lastQuery: '',
+      seedIndex: 0,
+      randomWalksRemaining: 0,
+      randomWalkCandidates: [],
+    };
+
+    const { cycleSummary } = await runRound(page, db, options, state);
+    assert.equal(cycleSummary.totalCollected, 2);
+    assert.equal(cycleSummary.source, 'search');
+    assert.equal(cycleSummary.sourceKeyword, 'leica m6');
+    assert.equal(cycleSummary.querySource, 'seed');
+    assert.equal(cycleSummary.searchFiltersApplied, true);
+    assert.equal(cycleSummary.outcomeCounts.new, 2);
+    assert.equal(cycleSummary.collectionStats.stopReason, 'max_items');
+    assert.equal(cycleSummary.randomWalkCandidateCount, 2);
+
+    const rows = db.prepare('SELECT listing_id, href, source, source_keyword, card_title, card_text, detail_status, last_seen_rank FROM homepage_listings ORDER BY last_seen_rank ASC').all();
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].listing_id, '333333333333333');
+    assert.equal(rows[0].source, 'search');
+    assert.equal(rows[0].source_keyword, 'leica m6');
+    assert.equal(rows[0].href, 'https://www.facebook.com/marketplace/item/333333333333333/');
+    assert.equal(rows[0].card_title, 'Leica M6 Classic 0.72 Black');
+    assert.match(rows[0].card_text, /CA\$ 3,800/);
+    assert.equal(rows[0].detail_status, 'pending');
+
+    const media = listListingMedia(db, '333333333333333');
+    assert.equal(media.length, 1);
+    assert.match(media[0].source_url, /\/media\/leica-m6\.jpg$/);
+    assert.equal(media[0].alt_text, 'Leica M6 black body');
+
+    const searchKeywordRows = db.prepare('SELECT listing_id, keyword, times_seen FROM listing_search_keywords ORDER BY listing_id ASC').all().map((row) => ({ ...row }));
+    assert.deepEqual(searchKeywordRows, [
+      { listing_id: '333333333333333', keyword: 'leica m6', times_seen: 1 },
+      { listing_id: '444444444444444', keyword: 'leica m6', times_seen: 1 },
+    ]);
+
+    const bagKeywords = db.prepare('SELECT keyword, last_source_keyword FROM search_title_bag ORDER BY keyword ASC').all().map((row) => ({ ...row }));
+    assert.deepEqual(bagKeywords, [
+      { keyword: 'Leica M6 Classic 0.72 Black', last_source_keyword: 'leica m6' },
+      { keyword: 'Leica Summicron 35mm ASPH lens', last_source_keyword: 'leica m6' },
+      { keyword: 'leica m6', last_source_keyword: 'leica m6' },
+    ]);
+
+    const listingEvents = db.prepare('SELECT listing_id, event_type, status FROM listing_events WHERE workflow_run_id = ? ORDER BY listing_id ASC').all('search-explorer-regression').map((row) => ({ ...row }));
+    assert.deepEqual(listingEvents, [
+      { listing_id: '333333333333333', event_type: 'listing_observed', status: 'new' },
+      { listing_id: '444444444444444', event_type: 'listing_observed', status: 'new' },
+    ]);
+
+    const workflowEvents = db.prepare('SELECT event_type, status, content_json FROM workflow_events WHERE workflow_run_id = ? ORDER BY event_at ASC').all('search-explorer-regression');
+    assert.deepEqual(workflowEvents.map((event) => event.event_type), [
+      'collector_query_selected',
+      'collector_cycle_started',
+      'collector_cycle_completed',
+    ]);
+    const querySelected = JSON.parse(workflowEvents[0].content_json);
+    assert.equal(querySelected.query, 'leica m6');
+    assert.equal(querySelected.searchFiltersApplied, true);
+    assert.equal(querySelected.searchFilters.minPrice, 1000);
+    assert.equal(querySelected.searchFilters.maxPrice, 5000);
+
+    const snapshot = JSON.parse(fs.readFileSync(snapshotFile, 'utf8'));
+    assert.equal(snapshot.totalCollected, 2);
+    assert.equal(snapshot.titleBagCountsAfter.totalKeywords, 3);
+    assert.match(fs.readFileSync(logFile, 'utf8'), /round_done round=1/);
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+    await browser.close();
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

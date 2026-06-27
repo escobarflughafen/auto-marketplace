@@ -1402,4 +1402,5 @@ module.exports = {
   filterBagKeywordsFromItems,
   computeNextSeedRound,
   chooseRoundQuery,
+  runRound,
 };
