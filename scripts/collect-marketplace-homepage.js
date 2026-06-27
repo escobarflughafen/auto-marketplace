@@ -968,4 +968,5 @@ module.exports = {
   buildMarketplaceKeywordSearchUrl,
   parseArgs,
   parseKeywordTargets,
+  runCycle,
 };
