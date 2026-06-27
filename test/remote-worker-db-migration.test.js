@@ -56,6 +56,7 @@ test('remote worker schema migrates older staging tables before creating indexes
     const sessionColumns = columnNames(db, 'remote_worker_sessions');
     assert.equal(sessionColumns.has('last_seen_at'), true);
     assert.equal(sessionColumns.has('pending_event_count'), true);
+    assert.equal(sessionColumns.has('updated_at'), true);
 
     const artifactColumns = columnNames(db, 'remote_worker_artifacts');
     assert.equal(artifactColumns.has('event_id'), true);

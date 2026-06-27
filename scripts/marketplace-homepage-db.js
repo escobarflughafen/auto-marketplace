@@ -366,6 +366,7 @@ function ensureSchema(db) {
       pending_event_count INTEGER NOT NULL DEFAULT 0,
       registered_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT '',
       ended_at TEXT NOT NULL DEFAULT '',
       last_error TEXT NOT NULL DEFAULT ''
     );
@@ -383,6 +384,7 @@ function ensureSchema(db) {
   ensureColumn(db, 'remote_worker_sessions', 'pending_event_count', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'remote_worker_sessions', 'registered_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_sessions', 'last_seen_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'updated_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_sessions', 'ended_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_sessions', 'last_error', "TEXT NOT NULL DEFAULT ''");
 

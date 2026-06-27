@@ -61,6 +61,21 @@ test('remote worker host API accepts legacy worker token env name for restarted 
   const previousLegacyToken = process.env.MARKETPLACE_WORKER_TOKEN;
   delete process.env.MARKETPLACE_REMOTE_WORKER_TOKEN;
   process.env.MARKETPLACE_WORKER_TOKEN = 'legacy-worker-token';
+  const seedDb = new DatabaseSync(dbPath);
+  try {
+    seedDb.exec(`
+      CREATE TABLE remote_worker_sessions (
+        session_id TEXT PRIMARY KEY,
+        worker_id TEXT NOT NULL,
+        worker_type TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  } finally {
+    seedDb.close();
+  }
   const server = createServer({
     dbPath,
     adminToken: 'admin-token',

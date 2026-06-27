@@ -3320,10 +3320,11 @@ function registerRemoteWorkerSession(db, body = {}) {
         liveness_state,
         last_local_sequence,
         last_acked_sequence,
-        pending_event_count,
-        registered_at,
-        last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	        pending_event_count,
+	        registered_at,
+	        last_seen_at,
+	        updated_at
+	      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       sessionId,
       workerId,
@@ -3336,10 +3337,11 @@ function registerRemoteWorkerSession(db, body = {}) {
       'online',
       Number(body.lastCheckpoint?.lastLocalSequence || 0),
       Number(body.lastCheckpoint?.lastAckedSequence || 0),
-      0,
-      now,
-      now,
-    );
+	      0,
+	      now,
+	      now,
+	      now,
+	    );
 
     insertWorkflowRun(db, {
       runId: sessionId,
@@ -3384,17 +3386,19 @@ function updateRemoteWorkerHeartbeat(db, sessionId, body = {}) {
     SET
       runtime_state = ?,
       liveness_state = 'online',
-      last_local_sequence = ?,
-      pending_event_count = ?,
-      last_seen_at = ?
-    WHERE session_id = ?
-  `).run(
-    String(body.runtimeState || '').trim(),
-    Number(body.lastLocalSequence || 0),
-    Number(body.pendingEventCount || 0),
-    now,
-    sessionId,
-  );
+	      last_local_sequence = ?,
+	      pending_event_count = ?,
+	      last_seen_at = ?,
+	      updated_at = ?
+	    WHERE session_id = ?
+	  `).run(
+	    String(body.runtimeState || '').trim(),
+	    Number(body.lastLocalSequence || 0),
+	    Number(body.pendingEventCount || 0),
+	    now,
+	    now,
+	    sessionId,
+	  );
   updateWorkflowRun(db, sessionId, {
     status: 'running',
     updatedAt: now,
