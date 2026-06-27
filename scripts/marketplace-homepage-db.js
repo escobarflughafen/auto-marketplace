@@ -514,6 +514,7 @@ function ensureSchema(db) {
       worker_id TEXT NOT NULL DEFAULT '',
       worker_type TEXT NOT NULL DEFAULT '',
       strategy TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT '',
       command_type TEXT NOT NULL,
       payload_json TEXT NOT NULL DEFAULT '{}',
       priority INTEGER NOT NULL DEFAULT 0,
@@ -530,6 +531,7 @@ function ensureSchema(db) {
   ensureColumn(db, 'remote_worker_commands', 'worker_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_commands', 'worker_type', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_commands', 'strategy', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'type', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_commands', 'command_type', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_commands', 'payload_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, 'remote_worker_commands', 'priority', 'INTEGER NOT NULL DEFAULT 0');

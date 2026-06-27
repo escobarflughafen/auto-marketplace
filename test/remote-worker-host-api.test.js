@@ -491,6 +491,18 @@ test('remote worker host API registers, heartbeats, ingests events, and projects
 test('remote worker host API issues backlog indexer claims and protects stale leases', async () => {
   const { tempDir, dbPath } = createTempDbPath();
   const workerToken = 'test-worker-token';
+  const legacyDb = new DatabaseSync(dbPath);
+  try {
+    legacyDb.exec(`
+      CREATE TABLE remote_worker_commands (
+        command_id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+  } finally {
+    legacyDb.close();
+  }
   const { db: seedDb } = openMarketplaceHomepageDatabase(dbPath);
   try {
     upsertHomepageListing(seedDb, {
@@ -665,6 +677,8 @@ test('remote worker host API issues backlog indexer claims and protects stale le
     assert.equal(claim.status, 'completed');
     const command = db.prepare('SELECT * FROM remote_worker_commands WHERE command_id = ?').get(claim.command_id);
     assert.equal(command.status, 'completed');
+    assert.equal(command.type, 'index_resolved_listing_metadata_batch');
+    assert.equal(command.command_type, 'index_resolved_listing_metadata_batch');
     const listing = db.prepare('SELECT * FROM homepage_listings WHERE listing_id = ?').get('claim-listing-1');
     assert.equal(listing.detail_listed_at_raw, '2 days ago');
     assert.equal(listing.detail_listed_at_earliest_unix, Math.floor(Date.parse('2026-06-14T00:00:00.000Z') / 1000));

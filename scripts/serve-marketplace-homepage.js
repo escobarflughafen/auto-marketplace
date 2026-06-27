@@ -3960,24 +3960,26 @@ function createRemoteWorkerCommand(db, command = {}) {
     INSERT INTO remote_worker_commands (
       command_id,
       session_id,
-      worker_id,
-      worker_type,
-      strategy,
-      command_type,
-      payload_json,
-      priority,
-      status,
-      created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
-  `).run(
-    commandId,
-    String(command.sessionId || command.session_id || '').trim(),
-    String(command.workerId || command.worker_id || '').trim(),
-    String(command.workerType || command.worker_type || '').trim(),
-    String(command.strategy || '').trim(),
-    commandType,
-    safeJson(command.payload || {}),
-    Number.isFinite(command.priority) ? command.priority : 0,
+	      worker_id,
+	      worker_type,
+	      strategy,
+	      type,
+	      command_type,
+	      payload_json,
+	      priority,
+	      status,
+	      created_at
+	    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+	  `).run(
+	    commandId,
+	    String(command.sessionId || command.session_id || '').trim(),
+	    String(command.workerId || command.worker_id || '').trim(),
+	    String(command.workerType || command.worker_type || '').trim(),
+	    String(command.strategy || '').trim(),
+	    commandType,
+	    commandType,
+	    safeJson(command.payload || {}),
+	    Number.isFinite(command.priority) ? command.priority : 0,
     now,
   );
   return commandId;
@@ -4085,24 +4087,26 @@ function createBacklogIndexerClaim(db, session, items, options = {}) {
     INSERT INTO remote_worker_commands (
       command_id,
       session_id,
-      worker_id,
-      worker_type,
-      strategy,
-      command_type,
-      payload_json,
-      priority,
-      status,
-      created_at,
-      delivered_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?)
-  `).run(
-    commandId,
-    session.session_id,
-    session.worker_id,
-    session.worker_type,
-    session.strategy,
-    'index_resolved_listing_metadata_batch',
-    safeJson(payload),
+	      worker_id,
+	      worker_type,
+	      strategy,
+	      type,
+	      command_type,
+	      payload_json,
+	      priority,
+	      status,
+	      created_at,
+	      delivered_at
+	    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?)
+	  `).run(
+	    commandId,
+	    session.session_id,
+	    session.worker_id,
+	    session.worker_type,
+	    session.strategy,
+	    'index_resolved_listing_metadata_batch',
+	    'index_resolved_listing_metadata_batch',
+	    safeJson(payload),
     0,
     now,
     now,

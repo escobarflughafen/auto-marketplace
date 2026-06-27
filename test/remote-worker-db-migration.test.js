@@ -72,6 +72,7 @@ test('remote worker schema migrates older staging tables before creating indexes
 
     const commandColumns = columnNames(db, 'remote_worker_commands');
     assert.equal(commandColumns.has('worker_id'), true);
+    assert.equal(commandColumns.has('type'), true);
     assert.equal(commandColumns.has('created_at'), true);
 
     const claimColumns = columnNames(db, 'remote_worker_claims');
