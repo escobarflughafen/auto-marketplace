@@ -72,6 +72,27 @@ test('remote worker host API accepts legacy worker token env name for restarted 
         registered_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE remote_worker_event_ingest (
+        event_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        worker_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        batch_id TEXT NOT NULL DEFAULT '',
+        event_at TEXT NOT NULL,
+        event_scope TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        canonical_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        received_at TEXT NOT NULL
+      );
+      CREATE TABLE remote_worker_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sha256 TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        accepted_at TEXT NOT NULL
+      );
     `);
   } finally {
     seedDb.close();
@@ -97,6 +118,49 @@ test('remote worker host API accepts legacy worker token env name for restarted 
     });
     assert.equal(registered.status, 201);
     assert.match(registered.body.sessionId, /^remote-session-/);
+
+    const eventIngested = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(registered.body.sessionId)}/events`, {
+      method: 'POST',
+      token: 'legacy-worker-token',
+      body: {
+        workerId: 'legacy-env-worker',
+        batchId: 'legacy-env-batch',
+        events: [{
+          eventId: 'legacy-env-event-1',
+          sequence: 1,
+          eventAt: '2026-06-20T12:00:00.000Z',
+          eventScope: 'workflow',
+          eventType: 'worker_started',
+          status: 'running',
+          payload: {
+            workerType: 'backlog_indexer',
+            strategy: 'resolved_metadata',
+          },
+        }],
+      },
+    });
+    assert.equal(eventIngested.status, 200);
+
+    const artifactAccepted = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(registered.body.sessionId)}/artifacts`, {
+      method: 'POST',
+      token: 'legacy-worker-token',
+      body: {
+        workerId: 'legacy-env-worker',
+        artifacts: [{
+          artifactId: 'legacy-env-artifact-1',
+          eventId: 'legacy-env-event-1',
+          artifactType: 'image',
+          mediaRole: 'worker_screenshot',
+          contentType: 'image/jpeg',
+          sha256: 'd'.repeat(64),
+          sizeBytes: 0,
+          metadata: {
+            legacySchema: true,
+          },
+        }],
+      },
+    });
+    assert.equal(artifactAccepted.status, 200);
   } finally {
     await closeServer(server);
     if (previousRemoteToken === undefined) {

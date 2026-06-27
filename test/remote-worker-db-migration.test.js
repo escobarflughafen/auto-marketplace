@@ -58,9 +58,16 @@ test('remote worker schema migrates older staging tables before creating indexes
     assert.equal(sessionColumns.has('pending_event_count'), true);
     assert.equal(sessionColumns.has('updated_at'), true);
 
+    const eventColumns = columnNames(db, 'remote_worker_event_ingest');
+    assert.equal(eventColumns.has('canonical_hash'), true);
+    assert.equal(eventColumns.has('payload_hash'), true);
+
     const artifactColumns = columnNames(db, 'remote_worker_artifacts');
     assert.equal(artifactColumns.has('event_id'), true);
+    assert.equal(artifactColumns.has('kind'), true);
     assert.equal(artifactColumns.has('media_role'), true);
+    assert.equal(artifactColumns.has('path'), true);
+    assert.equal(artifactColumns.has('accepted_at'), true);
     assert.equal(artifactColumns.has('received_at'), true);
 
     const commandColumns = columnNames(db, 'remote_worker_commands');

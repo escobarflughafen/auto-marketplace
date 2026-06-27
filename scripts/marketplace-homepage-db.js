@@ -407,6 +407,7 @@ function ensureSchema(db) {
       event_at TEXT NOT NULL,
       listing_id TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT '',
+      canonical_hash TEXT NOT NULL DEFAULT '',
       payload_json TEXT NOT NULL DEFAULT '{}',
       payload_hash TEXT NOT NULL DEFAULT '',
       reduce_status TEXT NOT NULL DEFAULT 'pending',
@@ -427,6 +428,7 @@ function ensureSchema(db) {
   ensureColumn(db, 'remote_worker_event_ingest', 'event_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_event_ingest', 'listing_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_event_ingest', 'status', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'canonical_hash', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_event_ingest', 'payload_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, 'remote_worker_event_ingest', 'payload_hash', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_event_ingest', 'reduce_status', "TEXT NOT NULL DEFAULT 'pending'");
@@ -450,6 +452,7 @@ function ensureSchema(db) {
       session_id TEXT NOT NULL,
       worker_id TEXT NOT NULL,
       event_id TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT '',
       artifact_type TEXT NOT NULL DEFAULT '',
       media_role TEXT NOT NULL DEFAULT '',
       content_type TEXT NOT NULL DEFAULT '',
@@ -457,12 +460,15 @@ function ensureSchema(db) {
       size_bytes INTEGER NOT NULL DEFAULT 0,
       width INTEGER,
       height INTEGER,
+      path TEXT NOT NULL DEFAULT '',
       source_url TEXT NOT NULL DEFAULT '',
       local_path TEXT NOT NULL DEFAULT '',
       storage_json TEXT NOT NULL DEFAULT '{}',
       metadata_json TEXT NOT NULL DEFAULT '{}',
       derivatives_json TEXT NOT NULL DEFAULT '[]',
       upload_status TEXT NOT NULL DEFAULT 'manifest_accepted',
+      created_at TEXT NOT NULL DEFAULT '',
+      accepted_at TEXT NOT NULL DEFAULT '',
       received_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
@@ -471,6 +477,7 @@ function ensureSchema(db) {
   ensureColumn(db, 'remote_worker_artifacts', 'session_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'worker_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'event_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'kind', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'artifact_type', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'media_role', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'content_type', "TEXT NOT NULL DEFAULT ''");
@@ -478,12 +485,15 @@ function ensureSchema(db) {
   ensureColumn(db, 'remote_worker_artifacts', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'remote_worker_artifacts', 'width', 'INTEGER');
   ensureColumn(db, 'remote_worker_artifacts', 'height', 'INTEGER');
+  ensureColumn(db, 'remote_worker_artifacts', 'path', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'source_url', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'local_path', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'storage_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, 'remote_worker_artifacts', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, 'remote_worker_artifacts', 'derivatives_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, 'remote_worker_artifacts', 'upload_status', "TEXT NOT NULL DEFAULT 'manifest_accepted'");
+  ensureColumn(db, 'remote_worker_artifacts', 'created_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'accepted_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'received_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'remote_worker_artifacts', 'updated_at', "TEXT NOT NULL DEFAULT ''");
 
