@@ -370,6 +370,21 @@ function ensureSchema(db) {
       last_error TEXT NOT NULL DEFAULT ''
     );
   `);
+  ensureColumn(db, 'remote_worker_sessions', 'worker_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'strategy', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'worker_version', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'source_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'capabilities_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_sessions', 'status', "TEXT NOT NULL DEFAULT 'registered'");
+  ensureColumn(db, 'remote_worker_sessions', 'liveness_state', "TEXT NOT NULL DEFAULT 'online'");
+  ensureColumn(db, 'remote_worker_sessions', 'runtime_state', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'last_local_sequence', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'remote_worker_sessions', 'last_acked_sequence', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'remote_worker_sessions', 'pending_event_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'remote_worker_sessions', 'registered_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'last_seen_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'ended_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_sessions', 'last_error', "TEXT NOT NULL DEFAULT ''");
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_remote_worker_sessions_worker_seen
@@ -399,6 +414,23 @@ function ensureSchema(db) {
       FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
     );
   `);
+  ensureColumn(db, 'remote_worker_event_ingest', 'session_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'worker_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'worker_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'strategy', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'batch_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'sequence', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'remote_worker_event_ingest', 'event_scope', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'event_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'event_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'listing_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'status', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'payload_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_event_ingest', 'payload_hash', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'reduce_status', "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn(db, 'remote_worker_event_ingest', 'reduce_error', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'received_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_event_ingest', 'reduced_at', "TEXT NOT NULL DEFAULT ''");
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_remote_worker_event_ingest_session_sequence
@@ -434,6 +466,24 @@ function ensureSchema(db) {
       FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
     );
   `);
+  ensureColumn(db, 'remote_worker_artifacts', 'session_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'worker_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'event_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'artifact_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'media_role', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'content_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'sha256', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'remote_worker_artifacts', 'width', 'INTEGER');
+  ensureColumn(db, 'remote_worker_artifacts', 'height', 'INTEGER');
+  ensureColumn(db, 'remote_worker_artifacts', 'source_url', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'local_path', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'storage_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_artifacts', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_artifacts', 'derivatives_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, 'remote_worker_artifacts', 'upload_status', "TEXT NOT NULL DEFAULT 'manifest_accepted'");
+  ensureColumn(db, 'remote_worker_artifacts', 'received_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_artifacts', 'updated_at', "TEXT NOT NULL DEFAULT ''");
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_remote_worker_artifacts_session
@@ -464,6 +514,20 @@ function ensureSchema(db) {
       last_error TEXT NOT NULL DEFAULT ''
     );
   `);
+  ensureColumn(db, 'remote_worker_commands', 'session_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'worker_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'worker_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'strategy', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'command_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'payload_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_commands', 'priority', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'remote_worker_commands', 'status', "TEXT NOT NULL DEFAULT 'queued'");
+  ensureColumn(db, 'remote_worker_commands', 'created_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'delivered_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'acked_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'ack_status', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_commands', 'ack_payload_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_commands', 'last_error', "TEXT NOT NULL DEFAULT ''");
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_remote_worker_commands_worker_status
@@ -496,6 +560,21 @@ function ensureSchema(db) {
       FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
     );
   `);
+  ensureColumn(db, 'remote_worker_claims', 'lease_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'session_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'worker_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'command_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'command_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'entity_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'entity_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'payload_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_claims', 'status', "TEXT NOT NULL DEFAULT 'claimed'");
+  ensureColumn(db, 'remote_worker_claims', 'claimed_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'expires_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'renewed_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'completed_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'remote_worker_claims', 'result_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'remote_worker_claims', 'last_error', "TEXT NOT NULL DEFAULT ''");
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_remote_worker_claims_session_status
