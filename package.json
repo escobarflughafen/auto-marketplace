@@ -12,6 +12,7 @@
     "marketplace:credentials:import": "node scripts/import-marketplace-credential.js",
     "marketplace:home:collect": "node scripts/collect-marketplace-homepage.js",
     "marketplace:search:explore": "node scripts/collect-marketplace-search-explorer.js",
+    "marketplace:ebay:search:collect": "node scripts/collect-ebay-search-collector.js",
     "marketplace:home:process": "node scripts/process-marketplace-homepage-backlog.js",
     "marketplace:home:index": "node scripts/index-marketplace-resolved-listings.js",
     "marketplace:home:backlog:indexes": "node scripts/marketplace-homepage-backlog-indexes.js",

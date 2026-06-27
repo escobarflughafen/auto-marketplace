@@ -95,7 +95,7 @@ const SOURCES = {
     fields: [
       { name: 'id', label: 'Listing ID', type: 'text', column: 'listing_id', aliases: ['listing_id'], indexed: true, operators: COMMON_TEXT_OPERATORS },
       { name: 'status', label: 'Status', type: 'enum', column: 'detail_status', aliases: ['detail_status', 'outcome'], indexed: true, values: ['pending', 'processing', 'done', 'error', 'sold', 'pending_sale'], operators: COMMON_ENUM_OPERATORS },
-      { name: 'source', label: 'Source', type: 'enum', column: 'source', indexed: true, values: ['homepage', 'search', 'manual'], operators: COMMON_ENUM_OPERATORS },
+      { name: 'source', label: 'Source', type: 'enum', column: 'source', indexed: true, values: ['homepage', 'search', 'manual', 'ebay'], operators: COMMON_ENUM_OPERATORS },
       { name: 'keyword', label: 'Source keyword', type: 'text', column: 'source_keyword', aliases: ['source_keyword'], indexed: true, operators: COMMON_TEXT_OPERATORS },
       { name: 'title', label: 'Title', type: 'text', columns: ['card_title', 'detail_title'], aliases: ['card_title', 'detail_title'], operators: COMMON_TEXT_OPERATORS },
       { name: 'text', label: 'Card/detail text', type: 'text', columns: ['card_text', 'detail_json'], aliases: ['card_text', 'detail_text', 'description'], operators: COMMON_TEXT_OPERATORS },

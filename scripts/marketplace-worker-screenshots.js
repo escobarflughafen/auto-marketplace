@@ -122,7 +122,7 @@ function startWorkerScreenshotMonitor(options, lifecycle, monitorOptions = {}) {
   let stopped = false;
   const intervalMs = intervalSeconds * 1000;
   const tick = async () => {
-    if (stopped || busy || lifecycle.shutdownRequested) {
+    if (stopped || busy || lifecycle.shutdownRequested || lifecycle.screenshotPaused) {
       return;
     }
     busy = true;

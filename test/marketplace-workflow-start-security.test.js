@@ -49,6 +49,8 @@ test('workflow worker type browser classification keeps only profile onboarding 
 test('workflow concurrency is lenient except selected browser caps', () => {
   assert.equal(workflowConcurrencyLimit('search-explore', 'collector'), 2);
   assert.equal(workflowConcurrencyScope('search-explore', 'collector'), 'workflow');
+  assert.equal(workflowConcurrencyLimit('ebay-search-collect', 'collector'), 2);
+  assert.equal(workflowConcurrencyScope('ebay-search-collect', 'collector'), 'workflow');
   assert.equal(workflowConcurrencyLimit('backlog-resolve', 'resolver'), 2);
   assert.equal(workflowConcurrencyScope('backlog-resolve', 'resolver'), 'workerType');
   assert.equal(workflowConcurrencyLimit('home-collect', 'collector'), Number.POSITIVE_INFINITY);
@@ -109,6 +111,30 @@ test('workflow start args allow search explorer round-robin keyword controls', (
     '--days-since-listed', '30',
     '--item-condition', 'used_like_new',
     '--max-runtime-seconds', '30',
+  ]);
+});
+
+test('workflow start args allow eBay search collector controls', () => {
+  const targets = JSON.stringify([
+    { keyword: 'pentax 67 105', minPrice: '500', maxPrice: '2500' },
+    { keyword: 'leica m6' },
+  ]);
+  const args = validateWorkflowStartArgs('ebay-search-collect', [
+    '--query-targets', targets,
+    '--max-pages', '3',
+    '--page-delay-seconds', '2',
+    '--collect-all',
+    '--worker-screenshot-format', 'jpeg',
+    '--worker-screenshot-quality', '40',
+  ]);
+
+  assert.deepEqual(args, [
+    '--query-targets', targets,
+    '--max-pages', '3',
+    '--page-delay-seconds', '2',
+    '--collect-all',
+    '--worker-screenshot-format', 'jpeg',
+    '--worker-screenshot-quality', '40',
   ]);
 });
 

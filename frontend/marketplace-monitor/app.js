@@ -2867,14 +2867,14 @@ function ensureWorkflowDraft(workflow) {
       ...store.workflowDrafts[workflow.id],
     };
     if (
-      workflow.id === 'search-explore'
+      (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect')
       && !hadQueryMode
       && String(store.workflowDrafts[workflow.id].queries || '').trim()
     ) {
       store.workflowDrafts[workflow.id].queryMode = 'list';
     }
     if (
-      workflow.id === 'search-explore'
+      (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect')
       && !String(store.workflowDrafts[workflow.id].queryTargets || '').trim()
       && String(store.workflowDrafts[workflow.id].queries || '').trim()
     ) {
@@ -2951,6 +2951,7 @@ function workflowModeLabel(workflow) {
   if (!workflow) return '';
   if (workflow.workerType === 'collector') {
     return workflow.strategy === 'feed' ? 'Feed'
+      : workflow.strategy === 'search' ? 'Search'
       : workflow.strategy === 'explorer' ? 'Search'
         : workflow.label;
   }
@@ -2972,15 +2973,46 @@ function workflowModeLabel(workflow) {
 
 function workflowWorkerTypes() {
   const preferred = ['collector', 'resolver', 'profile_onboarder', 'backlog_indexer'];
-  const available = new Set(store.workflows.map((workflow) => workflow.workerType || 'worker'));
+  const source = selectedWorkflowSource();
+  const available = new Set(store.workflows
+    .filter((workflow) => workflowSource(workflow) === source)
+    .map((workflow) => workflow.workerType || 'worker'));
   return [
     ...preferred.filter((workerType) => available.has(workerType)),
     ...[...available].filter((workerType) => !preferred.includes(workerType)).sort(),
   ];
 }
 
-function workflowsForType(workerType) {
-  return store.workflows.filter((workflow) => (workflow.workerType || 'worker') === workerType);
+function workflowSource(workflow) {
+  return workflow?.source || 'facebook';
+}
+
+function workerSourceLabel(value) {
+  return value === 'facebook' ? 'Facebook'
+    : value === 'ebay' ? 'eBay'
+      : value === 'internal' ? 'Internal'
+        : value || 'Source';
+}
+
+function workflowSources() {
+  const preferred = ['facebook', 'ebay', 'internal'];
+  const available = new Set(store.workflows.map((workflow) => workflowSource(workflow)));
+  return [
+    ...preferred.filter((source) => available.has(source)),
+    ...[...available].filter((source) => !preferred.includes(source)).sort(),
+  ];
+}
+
+function selectedWorkflowSource() {
+  return workflowSource(selectedWorkflow());
+}
+
+function workflowsForSource(source) {
+  return store.workflows.filter((workflow) => workflowSource(workflow) === source);
+}
+
+function workflowsForType(workerType, source = selectedWorkflowSource()) {
+  return workflowsForSource(source).filter((workflow) => (workflow.workerType || 'worker') === workerType);
 }
 
 function selectWorkflowId(workflowId) {
@@ -2996,10 +3028,24 @@ function selectWorkflowId(workflowId) {
 
 function selectWorkerType(workerType) {
   const current = selectedWorkflow();
-  if ((current?.workerType || 'worker') === workerType) {
+  const source = selectedWorkflowSource();
+  if ((current?.workerType || 'worker') === workerType && workflowSource(current) === source) {
     return;
   }
-  const next = workflowsForType(workerType)[0];
+  const next = workflowsForType(workerType, source)[0];
+  if (next) {
+    selectWorkflowId(next.id);
+  }
+}
+
+function selectWorkerSource(source) {
+  const current = selectedWorkflow();
+  if (workflowSource(current) === source) {
+    return;
+  }
+  const sourceWorkflows = workflowsForSource(source);
+  const next = sourceWorkflows.find((workflow) => (workflow.workerType || 'worker') === (current?.workerType || 'worker'))
+    || sourceWorkflows[0];
   if (next) {
     selectWorkflowId(next.id);
   }
@@ -3030,7 +3076,7 @@ function buildWorkflowArgs(workflow = selectedWorkflow()) {
   }
   if (workflow?.script === 'marketplace:home:process') {
     args.push(...captureSettingsArgs());
-  } else if (['marketplace:home:collect', 'marketplace:search:explore'].includes(workflow?.script)) {
+  } else if (['marketplace:home:collect', 'marketplace:search:explore', 'marketplace:ebay:search:collect'].includes(workflow?.script)) {
     args.push(...workerScreenshotSettingsArgs());
   }
   return args;
@@ -3745,7 +3791,7 @@ function summaryRenderSignature(summary = store.summary) {
 function renderWorkflowOptions() {
   const selected = store.selectedWorkflowId;
   els.workflowSelect.innerHTML = store.workflows.map((workflow) => (
-    `<option value="${html(workflow.id)}">${html(workflow.label)}</option>`
+    `<option value="${html(workflow.id)}">${html(workerSourceLabel(workflowSource(workflow)))} / ${html(workflow.label)}</option>`
   )).join('');
   if (selected && store.workflows.some((workflow) => workflow.id === selected)) {
     els.workflowSelect.value = selected;
@@ -4276,11 +4322,15 @@ function renderWorkerControl() {
 
   const draft = ensureWorkflowDraft(workflow);
   const rows = renderWorkflowRows(workflow, draft);
+  const selectedSource = workflowSource(workflow);
+  const sourceOptions = workflowSources().map((source) => (
+    `<option value="${html(source)}"${source === selectedSource ? ' selected' : ''}>${html(workerSourceLabel(source))}</option>`
+  )).join('');
   const selectedType = workflow.workerType || 'worker';
   const typeOptions = workflowWorkerTypes().map((workerType) => (
     `<option value="${html(workerType)}"${workerType === selectedType ? ' selected' : ''}>${html(workerTypeLabel(workerType))}</option>`
   )).join('');
-  const modeOptions = workflowsForType(selectedType).map((item) => (
+  const modeOptions = workflowsForType(selectedType, selectedSource).map((item) => (
     `<option value="${html(item.id)}"${item.id === workflow.id ? ' selected' : ''}>${html(workflowModeLabel(item))}</option>`
   )).join('');
   const profileOptions = workerProfilesForWorkflow(workflow.id).map((profile) => (
@@ -4288,13 +4338,16 @@ function renderWorkerControl() {
   )).join('');
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker setup</div><div class="process-meta">Profiles save worker parameters and image capture defaults.</div></div>'
+    + '<label class="worker-type-select-label" for="workerControlSourceSelect">Source'
+    + `<select id="workerControlSourceSelect">${sourceOptions}</select>`
+    + '</label>'
     + '<label class="worker-type-select-label" for="workerControlTypeSelect">Worker type'
     + `<select id="workerControlTypeSelect">${typeOptions}</select>`
     + '</label>'
     + '</div>'
     + '<div class="worker-control-columns">'
     + '<section class="worker-control-column worker-control-left">'
-    + `<div class="worker-control-section-title">${html(workerTypeLabel(selectedType))} Mode</div>`
+    + `<div class="worker-control-section-title">${html(workerSourceLabel(selectedSource))} ${html(workerTypeLabel(selectedType))} Mode</div>`
     + '<div class="tablewrap worker-control-tablewrap" tabindex="0"><table class="worker-control-table"><tbody>'
     + '<tr><th><label for="workerControlWorkflowSelect">Mode</label></th><td><select id="workerControlWorkflowSelect">'
     + modeOptions
@@ -4336,6 +4389,11 @@ function renderWorkerControl() {
     + '</section>'
     + '</div>';
 
+  const workerSourceSelect = document.getElementById('workerControlSourceSelect');
+  workerSourceSelect?.addEventListener('change', () => {
+    selectWorkerSource(workerSourceSelect.value);
+    renderWorkflowForm();
+  });
   const workerTypeSelect = document.getElementById('workerControlTypeSelect');
   workerTypeSelect?.addEventListener('change', () => {
     selectWorkerType(workerTypeSelect.value);
@@ -5598,6 +5656,7 @@ async function loadWorkflows(options = {}) {
   const nextWorkflowSignature = hasWorkflowPayload ? JSON.stringify(nextWorkflows.map((workflow) => ({
     id: workflow.id,
     label: workflow.label,
+    source: workflow.source,
     workerType: workflow.workerType,
     strategy: workflow.strategy,
     fields: workflow.fields,

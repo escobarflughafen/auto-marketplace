@@ -35,7 +35,7 @@ const LOCAL_QUERY_SCHEMA = {
     fields: [
       { name: 'id', label: 'Listing ID', type: 'text', aliases: ['listing_id'], operators: TEXT_OPERATORS },
       { name: 'status', label: 'Status', type: 'enum', aliases: ['detail_status', 'outcome'], values: ['pending', 'processing', 'done', 'error', 'sold', 'pending_sale'], operators: ENUM_OPERATORS },
-      { name: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search', 'manual'], operators: ENUM_OPERATORS },
+      { name: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search', 'manual', 'ebay'], operators: ENUM_OPERATORS },
       { name: 'keyword', label: 'Source keyword', type: 'text', aliases: ['source_keyword'], operators: TEXT_OPERATORS },
       { name: 'title', label: 'Title', type: 'text', aliases: ['card_title', 'detail_title'], operators: TEXT_OPERATORS },
       { name: 'text', label: 'Card/detail text', type: 'text', aliases: ['card_text', 'detail_text', 'description'], operators: TEXT_OPERATORS },

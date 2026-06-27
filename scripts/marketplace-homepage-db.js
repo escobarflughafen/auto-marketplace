@@ -814,6 +814,7 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
   const rank = Number.isFinite(listing.rank) ? listing.rank : null;
   const cardTitle = String(listing.title || '').trim();
   const cardText = String(listing.text || '').trim();
+  const cardPrice = String(listing.price || listing.detailPrice || listing.detail_price || '').trim();
   const source = normalizeKeyword(options.source || listing.source || 'homepage') || 'homepage';
   const sourceKeyword = normalizeKeyword(
     options.sourceKeyword
@@ -851,6 +852,7 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
       last_seen_at,
       last_seen_rank,
       detail_status,
+      detail_price,
       detail_last_error
     ) VALUES (
       ?,
@@ -864,6 +866,7 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
       ?,
       ?,
       'pending',
+      ?,
       ''
     )
     ON CONFLICT(listing_id) DO UPDATE SET
@@ -875,6 +878,14 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
       raw_card_json = excluded.raw_card_json,
       last_seen_at = excluded.last_seen_at,
       last_seen_rank = excluded.last_seen_rank,
+      detail_price = CASE
+        WHEN excluded.detail_price = ''
+          THEN homepage_listings.detail_price
+        WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
+          AND homepage_listings.detail_price <> ''
+          THEN homepage_listings.detail_price
+        ELSE excluded.detail_price
+      END,
       detail_status = CASE
         WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
           THEN homepage_listings.detail_status
@@ -898,6 +909,7 @@ function upsertHomepageListingWithStatus(db, listing, options = {}) {
     now,
     now,
     rank,
+    cardPrice,
   );
 
   upsertListingMediaForListing(db, listingId, listing.photos || listing.media || [], {

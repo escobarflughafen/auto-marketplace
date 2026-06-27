@@ -197,6 +197,7 @@ const WORKFLOWS = {
   'home-collect': {
     label: 'Homepage Collector',
     script: 'marketplace:home:collect',
+    source: 'facebook',
     workerType: 'collector',
     strategy: 'feed',
     fields: [
@@ -244,6 +245,7 @@ const WORKFLOWS = {
   'search-explore': {
     label: 'Search Explorer',
     script: 'marketplace:search:explore',
+    source: 'facebook',
     workerType: 'collector',
     strategy: 'explorer',
     fields: [
@@ -286,9 +288,52 @@ const WORKFLOWS = {
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
+  'ebay-search-collect': {
+    label: 'eBay Search Collector',
+    script: 'marketplace:ebay:search:collect',
+    source: 'ebay',
+    workerType: 'collector',
+    strategy: 'search',
+    fields: [
+      {
+        id: 'browserMode',
+        label: 'Browser mode',
+        kind: 'choice',
+        defaultValue: 'headless',
+        options: [
+          { value: 'headless', label: 'Headless', args: ['--headless'] },
+          { value: 'headed', label: 'Headed', args: ['--headed'] },
+        ],
+      },
+      {
+        id: 'queryMode',
+        label: 'Query mode',
+        kind: 'choice',
+        defaultValue: 'single',
+        options: [
+          { value: 'single', label: 'Single query', args: [] },
+          { value: 'list', label: 'Keyword list', args: [] },
+        ],
+      },
+      { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax 67 105', activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPages', label: 'Max pages', kind: 'number', flag: '--max-pages', defaultValue: 3, min: 1 },
+      { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
+      { id: 'maxItems', label: 'Max items', kind: 'number', flag: '--max-items', defaultValue: '', min: 1, activeWhen: { field: 'collectAll', equals: false } },
+      { id: 'pageDelaySeconds', label: 'Delay after page load (seconds)', kind: 'number', flag: '--page-delay-seconds', defaultValue: 5, min: 0 },
+      { id: 'refreshSeconds', label: 'Refresh every (seconds)', kind: 'number', flag: '--refresh-seconds', defaultValue: 300, min: 1 },
+      { id: 'refreshJitterMin', label: 'Refresh jitter low', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'refreshJitterMax', label: 'Refresh jitter high', kind: 'number', flag: '--refresh-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'maxRuntimeSeconds', label: 'Run window (seconds)', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+    ],
+  },
   'backlog-resolve': {
     label: 'Resolve Pending Backlog',
     script: 'marketplace:home:process',
+    source: 'facebook',
     workerType: 'resolver',
     strategy: 'filtered',
     fields: [
@@ -369,6 +414,7 @@ const WORKFLOWS = {
   'backlog-worker': {
     label: 'Continuous Backlog Worker',
     script: 'marketplace:home:process',
+    source: 'facebook',
     workerType: 'resolver',
     strategy: 'queue',
     fields: [
@@ -452,6 +498,7 @@ const WORKFLOWS = {
   'backlog-indexer': {
     label: 'Backlog Indexer',
     script: 'marketplace:home:index',
+    source: 'internal',
     workerType: 'backlog_indexer',
     strategy: 'resolved_metadata',
     fields: [
@@ -467,6 +514,7 @@ const WORKFLOWS = {
   'profile-onboarder': {
     label: 'Profile Onboarder',
     script: 'marketplace:auth:profile-onboarder',
+    source: 'facebook',
     workerType: 'profile_onboarder',
     strategy: 'guided_login',
     fields: [
@@ -489,6 +537,7 @@ const WORKFLOWS = {
 
 const WORKFLOW_CONCURRENCY_LIMITS = {
   'search-explore': 2,
+  'ebay-search-collect': 2,
   'profile-onboarder': 1,
 };
 const WORKER_TYPE_CONCURRENCY_LIMITS = {
@@ -499,6 +548,7 @@ const EXCLUSIVE_BROWSER_WORKER_TYPES = new Set(['profile_onboarder']);
 const WORKFLOW_SCRIPTS_WITH_WORKER_ID = new Set([
   'marketplace:home:collect',
   'marketplace:search:explore',
+  'marketplace:ebay:search:collect',
   'marketplace:home:process',
   'marketplace:home:index',
   'marketplace:auth:profile-onboarder',
@@ -527,7 +577,7 @@ const QUERY_FIELDS = [
   { value: 'seller', label: 'Seller', type: 'text' },
   { value: 'location', label: 'Location', type: 'text' },
   { value: 'condition', label: 'Condition', type: 'text' },
-  { value: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search'] },
+  { value: 'source', label: 'Source', type: 'enum', values: ['homepage', 'search', 'manual', 'ebay'] },
   { value: 'keyword', label: 'Source keyword', type: 'text' },
   { value: 'price', label: 'Price', type: 'number' },
   { value: 'rank', label: 'Rank', type: 'number' },
@@ -599,6 +649,7 @@ function buildWorkflowDefinitions() {
       id,
       label: workflow.label,
       script: workflow.script,
+      source: workflow.source || 'facebook',
       workerType: workflow.workerType || '',
       strategy: workflow.strategy || '',
       fields,
@@ -2043,7 +2094,7 @@ function workflowArgSpec(workflow, options = {}) {
     addValueFlag(field.flag, (value) => assertSafeWorkflowArgValue(field.flag, value));
   }
 
-  if (workflow.id === 'search-explore') {
+  if (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect') {
     addValueFlag('--queries', (value) => assertSafeWorkflowArgValue('--queries', value));
     addValueFlag('--seed-queries', (value) => assertSafeWorkflowArgValue('--seed-queries', value));
     addValueFlag('--seed-query-targets', (value) => validateSearchQueryTargetsValue('--seed-query-targets', value));
