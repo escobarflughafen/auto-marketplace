@@ -11,6 +11,7 @@ Related design docs:
 - `docs/remote-worker-api-v1-design-review-ticket.md`
 - `docs/remote-worker-outbox-runtime-design.md`
 - `docs/remote-worker-liveness-and-offline-behavior.md`
+- `docs/remote-worker-installable-runtime-design.md`
 
 ## Design Rule
 

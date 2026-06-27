@@ -7,6 +7,11 @@ process while preserving the current worker event semantics. The goal is to add
 the new API beside the existing shared-DB worker implementation, not replace the
 current production workers in one step.
 
+Status update: this document is retained as historical design context. New
+implementation and tests should target
+`docs/remote-worker-host-api-v2-design.md`, which uses
+`/api/v2/remote-workers/*` for the central host receiving API.
+
 The worker-side runtime, local state, outbox, ACK, recovery, and rollout design
 is tracked in:
 

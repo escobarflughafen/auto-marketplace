@@ -8,6 +8,7 @@ chosen consistency mechanism is the Transactional Outbox Pattern.
 The host-side API shape is tracked in:
 
 - `docs/remote-worker-api-v1-design-review-ticket.md`
+- `docs/remote-worker-installable-runtime-design.md`
 
 The concrete worker implementation boundary is tracked in:
 

@@ -350,6 +350,164 @@ function ensureSchema(db) {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS remote_worker_sessions (
+      session_id TEXT PRIMARY KEY,
+      worker_id TEXT NOT NULL,
+      worker_type TEXT NOT NULL,
+      strategy TEXT NOT NULL DEFAULT '',
+      worker_version TEXT NOT NULL DEFAULT '',
+      source_id TEXT NOT NULL DEFAULT '',
+      capabilities_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'registered',
+      liveness_state TEXT NOT NULL DEFAULT 'online',
+      runtime_state TEXT NOT NULL DEFAULT '',
+      last_local_sequence INTEGER NOT NULL DEFAULT 0,
+      last_acked_sequence INTEGER NOT NULL DEFAULT 0,
+      pending_event_count INTEGER NOT NULL DEFAULT 0,
+      registered_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      ended_at TEXT NOT NULL DEFAULT '',
+      last_error TEXT NOT NULL DEFAULT ''
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_sessions_worker_seen
+    ON remote_worker_sessions (worker_id, last_seen_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS remote_worker_event_ingest (
+      event_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      worker_id TEXT NOT NULL,
+      worker_type TEXT NOT NULL,
+      strategy TEXT NOT NULL DEFAULT '',
+      batch_id TEXT NOT NULL DEFAULT '',
+      sequence INTEGER NOT NULL,
+      event_scope TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at TEXT NOT NULL,
+      listing_id TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      payload_hash TEXT NOT NULL DEFAULT '',
+      reduce_status TEXT NOT NULL DEFAULT 'pending',
+      reduce_error TEXT NOT NULL DEFAULT '',
+      received_at TEXT NOT NULL,
+      reduced_at TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_event_ingest_session_sequence
+    ON remote_worker_event_ingest (session_id, sequence);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_event_ingest_worker_time
+    ON remote_worker_event_ingest (worker_id, event_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS remote_worker_artifacts (
+      artifact_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      worker_id TEXT NOT NULL,
+      event_id TEXT NOT NULL DEFAULT '',
+      artifact_type TEXT NOT NULL DEFAULT '',
+      media_role TEXT NOT NULL DEFAULT '',
+      content_type TEXT NOT NULL DEFAULT '',
+      sha256 TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      width INTEGER,
+      height INTEGER,
+      source_url TEXT NOT NULL DEFAULT '',
+      local_path TEXT NOT NULL DEFAULT '',
+      storage_json TEXT NOT NULL DEFAULT '{}',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      derivatives_json TEXT NOT NULL DEFAULT '[]',
+      upload_status TEXT NOT NULL DEFAULT 'manifest_accepted',
+      received_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_artifacts_session
+    ON remote_worker_artifacts (session_id, received_at DESC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_artifacts_event
+    ON remote_worker_artifacts (event_id, media_role);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS remote_worker_commands (
+      command_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL DEFAULT '',
+      worker_id TEXT NOT NULL DEFAULT '',
+      worker_type TEXT NOT NULL DEFAULT '',
+      strategy TEXT NOT NULL DEFAULT '',
+      command_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      priority INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'queued',
+      created_at TEXT NOT NULL,
+      delivered_at TEXT NOT NULL DEFAULT '',
+      acked_at TEXT NOT NULL DEFAULT '',
+      ack_status TEXT NOT NULL DEFAULT '',
+      ack_payload_json TEXT NOT NULL DEFAULT '{}',
+      last_error TEXT NOT NULL DEFAULT ''
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_commands_worker_status
+    ON remote_worker_commands (worker_id, status, priority DESC, created_at ASC);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_commands_session_status
+    ON remote_worker_commands (session_id, status, priority DESC, created_at ASC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS remote_worker_claims (
+      claim_id TEXT PRIMARY KEY,
+      lease_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      worker_id TEXT NOT NULL,
+      command_id TEXT NOT NULL DEFAULT '',
+      command_type TEXT NOT NULL DEFAULT '',
+      entity_type TEXT NOT NULL DEFAULT '',
+      entity_id TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'claimed',
+      claimed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      renewed_at TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT '',
+      result_json TEXT NOT NULL DEFAULT '{}',
+      last_error TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY (session_id) REFERENCES remote_worker_sessions(session_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_claims_session_status
+    ON remote_worker_claims (session_id, status, expires_at);
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_worker_claims_lease
+    ON remote_worker_claims (lease_id, status);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS worker_parameter_profiles (
       profile_id TEXT PRIMARY KEY,
       workflow_id TEXT NOT NULL,

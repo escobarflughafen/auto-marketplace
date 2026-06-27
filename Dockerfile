@@ -1,11 +1,10 @@
-FROM node:24-bookworm-slim
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
 
 WORKDIR /app
 ENV NODE_ENV=production
 
 COPY package*.json ./
-RUN npm ci \
-  && npx playwright install --with-deps chromium
+RUN npm ci
 
 COPY . .
 

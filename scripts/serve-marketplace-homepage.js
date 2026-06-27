@@ -89,6 +89,16 @@ const {
 const {
   appendWorkerCommand,
 } = require('./marketplace-worker-command-channel');
+const {
+  validateRemoteEventEnvelope,
+  validateArtifactManifest,
+} = require('./remote-worker-contracts');
+const {
+  parseWorkerAuthorization,
+} = require('./remote-worker-auth');
+const {
+  validateWorkerEvent,
+} = require('./marketplace-worker-events');
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
@@ -3234,6 +3244,1177 @@ function writeAuthError(response, access) {
   writeJson(response, 403, { error: 'Read-only token cannot perform this action' });
 }
 
+function writeRemoteWorkerAuthError(response, code = 'invalid_worker_token', message = 'Missing or invalid worker token.') {
+  writeJson(response, 401, {
+    error: {
+      code,
+      message,
+    },
+  });
+}
+
+function remoteWorkerTokenForOptions(options) {
+  return String(options.workerToken || process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || '').trim();
+}
+
+function remoteWorkerAccessForRequest(options, request) {
+  const expectedToken = remoteWorkerTokenForOptions(options);
+  const parsed = parseWorkerAuthorization(request.headers.authorization || '');
+  if (!expectedToken || parsed.scheme !== 'bearer' || parsed.token !== expectedToken) {
+    return {
+      ok: false,
+      error: {
+        code: 'invalid_worker_token',
+        message: 'Missing or invalid worker token.',
+      },
+    };
+  }
+  return { ok: true };
+}
+
+function buildRemoteSessionId() {
+  return `remote-session-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function safeJson(value) {
+  return JSON.stringify(value ?? {});
+}
+
+function hashJson(value) {
+  return crypto.createHash('sha256').update(safeJson(value)).digest('hex');
+}
+
+function getRemoteWorkerSession(db, sessionId) {
+  return db.prepare(`
+    SELECT *
+    FROM remote_worker_sessions
+    WHERE session_id = ?
+  `).get(String(sessionId || '').trim()) || null;
+}
+
+function registerRemoteWorkerSession(db, body = {}) {
+  const now = new Date().toISOString();
+  const sessionId = buildRemoteSessionId();
+  const workerId = String(body.workerId || '').trim();
+  const workerType = String(body.workerType || '').trim();
+  const strategy = String(body.strategy || '').trim();
+  if (!workerId || !workerType) {
+    const error = new Error('workerId and workerType are required.');
+    error.statusCode = 400;
+    error.code = 'invalid_remote_worker_session';
+    throw error;
+  }
+
+  runTransaction(db, () => {
+    db.prepare(`
+      INSERT INTO remote_worker_sessions (
+        session_id,
+        worker_id,
+        worker_type,
+        strategy,
+        worker_version,
+        source_id,
+        capabilities_json,
+        status,
+        liveness_state,
+        last_local_sequence,
+        last_acked_sequence,
+        pending_event_count,
+        registered_at,
+        last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sessionId,
+      workerId,
+      workerType,
+      strategy,
+      String(body.workerVersion || '').trim(),
+      String(body.sourceId || '').trim(),
+      safeJson(body.capabilities || {}),
+      'registered',
+      'online',
+      Number(body.lastCheckpoint?.lastLocalSequence || 0),
+      Number(body.lastCheckpoint?.lastAckedSequence || 0),
+      0,
+      now,
+      now,
+    );
+
+    insertWorkflowRun(db, {
+      runId: sessionId,
+      workflowId: `remote-${workerType}`,
+      label: `Remote ${workerType}`,
+      script: 'remote-worker',
+      args: [],
+      status: 'running',
+      startedAt: now,
+      updatedAt: now,
+      osAlive: true,
+      logs: [],
+    });
+  });
+
+  return {
+    sessionId,
+    status: 'registered',
+    hostCheckpoint: {
+      lastAcceptedSequence: Number(body.lastCheckpoint?.lastAckedSequence || 0),
+    },
+  };
+}
+
+function updateRemoteWorkerHeartbeat(db, sessionId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  if (String(body.workerId || '').trim() !== session.worker_id) {
+    const error = new Error('workerId does not match remote worker session.');
+    error.statusCode = 409;
+    error.code = 'remote_worker_session_mismatch';
+    throw error;
+  }
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE remote_worker_sessions
+    SET
+      runtime_state = ?,
+      liveness_state = 'online',
+      last_local_sequence = ?,
+      pending_event_count = ?,
+      last_seen_at = ?
+    WHERE session_id = ?
+  `).run(
+    String(body.runtimeState || '').trim(),
+    Number(body.lastLocalSequence || 0),
+    Number(body.pendingEventCount || 0),
+    now,
+    sessionId,
+  );
+  updateWorkflowRun(db, sessionId, {
+    status: 'running',
+    updatedAt: now,
+    osAlive: true,
+  });
+  const updated = getRemoteWorkerSession(db, sessionId);
+  return {
+    status: 'ok',
+    hostCheckpoint: {
+      lastAcceptedSequence: updated.last_acked_sequence || 0,
+    },
+  };
+}
+
+function normalizeRemoteEventForSession(session, event) {
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  return validateRemoteEventEnvelope({
+    ...event,
+    sessionId: session.session_id,
+    workerId: session.worker_id,
+    workerType: session.worker_type,
+    strategy: session.strategy,
+    payload,
+  });
+}
+
+function validateRemoteWorkerRegistryEvent(session, remoteEvent) {
+  const payload = {
+    ...remoteEvent.payload,
+    workerType: remoteEvent.payload.workerType || session.worker_type,
+    strategy: remoteEvent.payload.strategy || session.strategy,
+  };
+  if (remoteEvent.listingId && payload.listingId === undefined) {
+    payload.listingId = remoteEvent.listingId;
+  }
+  validateWorkerEvent({
+    eventType: remoteEvent.eventType,
+    workerType: session.worker_type,
+    strategy: session.strategy,
+    payload,
+  });
+  return payload;
+}
+
+function insertRemoteWorkerIngestRow(db, session, batchId, remoteEvent, payload, reduceStatus = 'reduced') {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO remote_worker_event_ingest (
+      event_id,
+      session_id,
+      worker_id,
+      worker_type,
+      strategy,
+      batch_id,
+      sequence,
+      event_scope,
+      event_type,
+      event_at,
+      listing_id,
+      status,
+      payload_json,
+      payload_hash,
+      reduce_status,
+      received_at,
+      reduced_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    remoteEvent.eventId,
+    session.session_id,
+    session.worker_id,
+    session.worker_type,
+    session.strategy,
+    String(batchId || '').trim(),
+    remoteEvent.sequence,
+    remoteEvent.eventScope,
+    remoteEvent.eventType,
+    remoteEvent.eventAt,
+    remoteEvent.listingId,
+    remoteEvent.status,
+    safeJson(payload),
+    hashJson(payload),
+    reduceStatus,
+    now,
+    now,
+  );
+}
+
+function projectRemoteWorkerEvent(db, session, remoteEvent, payload) {
+  if (remoteEvent.eventScope === 'workflow') {
+    appendWorkflowEvent(db, {
+      eventId: remoteEvent.eventId,
+      workflowRunId: session.session_id,
+      eventType: remoteEvent.eventType,
+      eventAt: remoteEvent.eventAt,
+      status: remoteEvent.status,
+      content: payload,
+      error: payload.errorMessage || payload.reason || '',
+    });
+    return;
+  }
+  if (remoteEvent.eventScope === 'listing') {
+    appendListingEvent(db, {
+      eventId: remoteEvent.eventId,
+      workflowRunId: session.session_id,
+      listingId: remoteEvent.listingId,
+      eventType: remoteEvent.eventType,
+      eventAt: remoteEvent.eventAt,
+      workerId: session.worker_id,
+      status: remoteEvent.status,
+      content: payload,
+      error: payload.errorMessage || payload.reason || '',
+    });
+    reduceBacklogListingMetadataEvent(db, session, remoteEvent, payload);
+    return;
+  }
+  const error = new Error(`Unsupported remote event scope: ${remoteEvent.eventScope}`);
+  error.code = 'unsupported_remote_event_scope';
+  throw error;
+}
+
+function ingestRemoteWorkerEvents(db, sessionId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  if (String(body.workerId || '').trim() !== session.worker_id) {
+    const error = new Error('workerId does not match remote worker session.');
+    error.statusCode = 409;
+    error.code = 'remote_worker_session_mismatch';
+    throw error;
+  }
+
+  const accepted = [];
+  const duplicates = [];
+  const rejected = [];
+  const events = Array.isArray(body.events) ? body.events : [];
+  for (const event of events) {
+    const eventId = String(event.eventId || event.event_id || '').trim();
+    if (!eventId) {
+      rejected.push({ eventId: '', error: 'eventId is required' });
+      continue;
+    }
+    const existing = db.prepare(`
+      SELECT event_id, sequence
+      FROM remote_worker_event_ingest
+      WHERE event_id = ?
+    `).get(eventId);
+    if (existing) {
+      duplicates.push({ eventId, sequence: existing.sequence });
+      continue;
+    }
+    try {
+      runTransaction(db, () => {
+        const remoteEvent = normalizeRemoteEventForSession(session, event);
+        const payload = validateRemoteWorkerRegistryEvent(session, remoteEvent);
+        insertRemoteWorkerIngestRow(db, session, body.batchId, remoteEvent, payload, 'reduced');
+        projectRemoteWorkerEvent(db, session, remoteEvent, payload);
+        accepted.push({ eventId: remoteEvent.eventId, sequence: remoteEvent.sequence });
+      });
+    } catch (error) {
+      rejected.push({ eventId, error: error.message });
+    }
+  }
+
+  if (rejected.length > 0) {
+    const error = new Error(rejected[0].error || 'Invalid remote worker event batch.');
+    error.statusCode = 400;
+    error.code = 'invalid_event_batch';
+    error.rejected = rejected;
+    throw error;
+  }
+
+  const lastAcceptedSequence = db.prepare(`
+    SELECT COALESCE(MAX(sequence), 0) AS lastAcceptedSequence
+    FROM remote_worker_event_ingest
+    WHERE session_id = ?
+  `).get(session.session_id).lastAcceptedSequence || 0;
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE remote_worker_sessions
+    SET
+      last_acked_sequence = ?,
+      last_seen_at = ?,
+      liveness_state = 'online'
+    WHERE session_id = ?
+  `).run(lastAcceptedSequence, now, session.session_id);
+
+  return {
+    status: 'accepted',
+    accepted,
+    duplicates,
+    rejected: [],
+    checkpoint: {
+      lastAcceptedSequence,
+    },
+  };
+}
+
+function listRemoteWorkerIngestEvents(db, sessionId) {
+  return db.prepare(`
+    SELECT *
+    FROM remote_worker_event_ingest
+    WHERE session_id = ?
+    ORDER BY sequence ASC
+  `).all(String(sessionId || '').trim()).map((row) => ({
+    eventId: row.event_id,
+    sessionId: row.session_id,
+    workerId: row.worker_id,
+    workerType: row.worker_type,
+    strategy: row.strategy,
+    sequence: row.sequence,
+    eventScope: row.event_scope,
+    eventType: row.event_type,
+    eventAt: row.event_at,
+    listingId: row.listing_id,
+    status: row.status,
+    payload: JSON.parse(row.payload_json || '{}'),
+    reduceStatus: row.reduce_status,
+    reduceError: row.reduce_error,
+  }));
+}
+
+function normalizeArtifactManifestForSession(session, manifest) {
+  return validateArtifactManifest({
+    ...manifest,
+    workerId: manifest.workerId || session.worker_id,
+    sessionId: manifest.sessionId || session.session_id,
+  }, {
+    maxArtifactBytes: 5 * 1024 * 1024,
+  });
+}
+
+function ingestRemoteWorkerArtifacts(db, sessionId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  const bodyWorkerId = String(body.workerId || '').trim();
+  if (bodyWorkerId && bodyWorkerId !== session.worker_id) {
+    const error = new Error('workerId does not match remote worker session.');
+    error.statusCode = 409;
+    error.code = 'remote_worker_session_mismatch';
+    throw error;
+  }
+
+  const artifacts = Array.isArray(body.artifacts)
+    ? body.artifacts
+    : (body.artifactId ? [body] : []);
+  const accepted = [];
+  const duplicates = [];
+  const rejected = [];
+  const now = new Date().toISOString();
+
+  for (const artifact of artifacts) {
+    const artifactId = String(artifact.artifactId || '').trim();
+    if (!artifactId) {
+      rejected.push({ artifactId: '', error: 'artifactId is required' });
+      continue;
+    }
+    try {
+      const manifest = normalizeArtifactManifestForSession(session, artifact);
+      const existing = db.prepare(`
+        SELECT artifact_id, sha256, size_bytes
+        FROM remote_worker_artifacts
+        WHERE artifact_id = ?
+      `).get(manifest.artifactId);
+      if (existing) {
+        if (existing.sha256 !== manifest.sha256 || Number(existing.size_bytes) !== Number(manifest.sizeBytes)) {
+          rejected.push({
+            artifactId: manifest.artifactId,
+            error: 'artifactId already exists with different content hash or size',
+          });
+        } else {
+          duplicates.push({
+            artifactId: manifest.artifactId,
+            sha256: manifest.sha256,
+          });
+        }
+        continue;
+      }
+      db.prepare(`
+        INSERT INTO remote_worker_artifacts (
+          artifact_id,
+          session_id,
+          worker_id,
+          event_id,
+          artifact_type,
+          media_role,
+          content_type,
+          sha256,
+          size_bytes,
+          width,
+          height,
+          source_url,
+          local_path,
+          storage_json,
+          metadata_json,
+          derivatives_json,
+          upload_status,
+          received_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        manifest.artifactId,
+        session.session_id,
+        session.worker_id,
+        String(manifest.eventId || '').trim(),
+        String(manifest.artifactType || '').trim(),
+        String(manifest.mediaRole || '').trim(),
+        String(manifest.contentType || '').trim(),
+        manifest.sha256,
+        Number(manifest.sizeBytes || 0),
+        Number.isFinite(Number(manifest.width)) ? Number(manifest.width) : null,
+        Number.isFinite(Number(manifest.height)) ? Number(manifest.height) : null,
+        String(manifest.sourceUrl || '').trim(),
+        String(manifest.localPath || '').trim(),
+        safeJson(manifest.storage || {}),
+        safeJson(manifest.metadata || {}),
+        safeJson(manifest.derivatives || []),
+        'manifest_accepted',
+        now,
+        now,
+      );
+      accepted.push({
+        artifactId: manifest.artifactId,
+        sha256: manifest.sha256,
+        uploadStatus: 'manifest_accepted',
+      });
+    } catch (error) {
+      rejected.push({ artifactId, error: error.message });
+    }
+  }
+
+  if (rejected.length > 0) {
+    const error = new Error(rejected[0].error || 'Invalid remote worker artifact manifest.');
+    error.statusCode = 400;
+    error.code = 'invalid_artifact_batch';
+    error.rejected = rejected;
+    throw error;
+  }
+
+  db.prepare(`
+    UPDATE remote_worker_sessions
+    SET last_seen_at = ?, liveness_state = 'online'
+    WHERE session_id = ?
+  `).run(now, session.session_id);
+
+  return {
+    status: 'accepted',
+    accepted,
+    duplicates,
+    rejected: [],
+  };
+}
+
+function buildRemoteCommandId() {
+  return `remote-command-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function buildRemoteClaimId() {
+  return `remote-claim-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function buildRemoteLeaseId() {
+  return `remote-lease-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function isoToUnixSeconds(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+function reduceBacklogListingMetadataEvent(db, session, remoteEvent, payload) {
+  if (remoteEvent.eventType !== 'backlog_listing_metadata_indexed' || !remoteEvent.listingId) {
+    return;
+  }
+  const earliestUnix = Number.isFinite(Number(payload.listedAtEarliestUnix))
+    ? Number(payload.listedAtEarliestUnix)
+    : isoToUnixSeconds(payload.listedAtMin || payload.listedAtEarliest || payload.listedAtEarliestIso);
+  const latestUnix = Number.isFinite(Number(payload.listedAtLatestUnix))
+    ? Number(payload.listedAtLatestUnix)
+    : isoToUnixSeconds(payload.listedAtMax || payload.listedAtLatest || payload.listedAtLatestIso);
+  const anchorUnix = Number.isFinite(Number(payload.listedAtAnchorUnix))
+    ? Number(payload.listedAtAnchorUnix)
+    : isoToUnixSeconds(payload.resolvedAt || payload.anchorAt || remoteEvent.eventAt);
+  const existing = db.prepare(`
+    SELECT detail_listed_ago
+    FROM homepage_listings
+    WHERE listing_id = ?
+  `).get(remoteEvent.listingId);
+  if (!existing) {
+    return;
+  }
+  db.prepare(`
+    UPDATE homepage_listings
+    SET
+      detail_listed_at_raw = ?,
+      detail_listed_at_earliest_unix = ?,
+      detail_listed_at_latest_unix = ?,
+      detail_listed_at_anchor_unix = ?,
+      detail_listed_at_language = ?,
+      detail_listed_at_unit = ?,
+      detail_listed_at_value = ?,
+      detail_listed_at_confidence = ?,
+      detail_listed_at_source = ?,
+      detail_listed_at_normalized_at = ?
+    WHERE listing_id = ?
+  `).run(
+    String(payload.detailListedAgo || payload.listedAgo || existing.detail_listed_ago || '').trim(),
+    earliestUnix,
+    latestUnix,
+    anchorUnix,
+    String(payload.language || '').trim(),
+    String(payload.unit || '').trim(),
+    Number.isFinite(Number(payload.value)) ? Number(payload.value) : null,
+    String(payload.confidence || '').trim(),
+    `remote:${session.worker_id}:${payload.indexerVersion || 'backlog-indexer'}`,
+    remoteEvent.eventAt || new Date().toISOString(),
+    remoteEvent.listingId,
+  );
+}
+
+function listRemoteWorkerCommands(db, sessionId, options = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  const limit = normalizeBoundedInteger(options.limit, 25, 1, 100);
+  const now = new Date().toISOString();
+  const rows = db.prepare(`
+    SELECT *
+    FROM remote_worker_commands
+    WHERE status = 'queued'
+      AND (session_id = '' OR session_id = ?)
+      AND (worker_id = '' OR worker_id = ?)
+      AND (worker_type = '' OR worker_type = ?)
+      AND (strategy = '' OR strategy = ?)
+    ORDER BY priority DESC, created_at ASC
+    LIMIT ?
+  `).all(
+    session.session_id,
+    session.worker_id,
+    session.worker_type,
+    session.strategy,
+    limit,
+  );
+
+  if (rows.length > 0) {
+    const updateDelivered = db.prepare(`
+      UPDATE remote_worker_commands
+      SET delivered_at = CASE WHEN delivered_at = '' THEN ? ELSE delivered_at END
+      WHERE command_id = ?
+    `);
+    runTransaction(db, () => {
+      for (const row of rows) {
+        updateDelivered.run(now, row.command_id);
+      }
+      db.prepare(`
+        UPDATE remote_worker_sessions
+        SET last_seen_at = ?, liveness_state = 'online'
+        WHERE session_id = ?
+      `).run(now, session.session_id);
+    });
+  }
+
+  return {
+    commands: rows.map((row) => ({
+      commandId: row.command_id,
+      commandType: row.command_type,
+      payload: JSON.parse(row.payload_json || '{}'),
+      priority: row.priority,
+      createdAt: row.created_at,
+      deliveredAt: row.delivered_at || now,
+    })),
+  };
+}
+
+function ackRemoteWorkerCommand(db, sessionId, commandId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  const command = db.prepare(`
+    SELECT *
+    FROM remote_worker_commands
+    WHERE command_id = ?
+  `).get(String(commandId || '').trim());
+  if (!command) {
+    const error = new Error(`Unknown remote worker command: ${commandId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_command_not_found';
+    throw error;
+  }
+  const matchesSession = !command.session_id || command.session_id === session.session_id;
+  const matchesWorker = !command.worker_id || command.worker_id === session.worker_id;
+  if (!matchesSession || !matchesWorker) {
+    const error = new Error('Command does not belong to this remote worker session.');
+    error.statusCode = 409;
+    error.code = 'remote_worker_command_mismatch';
+    throw error;
+  }
+  const ackStatus = String(body.status || body.ackStatus || 'acked').trim();
+  const terminalStatus = ackStatus === 'failed' ? 'failed' : 'acked';
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE remote_worker_commands
+    SET
+      status = ?,
+      ack_status = ?,
+      ack_payload_json = ?,
+      acked_at = ?,
+      last_error = ?
+    WHERE command_id = ?
+  `).run(
+    terminalStatus,
+    ackStatus,
+    safeJson(body.payload || {}),
+    now,
+    String(body.error || '').trim(),
+    command.command_id,
+  );
+  return {
+    status: terminalStatus,
+    commandId: command.command_id,
+    ackStatus,
+  };
+}
+
+function createRemoteWorkerCommand(db, command = {}) {
+  const commandType = String(command.commandType || command.command_type || command.type || '').trim();
+  if (!commandType) {
+    throw new Error('remote worker command requires commandType');
+  }
+  const now = command.createdAt || new Date().toISOString();
+  const commandId = String(command.commandId || command.command_id || buildRemoteCommandId()).trim();
+  db.prepare(`
+    INSERT INTO remote_worker_commands (
+      command_id,
+      session_id,
+      worker_id,
+      worker_type,
+      strategy,
+      command_type,
+      payload_json,
+      priority,
+      status,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+  `).run(
+    commandId,
+    String(command.sessionId || command.session_id || '').trim(),
+    String(command.workerId || command.worker_id || '').trim(),
+    String(command.workerType || command.worker_type || '').trim(),
+    String(command.strategy || '').trim(),
+    commandType,
+    safeJson(command.payload || {}),
+    Number.isFinite(command.priority) ? command.priority : 0,
+    now,
+  );
+  return commandId;
+}
+
+function remoteBacklogIndexerAccepted(body = {}) {
+  const acceptedCommandTypes = Array.isArray(body.acceptedCommandTypes)
+    ? body.acceptedCommandTypes.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  return acceptedCommandTypes.length === 0
+    || acceptedCommandTypes.includes('index_resolved_listing_metadata_batch');
+}
+
+function listRemoteBacklogIndexerCandidates(db, options = {}) {
+  const limit = Math.max(1, Math.min(Number.parseInt(options.limit, 10) || 25, 100));
+  const excluded = Array.isArray(options.excludeListingIds) ? options.excludeListingIds : [];
+  const excludedSql = excluded.length > 0
+    ? `AND h.listing_id NOT IN (${excluded.map(() => '?').join(', ')})`
+    : '';
+  return db.prepare(`
+    SELECT
+      h.listing_id,
+      h.href,
+      h.source,
+      h.source_keyword,
+      h.card_title,
+      h.card_text,
+      h.detail_title,
+      h.detail_price,
+      h.detail_location,
+      h.detail_condition,
+      h.detail_listed_ago,
+      h.detail_completed_at,
+      h.detail_json,
+      h.snapshot_path,
+      h.first_seen_at,
+      h.last_seen_at
+    FROM homepage_listings h
+    WHERE (h.detail_status = 'done' OR h.detail_completed_at IS NOT NULL OR NULLIF(h.snapshot_path, '') IS NOT NULL)
+      AND LENGTH(TRIM(h.detail_listed_ago)) > 0
+      AND (h.detail_listed_at_normalized_at = '' OR h.detail_listed_at_raw != h.detail_listed_ago)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM remote_worker_claims c
+        WHERE c.entity_type = 'listing_batch'
+          AND c.status IN ('claimed', 'renewed')
+          AND c.expires_at > ?
+          AND c.payload_json LIKE '%' || h.listing_id || '%'
+      )
+      ${excludedSql}
+    ORDER BY COALESCE(h.detail_completed_at, h.last_seen_at, h.first_seen_at) DESC, h.listing_id ASC
+    LIMIT ?
+  `).all(new Date().toISOString(), ...excluded, limit);
+}
+
+function parseListingDetailJson(row) {
+  try {
+    return JSON.parse(row.detail_json || '{}');
+  } catch (_) {
+    return {};
+  }
+}
+
+function remoteBacklogIndexerPayloadItem(row) {
+  const detail = parseListingDetailJson(row);
+  const listingContent = detail.listingContent && typeof detail.listingContent === 'object'
+    ? detail.listingContent
+    : {};
+  const title = String(row.detail_title || listingContent.title || row.card_title || '').trim();
+  const text = String(listingContent.description || listingContent.text || row.card_text || '').trim();
+  const payloadCore = {
+    listingId: row.listing_id,
+    href: row.href,
+    title,
+    price: row.detail_price || listingContent.price || '',
+    description: text,
+    detailListedAgo: row.detail_listed_ago || '',
+    detailLocation: row.detail_location || listingContent.location || '',
+    detailCondition: row.detail_condition || listingContent.condition || '',
+    resolvedAt: row.detail_completed_at || row.last_seen_at || row.first_seen_at || '',
+    firstSeenAt: row.first_seen_at || '',
+    lastSeenAt: row.last_seen_at || '',
+    source: row.source || '',
+    sourceKeyword: row.source_keyword || '',
+    snapshotPath: row.snapshot_path || '',
+  };
+  return {
+    ...payloadCore,
+    contentHash: crypto.createHash('sha256').update(safeJson(payloadCore)).digest('hex'),
+  };
+}
+
+function createBacklogIndexerClaim(db, session, items, options = {}) {
+  const now = new Date().toISOString();
+  const leaseSeconds = Math.max(30, Math.min(Number.parseInt(options.leaseSeconds, 10) || 180, 3600));
+  const expiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+  const commandId = buildRemoteCommandId();
+  const claimId = buildRemoteClaimId();
+  const leaseId = buildRemoteLeaseId();
+  const payload = {
+    indexerVersion: 'resolved-metadata-v1',
+    items: items.map(remoteBacklogIndexerPayloadItem),
+  };
+  db.prepare(`
+    INSERT INTO remote_worker_commands (
+      command_id,
+      session_id,
+      worker_id,
+      worker_type,
+      strategy,
+      command_type,
+      payload_json,
+      priority,
+      status,
+      created_at,
+      delivered_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?)
+  `).run(
+    commandId,
+    session.session_id,
+    session.worker_id,
+    session.worker_type,
+    session.strategy,
+    'index_resolved_listing_metadata_batch',
+    safeJson(payload),
+    0,
+    now,
+    now,
+  );
+  db.prepare(`
+    INSERT INTO remote_worker_claims (
+      claim_id,
+      lease_id,
+      session_id,
+      worker_id,
+      command_id,
+      command_type,
+      entity_type,
+      entity_id,
+      payload_json,
+      status,
+      claimed_at,
+      expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?)
+  `).run(
+    claimId,
+    leaseId,
+    session.session_id,
+    session.worker_id,
+    commandId,
+    'index_resolved_listing_metadata_batch',
+    'listing_batch',
+    `listing-batch:${claimId}`,
+    safeJson(payload),
+    now,
+    expiresAt,
+  );
+  return {
+    leaseId,
+    claimId,
+    commandId,
+    commandType: 'index_resolved_listing_metadata_batch',
+    entityType: 'listing_batch',
+    entityId: `listing-batch:${claimId}`,
+    expiresAt,
+    payload,
+  };
+}
+
+function claimRemoteWorkerWork(db, sessionId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  const bodyWorkerId = String(body.workerId || '').trim();
+  if (bodyWorkerId && bodyWorkerId !== session.worker_id) {
+    const error = new Error('workerId does not match remote worker session.');
+    error.statusCode = 409;
+    error.code = 'remote_worker_session_mismatch';
+    throw error;
+  }
+  if (session.worker_type !== 'backlog_indexer' || session.strategy !== 'resolved_metadata') {
+    db.prepare(`
+      UPDATE remote_worker_sessions
+      SET last_seen_at = ?, liveness_state = 'online'
+      WHERE session_id = ?
+    `).run(new Date().toISOString(), session.session_id);
+    return {
+      claims: [],
+      drainRequested: false,
+      reason: 'unsupported_remote_claim_worker',
+    };
+  }
+  if (!remoteBacklogIndexerAccepted(body)) {
+    return {
+      claims: [],
+      drainRequested: false,
+      reason: 'worker_does_not_accept_backlog_indexer_claims',
+    };
+  }
+
+  const capacity = Math.max(1, Math.min(Number.parseInt(body.capacity, 10) || 1, 5));
+  const batchSize = Math.max(1, Math.min(Number.parseInt(body.batchSize || body.limit, 10) || 25, 100));
+  const claims = [];
+  const excludeListingIds = [];
+  runTransaction(db, () => {
+    for (let index = 0; index < capacity; index += 1) {
+      const rows = listRemoteBacklogIndexerCandidates(db, {
+        limit: batchSize,
+        excludeListingIds,
+      });
+      if (rows.length === 0) {
+        break;
+      }
+      claims.push(createBacklogIndexerClaim(db, session, rows, {
+        leaseSeconds: body.leaseSeconds,
+      }));
+      excludeListingIds.push(...rows.map((row) => row.listing_id));
+    }
+    db.prepare(`
+      UPDATE remote_worker_sessions
+      SET last_seen_at = ?, liveness_state = 'online'
+      WHERE session_id = ?
+    `).run(new Date().toISOString(), session.session_id);
+  });
+  return {
+    claims,
+    drainRequested: false,
+    reason: claims.length > 0 ? '' : 'no_backlog_indexer_candidates',
+  };
+}
+
+function renewRemoteWorkerLease(db, sessionId, leaseId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  const lease = db.prepare(`
+    SELECT *
+    FROM remote_worker_claims
+    WHERE lease_id = ? AND session_id = ?
+  `).get(String(leaseId || '').trim(), session.session_id);
+  if (!lease) {
+    return {
+      status: 'unknown_lease',
+      leaseId: String(leaseId || '').trim(),
+      renewed: false,
+    };
+  }
+  if (!['claimed', 'renewed'].includes(String(lease.status || '')) || Date.parse(lease.expires_at || '') <= Date.now()) {
+    const error = new Error('Remote worker lease is no longer renewable.');
+    error.statusCode = 409;
+    error.code = 'stale_remote_worker_lease';
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const expiresAt = body.expiresAt || new Date(Date.now() + 3 * 60 * 1000).toISOString();
+  db.prepare(`
+    UPDATE remote_worker_claims
+    SET status = 'renewed', renewed_at = ?, expires_at = ?
+    WHERE claim_id = ?
+  `).run(now, expiresAt, lease.claim_id);
+  return {
+    status: 'renewed',
+    leaseId: lease.lease_id,
+    claimId: lease.claim_id,
+    expiresAt,
+  };
+}
+
+function completeRemoteWorkerLease(db, sessionId, leaseId, body = {}) {
+  const session = getRemoteWorkerSession(db, sessionId);
+  if (!session) {
+    const error = new Error(`Unknown remote worker session: ${sessionId}`);
+    error.statusCode = 404;
+    error.code = 'remote_worker_session_not_found';
+    throw error;
+  }
+  const lease = db.prepare(`
+    SELECT *
+    FROM remote_worker_claims
+    WHERE lease_id = ? AND session_id = ?
+  `).get(String(leaseId || '').trim(), session.session_id);
+  if (!lease) {
+    return {
+      status: 'unknown_lease',
+      leaseId: String(leaseId || '').trim(),
+      completed: false,
+    };
+  }
+  if (!['claimed', 'renewed'].includes(String(lease.status || '')) || Date.parse(lease.expires_at || '') <= Date.now()) {
+    const error = new Error('Remote worker lease is stale and cannot be completed.');
+    error.statusCode = 409;
+    error.code = 'stale_remote_worker_lease';
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const requestedStatus = String(body.status || 'completed').trim();
+  const status = requestedStatus === 'failed' ? 'failed' : 'completed';
+  db.prepare(`
+    UPDATE remote_worker_claims
+    SET status = ?, completed_at = ?, result_json = ?, last_error = ?
+    WHERE claim_id = ?
+  `).run(
+    status,
+    now,
+    safeJson(body.result || {}),
+    String(body.error || '').trim(),
+    lease.claim_id,
+  );
+  db.prepare(`
+    UPDATE remote_worker_commands
+    SET status = ?, ack_status = ?, ack_payload_json = ?, acked_at = ?, last_error = ?
+    WHERE command_id = ?
+  `).run(
+    status,
+    requestedStatus,
+    safeJson(body.result || {}),
+    now,
+    String(body.error || '').trim(),
+    lease.command_id,
+  );
+  return {
+    status,
+    leaseId: lease.lease_id,
+    claimId: lease.claim_id,
+    completed: true,
+  };
+}
+
+async function handleRemoteWorkerApi(request, response, requestUrl, options, db) {
+  if (!requestUrl.pathname.startsWith('/api/v2/remote-workers/')) {
+    return false;
+  }
+  const access = remoteWorkerAccessForRequest(options, request);
+  if (!access.ok) {
+    writeRemoteWorkerAuthError(response, access.error.code, access.error.message);
+    return true;
+  }
+
+  try {
+    if (requestUrl.pathname === '/api/v2/remote-workers/sessions' && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 201, registerRemoteWorkerSession(db, body));
+      return true;
+    }
+
+    const heartbeatMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/heartbeat$/);
+    if (heartbeatMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, updateRemoteWorkerHeartbeat(db, decodeURIComponent(heartbeatMatch[1]), body));
+      return true;
+    }
+
+    const eventsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/events$/);
+    if (eventsMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, ingestRemoteWorkerEvents(db, decodeURIComponent(eventsMatch[1]), body));
+      return true;
+    }
+
+    const ingestEventsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/ingest-events$/);
+    if (ingestEventsMatch && request.method === 'GET') {
+      writeJson(response, 200, {
+        events: listRemoteWorkerIngestEvents(db, decodeURIComponent(ingestEventsMatch[1])),
+      });
+      return true;
+    }
+
+    const artifactsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/artifacts$/);
+    if (artifactsMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, ingestRemoteWorkerArtifacts(db, decodeURIComponent(artifactsMatch[1]), body));
+      return true;
+    }
+
+    const claimsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/claims$/);
+    if (claimsMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, claimRemoteWorkerWork(db, decodeURIComponent(claimsMatch[1]), body));
+      return true;
+    }
+
+    const leaseRenewMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/leases\/([^/]+)\/renew$/);
+    if (leaseRenewMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, renewRemoteWorkerLease(
+        db,
+        decodeURIComponent(leaseRenewMatch[1]),
+        decodeURIComponent(leaseRenewMatch[2]),
+        body,
+      ));
+      return true;
+    }
+
+    const leaseCompleteMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/leases\/([^/]+)\/complete$/);
+    if (leaseCompleteMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, completeRemoteWorkerLease(
+        db,
+        decodeURIComponent(leaseCompleteMatch[1]),
+        decodeURIComponent(leaseCompleteMatch[2]),
+        body,
+      ));
+      return true;
+    }
+
+    const commandsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/commands$/);
+    if (commandsMatch && request.method === 'GET') {
+      writeJson(response, 200, listRemoteWorkerCommands(db, decodeURIComponent(commandsMatch[1]), {
+        limit: requestUrl.searchParams.get('limit'),
+      }));
+      return true;
+    }
+
+    const commandAckMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/commands\/([^/]+)\/ack$/);
+    if (commandAckMatch && request.method === 'POST') {
+      const body = await readRequestJson(request);
+      writeJson(response, 200, ackRemoteWorkerCommand(
+        db,
+        decodeURIComponent(commandAckMatch[1]),
+        decodeURIComponent(commandAckMatch[2]),
+        body,
+      ));
+      return true;
+    }
+  } catch (error) {
+    writeJson(response, error.statusCode || 400, {
+      error: {
+        code: error.code || 'remote_worker_api_error',
+        message: error.message,
+      },
+      rejected: error.rejected || undefined,
+    });
+    return true;
+  }
+
+  writeJson(response, 404, {
+    error: {
+      code: 'remote_worker_route_not_found',
+      message: `Unknown remote worker API route: ${requestUrl.pathname}`,
+    },
+  });
+  return true;
+}
+
 function contentTypeForPath(filePath) {
   switch (path.extname(filePath).toLowerCase()) {
     case '.html':
@@ -3516,6 +4697,10 @@ function createServer(options) {
         return;
       }
       serveVendorAsset(response, relativePath);
+      return;
+    }
+
+    if (await handleRemoteWorkerApi(request, response, requestUrl, options, db)) {
       return;
     }
 

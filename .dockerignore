@@ -3,8 +3,13 @@ node_modules
 .DS_Store
 npm-debug.log
 artifacts
+artifacts-staging
 profiles
+profiles-staging
 credentials.json
 secrets
+secrets-staging
 output
 reviews
+raw
+=
