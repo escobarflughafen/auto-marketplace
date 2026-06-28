@@ -2544,6 +2544,42 @@ textarea {
   width: 100%;
   min-width: 0;
 }
+.remote-worker-card {
+  margin-bottom: 10px;
+}
+.remote-worker-note {
+  margin-top: 8px;
+}
+.remote-worker-command-bar {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  background: var(--fill);
+}
+.remote-worker-selected {
+  min-width: 0;
+  margin-top: 0;
+}
+.remote-worker-tabulator {
+  width: 100%;
+  min-width: 0;
+}
+.remote-worker-tabulator .tabulator-row.selected-row,
+.remote-worker-tabulator .tabulator-row.selected-row .tabulator-cell,
+.remote-worker-tabulator .tabulator-row.selected-row .tabulator-cell.tabulator-frozen {
+  background: #fffaf0;
+}
+.status.standby { color: var(--good); }
+.status.syncing,
+.status.queued { color: var(--warm); }
+.status.working { color: var(--accent); }
+.status.offline,
+.status.stale,
+.status.ended { color: var(--bad); }
 .worker-metric-note {
   margin-top: 8px;
 }

@@ -876,3 +876,100 @@ test('remote worker host API issues backlog indexer claims and protects stale le
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+
+test('remote worker UI API exposes health and queues control commands', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const workerToken = 'ui-worker-token';
+  const { db: seedDb } = openMarketplaceHomepageDatabase(dbPath);
+  closeMarketplaceHomepageDatabase(seedDb);
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+  let sessionId = '';
+
+  try {
+    const registered = await requestJson(baseUrl, '/api/v2/remote-workers/sessions', {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'ui-remote-collector-1',
+        workerType: 'collector',
+        strategy: 'homepage',
+        workerVersion: 'ui-test-version',
+        sourceId: 'facebook_marketplace',
+        capabilities: {
+          apiVersion: 'v2',
+          acceptsCommands: ['drain', 'shutdown'],
+        },
+      },
+    });
+    assert.equal(registered.status, 201);
+    sessionId = registered.body.sessionId;
+
+    const heartbeat = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'ui-remote-collector-1',
+        runtimeState: 'idle',
+        lastLocalSequence: 4,
+        lastAckedSequence: 4,
+        pendingEventCount: 0,
+      },
+    });
+    assert.equal(heartbeat.status, 200);
+
+    const workflows = await requestJson(baseUrl, '/api/workflows?config=0&stats=0&reconcile=0', {
+      token: 'admin-token',
+    });
+    assert.equal(workflows.status, 200);
+    const workflowWorker = workflows.body.remoteWorkers.find((worker) => worker.sessionId === sessionId);
+    assert.ok(workflowWorker);
+    assert.equal(workflowWorker.workerId, 'ui-remote-collector-1');
+    assert.equal(workflowWorker.displayState, 'standby');
+    assert.equal(workflowWorker.standby, true);
+    assert.equal(workflowWorker.lastLocalSequence, 4);
+    assert.equal(workflowWorker.lastAckedSequence, 0);
+
+    const remoteWorkers = await requestJson(baseUrl, '/api/remote-workers?limit=10', {
+      token: 'admin-token',
+    });
+    assert.equal(remoteWorkers.status, 200);
+    assert.equal(remoteWorkers.body.workers.length, 1);
+    assert.equal(remoteWorkers.body.workers[0].sessionId, sessionId);
+    assert.equal(remoteWorkers.body.workers[0].displayState, 'standby');
+
+    const readOnlyCommand = await requestJson(baseUrl, `/api/remote-workers/${encodeURIComponent(sessionId)}/commands`, {
+      method: 'POST',
+      token: 'readonly-token',
+      body: { commandType: 'drain' },
+    });
+    assert.equal(readOnlyCommand.status, 403);
+
+    const queued = await requestJson(baseUrl, `/api/remote-workers/${encodeURIComponent(sessionId)}/commands`, {
+      method: 'POST',
+      token: 'admin-token',
+      body: { commandType: 'drain' },
+    });
+    assert.equal(queued.status, 202);
+    assert.equal(queued.body.commandType, 'drain');
+    assert.equal(queued.body.worker.sessionId, sessionId);
+    assert.equal(queued.body.worker.displayState, 'queued');
+
+    const commands = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/commands`, {
+      token: workerToken,
+    });
+    assert.equal(commands.status, 200);
+    assert.deepEqual(commands.body.commands.map((command) => command.commandType), ['drain']);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

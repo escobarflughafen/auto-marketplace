@@ -57,6 +57,9 @@ const store = {
   workerProfilesLoaded: false,
   selectedWorkflowId: localStorage.getItem(WORKFLOW_SELECTION_STORAGE_KEY) || '',
   processes: [],
+  remoteWorkers: [],
+  selectedRemoteWorkerSessionId: '',
+  remoteWorkerSignature: '',
   selectedProcessId: '',
   workerDetailProcess: null,
   workerDetailCategory: 'all',
@@ -123,6 +126,7 @@ const store = {
   recommendationsTablePendingSetData: false,
   eventRegistryTable: null,
   workerOverviewTable: null,
+  remoteWorkerTable: null,
 };
 
 function resizeTabularViews() {
@@ -130,6 +134,7 @@ function resizeTabularViews() {
   store.recommendationsTable?.redraw?.(true);
   store.eventRegistryTable?.redraw?.(true);
   store.workerOverviewTable?.redraw?.(true);
+  store.remoteWorkerTable?.redraw?.(true);
 }
 
 const els = {
@@ -4702,6 +4707,168 @@ function workerStats(proc) {
   return stats;
 }
 
+function remoteWorkerDisplayLabel(worker = {}) {
+  const type = worker.workerType || 'worker';
+  const strategy = worker.strategy ? ` / ${worker.strategy}` : '';
+  return `${worker.workerId || worker.sessionId || 'remote worker'} (${type}${strategy})`;
+}
+
+function remoteWorkerStateLabel(worker = {}) {
+  const state = worker.displayState || worker.runtimeState || worker.livenessState || 'unknown';
+  return state === 'standby' ? 'standby'
+    : state === 'syncing' ? 'syncing'
+      : state === 'working' ? 'working'
+        : state;
+}
+
+function remoteWorkerLastSeen(worker = {}) {
+  if (Number.isFinite(Number(worker.lastSeenAgeSeconds))) {
+    const seconds = Number(worker.lastSeenAgeSeconds);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    return `${Math.round(minutes / 60)}h ago`;
+  }
+  return formatDate(worker.lastSeenAt);
+}
+
+function remoteWorkerRenderSignature(workers = store.remoteWorkers) {
+  return JSON.stringify((workers || []).map((worker) => ({
+    sessionId: worker.sessionId,
+    workerId: worker.workerId,
+    workerType: worker.workerType,
+    strategy: worker.strategy,
+    displayState: worker.displayState,
+    runtimeState: worker.runtimeState,
+    livenessState: worker.livenessState,
+    lastLocalSequence: worker.lastLocalSequence,
+    lastAckedSequence: worker.lastAckedSequence,
+    pendingEventCount: worker.pendingEventCount,
+    activeClaimCount: worker.activeClaimCount,
+    queuedCommandCount: worker.queuedCommandCount,
+    eventCount: worker.eventCount,
+    latestEventType: worker.latestEventType,
+    lastSeenAt: worker.lastSeenAt,
+    selected: worker.sessionId === store.selectedRemoteWorkerSessionId,
+  })));
+}
+
+function remoteWorkerRows(workers = store.remoteWorkers) {
+  return (workers || []).map((worker) => ({
+    sessionId: worker.sessionId,
+    workerId: worker.workerId,
+    label: remoteWorkerDisplayLabel(worker),
+    workerType: worker.workerType || '',
+    strategy: worker.strategy || '',
+    state: remoteWorkerStateLabel(worker),
+    runtimeState: worker.runtimeState || '',
+    livenessState: worker.livenessState || '',
+    sourceId: worker.sourceId || '',
+    pending: worker.pendingEventCount || 0,
+    activeClaims: worker.activeClaimCount || 0,
+    queuedCommands: worker.queuedCommandCount || 0,
+    lastAcked: `${worker.lastAckedSequence || 0}/${worker.lastLocalSequence || 0}`,
+    latestEvent: worker.latestEventType || '',
+    lastSeen: remoteWorkerLastSeen(worker),
+    selected: worker.sessionId === store.selectedRemoteWorkerSessionId,
+  }));
+}
+
+function selectedRemoteWorker() {
+  return (store.remoteWorkers || []).find((worker) => worker.sessionId === store.selectedRemoteWorkerSessionId) || null;
+}
+
+function renderRemoteWorkerHealthTable(rows) {
+  const tableEl = document.getElementById('remoteWorkerHealthTable');
+  if (!tableEl) return;
+  const columns = [
+    {
+      title: 'Remote Worker',
+      field: 'label',
+      minWidth: 220,
+      widthGrow: 2,
+      frozen: true,
+      formatter: 'plaintext',
+    },
+    {
+      title: 'State',
+      field: 'state',
+      width: 104,
+      formatter: (cell) => `<span class="status ${html(cell.getValue())}">${html(cell.getValue())}</span>`,
+    },
+    { title: 'Runtime', field: 'runtimeState', minWidth: 96, formatter: 'plaintext' },
+    { title: 'Liveness', field: 'livenessState', width: 96, formatter: 'plaintext' },
+    { title: 'Pending', field: 'pending', width: 82, hozAlign: 'right', headerHozAlign: 'right' },
+    { title: 'Claims', field: 'activeClaims', width: 78, hozAlign: 'right', headerHozAlign: 'right' },
+    { title: 'Commands', field: 'queuedCommands', width: 100, hozAlign: 'right', headerHozAlign: 'right' },
+    { title: 'ACK', field: 'lastAcked', width: 96, hozAlign: 'right', headerHozAlign: 'right' },
+    { title: 'Latest Event', field: 'latestEvent', minWidth: 136, formatter: 'plaintext' },
+    { title: 'Last Seen', field: 'lastSeen', width: 110, formatter: 'plaintext' },
+  ];
+  if (!store.remoteWorkerTable) {
+    store.remoteWorkerTable = new Tabulator(tableEl, {
+      data: rows,
+      columns,
+      layout: 'fitColumns',
+      responsiveLayout: 'hide',
+      height: false,
+      rowFormatter: (row) => {
+        row.getElement().classList.toggle('selected-row', row.getData().selected === true);
+      },
+    });
+    store.remoteWorkerTable.on('rowClick', (_event, row) => {
+      store.selectedRemoteWorkerSessionId = row.getData().sessionId;
+      renderProcesses({ preserveScroll: true });
+    });
+  } else {
+    store.remoteWorkerTable.setColumns(columns);
+    store.remoteWorkerTable.replaceData(rows);
+  }
+}
+
+function renderRemoteWorkerHealthCard() {
+  const workers = store.remoteWorkers || [];
+  if (!workers.length) {
+    store.remoteWorkerTable?.destroy?.();
+    store.remoteWorkerTable = null;
+    return '<div class="card remote-worker-card">'
+      + '<div class="process-header"><div><div class="label">Remote Worker Health</div><div class="process-meta">Installable remote workers appear here after they register to the host API.</div></div></div>'
+      + '<div class="empty-state">No remote workers have registered yet. Create/delete is handled by a sysadmin on the worker host, not from this web UI.</div>'
+      + '</div>';
+  }
+  if (store.selectedRemoteWorkerSessionId && !workers.some((worker) => worker.sessionId === store.selectedRemoteWorkerSessionId)) {
+    store.selectedRemoteWorkerSessionId = '';
+  }
+  const selected = selectedRemoteWorker();
+  const selectedSummary = selected
+    ? `${remoteWorkerDisplayLabel(selected)} · ${remoteWorkerStateLabel(selected)} · last seen ${remoteWorkerLastSeen(selected)}`
+    : 'Select a remote worker row to target control commands.';
+  return '<div class="card remote-worker-card">'
+    + '<div class="process-header"><div><div class="label">Remote Worker Health</div><div class="process-meta">Registered remote workers, heartbeat health, local outbox sync, and queued host commands.</div></div></div>'
+    + '<div class="settings-note remote-worker-note">The web UI does not create or delete remote workers. Install, start, stop, and remove OS services from the worker host. Standby means the worker is online, idle, and has no pending local event backlog or active claim.</div>'
+    + '<div class="remote-worker-command-bar">'
+    + `<div class="process-meta remote-worker-selected">${html(selectedSummary)}</div>`
+    + '<div class="worker-control-actions">'
+    + `<button type="button" class="secondary remote-worker-command-button" data-command="drain"${selected ? '' : ' disabled'}>Drain</button>`
+    + `<button type="button" class="danger remote-worker-command-button" data-command="shutdown"${selected ? '' : ' disabled'}>Shutdown</button>`
+    + '<button type="button" class="secondary" id="remoteWorkerRefreshButton">Refresh</button>'
+    + '</div>'
+    + '</div>'
+    + '<div class="tablewrap worker-table-wrap remote-worker-table-wrap" tabindex="0"><div id="remoteWorkerHealthTable" class="utility-table remote-worker-tabulator"></div></div>'
+    + '</div>';
+}
+
+async function sendRemoteWorkerCommand(sessionId, commandType) {
+  if (!sessionId || !commandType) return null;
+  const payload = await fetchJson(`/api/remote-workers/${encodeURIComponent(sessionId)}/commands`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ commandType }),
+  });
+  await loadWorkflows({ light: true, force: true });
+  return payload;
+}
+
 function processRenderSignature(processes = store.processes) {
   return JSON.stringify(processes.map((proc) => ({
     id: proc.id,
@@ -4922,14 +5089,9 @@ function renderProcesses(options = {}) {
   if (!store.workflowsLoaded) {
     store.workerOverviewTable?.destroy?.();
     store.workerOverviewTable = null;
+    store.remoteWorkerTable?.destroy?.();
+    store.remoteWorkerTable = null;
     renderProcessListSkeleton();
-    restoreProcessScrollState(scrollState);
-    return;
-  }
-  if (!store.processes.length) {
-    store.workerOverviewTable?.destroy?.();
-    store.workerOverviewTable = null;
-    els.processList.innerHTML = '<div class="card"><div class="label">Workers</div><div>Managed workers appear here after they start.</div></div>';
     restoreProcessScrollState(scrollState);
     return;
   }
@@ -4937,18 +5099,44 @@ function renderProcesses(options = {}) {
     clearWorkerDetailState();
   }
   const rows = workerOverviewRows();
+  const remoteRows = remoteWorkerRows();
   const selectedProcess = store.selectedProcessId
     ? (store.workerDetailProcess || activeProcess())
     : null;
   document.body.classList.toggle('worker-inspector-open', Boolean(selectedProcess));
   store.workerOverviewTable?.destroy?.();
   store.workerOverviewTable = null;
-  els.processList.innerHTML = '<div class="card">'
-    + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Worker status, current listing, and recent activity.</div></div></div>'
-    + '<div class="tablewrap worker-table-wrap" tabindex="0"><div id="workerOverviewTable" class="utility-table worker-overview-tabulator"></div></div>'
+  els.processList.innerHTML = renderRemoteWorkerHealthCard()
+    + '<div class="card">'
+    + '<div class="process-header"><div><div class="label">Worker Overview</div><div class="process-meta">Host-managed worker processes and recent workflow activity.</div></div></div>'
+    + (store.processes.length
+      ? '<div class="tablewrap worker-table-wrap" tabindex="0"><div id="workerOverviewTable" class="utility-table worker-overview-tabulator"></div></div>'
+      : '<div class="empty-state">Host-managed workers appear here after they start. Remote worker OS services are managed outside this web UI.</div>')
     + '</div>'
     + (selectedProcess ? renderWorkerDetail(selectedProcess) : '');
-  renderWorkerOverviewTable(rows);
+  renderRemoteWorkerHealthTable(remoteRows);
+  if (store.processes.length) {
+    renderWorkerOverviewTable(rows);
+  }
+  document.getElementById('remoteWorkerRefreshButton')?.addEventListener('click', async () => {
+    await loadWorkflows({ light: true, force: true });
+  });
+  for (const button of document.querySelectorAll('.remote-worker-command-button')) {
+    button.addEventListener('click', async () => {
+      const worker = selectedRemoteWorker();
+      if (!worker) return;
+      const command = button.dataset.command || '';
+      const label = command === 'shutdown' ? 'shutdown' : 'drain';
+      if (!window.confirm(`Queue ${label} command for ${remoteWorkerDisplayLabel(worker)}?`)) return;
+      button.disabled = true;
+      try {
+        await sendRemoteWorkerCommand(worker.sessionId, command);
+      } catch (error) {
+        alert(error.message || 'Remote worker command could not be queued.');
+        button.disabled = false;
+      }
+    });
+  }
   for (const button of document.querySelectorAll('.worker-detail-close-button')) {
     button.addEventListener('click', () => {
       clearWorkerDetailState();
@@ -5686,6 +5874,9 @@ async function loadWorkflows(options = {}) {
   const workflowDefinitionsChanged = hasWorkflowPayload && nextWorkflowSignature !== store.workflowSignature;
   const nextProcessSignature = processRenderSignature(payload.processes || []);
   const processDefinitionsChanged = nextProcessSignature !== store.processSignature;
+  const nextRemoteWorkers = Array.isArray(payload.remoteWorkers) ? payload.remoteWorkers : store.remoteWorkers;
+  const nextRemoteWorkerSignature = remoteWorkerRenderSignature(nextRemoteWorkers);
+  const remoteWorkersChanged = nextRemoteWorkerSignature !== store.remoteWorkerSignature;
   if (hasWorkflowPayload) {
     store.workflows = nextWorkflows;
     store.workflowsLoaded = true;
@@ -5701,8 +5892,10 @@ async function loadWorkflows(options = {}) {
   }
   store.processes = payload.processes || [];
   store.processSignature = nextProcessSignature;
+  store.remoteWorkers = nextRemoteWorkers || [];
+  store.remoteWorkerSignature = nextRemoteWorkerSignature;
   const shouldRenderWorkerPanel = !background || isPanelActive('opsPanel');
-  if (shouldRenderWorkerPanel && (!background || (!store.selectedProcessId && processDefinitionsChanged))) {
+  if (shouldRenderWorkerPanel && (!background || (!store.selectedProcessId && (processDefinitionsChanged || remoteWorkersChanged)))) {
     renderProcesses({ preserveScroll: background });
   }
   if (shouldRenderWorkerPanel && store.selectedProcessId && !light) {
