@@ -141,6 +141,39 @@ test('workflow start args allow eBay search collector controls', () => {
 });
 
 
+
+test('workflow start args allow remote Goofish search explorer controls', () => {
+  const targets = JSON.stringify([
+    { keyword: 'pentax 67', minPrice: '2000', maxPrice: '8000' },
+    { keyword: '宾得67' },
+  ]);
+  const args = validateWorkflowStartArgs('remote-goofish-search-explore', [
+    '--host-url', 'http://127.0.0.1:3080',
+    '--worker-type', 'collector',
+    '--strategy', 'goofish_search',
+    '--headed',
+    '--query-targets', targets,
+    '--max-pages', '1',
+    '--page-delay-seconds', '8',
+    '--user-data-dir', 'profiles/goofish-search-explorer',
+    '--once',
+    '--local-db', 'artifacts/remote-workers/goofish-worker.db',
+  ]);
+
+  assert.deepEqual(args, [
+    '--host-url', 'http://127.0.0.1:3080',
+    '--worker-type', 'collector',
+    '--strategy', 'goofish_search',
+    '--headed',
+    '--query-targets', targets,
+    '--max-pages', '1',
+    '--page-delay-seconds', '8',
+    '--user-data-dir', 'profiles/goofish-search-explorer',
+    '--once',
+    '--local-db', 'artifacts/remote-workers/goofish-worker.db',
+  ]);
+});
+
 test('workflow start args allow Goofish search explorer controls', () => {
   const targets = JSON.stringify([
     { keyword: 'pentax 67', minPrice: '2000', maxPrice: '8000' },

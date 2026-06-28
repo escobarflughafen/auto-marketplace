@@ -688,6 +688,43 @@ const WORKFLOWS = {
       { id: 'localDbPath', label: 'Local worker DB path', kind: 'text', flag: '--local-db', defaultValue: '' },
     ],
   },
+  'remote-goofish-search-explore': {
+    label: 'Remote Goofish Search Explorer',
+    script: 'remote-worker',
+    source: 'goofish',
+    workerType: 'remote_worker',
+    strategy: 'goofish_search',
+    runtimeModel: 'remote_outbox',
+    fields: [
+      { id: 'hostUrl', label: 'Host API URL', kind: 'text', flag: '--host-url', defaultValue: '' },
+      { id: 'remoteWorkerType', label: 'Remote worker type', kind: 'choice', defaultValue: 'collector', options: [
+        { value: 'collector', label: 'Collector', args: ['--worker-type', 'collector'] },
+      ] },
+      { id: 'remoteStrategy', label: 'Strategy', kind: 'choice', defaultValue: 'goofish_search', options: [
+        { value: 'goofish_search', label: 'Goofish Search', args: ['--strategy', 'goofish_search'] },
+      ] },
+      { id: 'browserMode', label: 'Browser mode', kind: 'choice', defaultValue: 'headed', options: [
+        { value: 'headed', label: 'Headed', args: ['--headed'] },
+        { value: 'headless', label: 'Headless', args: ['--headless'] },
+      ] },
+      { id: 'queryMode', label: 'Query mode', kind: 'choice', defaultValue: 'single', options: [
+        { value: 'single', label: 'Single query', args: [] },
+        { value: 'list', label: 'Keyword list', args: [] },
+      ] },
+      { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax 67', activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPages', label: 'Max pages', kind: 'number', flag: '--max-pages', defaultValue: 1, min: 1 },
+      { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
+      { id: 'maxItems', label: 'Max items', kind: 'number', flag: '--max-items', defaultValue: 10, min: 1, activeWhen: { field: 'collectAll', equals: false } },
+      { id: 'pageDelaySeconds', label: 'Delay after search submit (seconds)', kind: 'number', flag: '--page-delay-seconds', defaultValue: 8, min: 0 },
+      { id: 'userDataDir', label: 'Browser profile path', kind: 'text', flag: '--user-data-dir', defaultValue: '' },
+      { id: 'pollIntervalMs', label: 'Remote poll interval (ms)', kind: 'number', flag: '--poll-interval-ms', defaultValue: 5000, min: 1000 },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+      { id: 'localDbPath', label: 'Local worker DB path', kind: 'text', flag: '--local-db', defaultValue: '' },
+    ],
+  },
   'profile-onboarder': {
     label: 'Profile Onboarder',
     script: 'marketplace:auth:profile-onboarder',
@@ -716,6 +753,7 @@ const WORKFLOW_CONCURRENCY_LIMITS = {
   'search-explore': 2,
   'ebay-search-collect': 2,
   'goofish-search-explore': 1,
+  'remote-goofish-search-explore': 1,
   'profile-onboarder': 1,
 };
 const WORKER_TYPE_CONCURRENCY_LIMITS = {
@@ -2320,7 +2358,7 @@ function workflowArgSpec(workflow, options = {}) {
     addValueFlag(field.flag, (value) => assertSafeWorkflowArgValue(field.flag, value));
   }
 
-  if (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect' || workflow.id === 'goofish-search-explore') {
+  if (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect' || workflow.id === 'goofish-search-explore' || workflow.id === 'remote-goofish-search-explore') {
     addValueFlag('--queries', (value) => assertSafeWorkflowArgValue('--queries', value));
     addValueFlag('--seed-queries', (value) => assertSafeWorkflowArgValue('--seed-queries', value));
     addValueFlag('--seed-query-targets', (value) => validateSearchQueryTargetsValue('--seed-query-targets', value));

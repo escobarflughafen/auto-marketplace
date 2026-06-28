@@ -96,6 +96,18 @@ test('workflow config exposes remote backlog indexer and marks legacy direct-db 
     assert.ok(remoteSearch.defaultArgs.includes('--strategy'));
     assert.ok(remoteSearch.defaultArgs.includes('explorer'));
 
+    const remoteGoofish = workflows.find((workflow) => workflow.id === 'remote-goofish-search-explore');
+    assert.ok(remoteGoofish);
+    assert.equal(remoteGoofish.script, 'remote-worker');
+    assert.equal(remoteGoofish.source, 'goofish');
+    assert.equal(remoteGoofish.workerType, 'remote_worker');
+    assert.equal(remoteGoofish.strategy, 'goofish_search');
+    assert.equal(remoteGoofish.runtimeModel, 'remote_outbox');
+    assert.ok(remoteGoofish.defaultArgs.includes('--worker-type'));
+    assert.ok(remoteGoofish.defaultArgs.includes('collector'));
+    assert.ok(remoteGoofish.defaultArgs.includes('--strategy'));
+    assert.ok(remoteGoofish.defaultArgs.includes('goofish_search'));
+
     const legacy = workflows.find((workflow) => workflow.id === 'backlog-indexer');
     assert.ok(legacy);
     assert.equal(legacy.deprecated, true);

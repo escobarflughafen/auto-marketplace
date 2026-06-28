@@ -17,6 +17,9 @@ const {
   parseArgs,
   run,
   RemoteWorkerRuntime,
+  collectorDbNameForStrategy,
+  collectorScriptForStrategy,
+  isCollectorRuntime,
 } = require('../scripts/remote-worker-runtime');
 const {
   openRemoteWorkerLocalStore,
@@ -79,6 +82,12 @@ function seedResolvedListing(dbPath, listingId = 'runtime-listing-1') {
     closeMarketplaceHomepageDatabase(db);
   }
 }
+
+test('remote worker runtime maps Goofish collector strategy to adapter script and DB', () => {
+  assert.equal(isCollectorRuntime({ workerType: 'collector', strategy: 'goofish_search' }), true);
+  assert.equal(collectorScriptForStrategy('goofish_search'), 'scripts/collect-goofish-search-explorer.js');
+  assert.equal(collectorDbNameForStrategy('goofish_search'), 'goofish-search-explorer.db');
+});
 
 test('remote worker runtime claims backlog indexer work, syncs events, and completes lease', async () => {
   const tempDir = createTempDir();

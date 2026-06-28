@@ -198,7 +198,7 @@ function buildEventId(workerId, sequence, eventType, entity = '') {
 
 function isCollectorRuntime(options = {}) {
   return String(options.workerType || '') === 'collector'
-    && ['feed', 'explorer'].includes(String(options.strategy || ''));
+    && ['feed', 'explorer', 'goofish_search'].includes(String(options.strategy || ''));
 }
 
 function collectorScriptForStrategy(strategy) {
@@ -207,13 +207,22 @@ function collectorScriptForStrategy(strategy) {
       return 'scripts/collect-marketplace-homepage.js';
     case 'explorer':
       return 'scripts/collect-marketplace-search-explorer.js';
+    case 'goofish_search':
+      return 'scripts/collect-goofish-search-explorer.js';
     default:
       throw new Error(`Unsupported collector strategy for remote runtime: ${strategy}`);
   }
 }
 
 function collectorDbNameForStrategy(strategy) {
-  return String(strategy || '') === 'explorer' ? 'search-explorer.db' : 'homepage-collector.db';
+  switch (String(strategy || '')) {
+    case 'explorer':
+      return 'search-explorer.db';
+    case 'goofish_search':
+      return 'goofish-search-explorer.db';
+    default:
+      return 'homepage-collector.db';
+  }
 }
 
 function stripManagedCollectorArgs(args = []) {
@@ -810,5 +819,8 @@ module.exports = {
   parseArgs,
   loadWorkerToken,
   RemoteWorkerRuntime,
+  collectorDbNameForStrategy,
+  collectorScriptForStrategy,
+  isCollectorRuntime,
   run,
 };
