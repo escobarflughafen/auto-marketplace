@@ -1081,6 +1081,23 @@ function workflowTypeForId(workflowId) {
   return WORKFLOWS[workflowId]?.workerType || 'worker';
 }
 
+function isRemoteWorkflowRun(run = {}) {
+  const workflowId = String(run.workflow_id || run.workflowId || '').trim();
+  const script = String(run.script || '').trim();
+  return script === 'remote-worker' || workflowId.startsWith('remote-');
+}
+
+function workerTypeForWorkflowRun(run = {}) {
+  const workflowId = String(run.workflow_id || run.workflowId || '').trim();
+  if (isRemoteWorkflowRun(run)) {
+    const session = String(run.run_id || run.id || '').trim();
+    if (session.startsWith('remote-session-')) {
+      return 'remote_worker';
+    }
+  }
+  return workflowTypeForId(workflowId);
+}
+
 function workflowConcurrencyLimit(workflowId, workerType) {
   if (Object.prototype.hasOwnProperty.call(WORKFLOW_CONCURRENCY_LIMITS, workflowId)) {
     return WORKFLOW_CONCURRENCY_LIMITS[workflowId];
@@ -1354,7 +1371,7 @@ function publicProcessRecord(record) {
   return {
     id: record.id,
     workflowId: record.workflowId,
-    workerType: workflowTypeForId(record.workflowId),
+    workerType: workerTypeForWorkflowRun(record),
     label: record.label,
     script: record.script,
     args: record.args,
@@ -1379,7 +1396,7 @@ function publicWorkflowRunRecord(run, options = {}) {
   return {
     id: run.run_id,
     workflowId: run.workflow_id,
-    workerType: workflowTypeForId(run.workflow_id),
+    workerType: workerTypeForWorkflowRun(run),
     label: run.label,
     script: run.script,
     args: run.args,
@@ -1404,7 +1421,7 @@ function publicWorkflowRunLiveRecord(run) {
   return {
     id: run.run_id,
     workflowId: run.workflow_id,
-    workerType: workflowTypeForId(run.workflow_id),
+    workerType: workerTypeForWorkflowRun(run),
     label: run.label,
     script: run.script,
     pid: run.pid,
@@ -1578,8 +1595,13 @@ function reconcileWorkflowRuns(db, options = {}) {
   const runs = listWorkflowRuns(db, { limit: 50 });
   for (const run of runs) {
     const active = isManagedStatusActive(run.status);
-    const alive = pidIsAlive(run.pid);
+    const remote = isRemoteWorkflowRun(run);
+    const alive = remote ? Boolean(run.os_alive) : pidIsAlive(run.pid);
     const managed = managedProcesses.get(run.run_id);
+
+    if (remote) {
+      continue;
+    }
 
     if (managed) {
       managed.osAlive = alive;
@@ -1621,7 +1643,12 @@ function reconcileWorkflowRunById(db, runId) {
   }
   const now = nowIso();
   const managed = managedProcesses.get(run.run_id);
-  const alive = pidIsAlive(managed?.pid || run.pid);
+  const remote = isRemoteWorkflowRun(run);
+  const alive = remote ? Boolean(run.os_alive) : pidIsAlive(managed?.pid || run.pid);
+
+  if (remote) {
+    return getWorkflowRunLive(db, run.run_id);
+  }
 
   if (managed) {
     managed.osAlive = alive;

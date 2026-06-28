@@ -342,6 +342,15 @@ test('remote worker host API registers, heartbeats, ingests events, and projects
     assert.equal(ingestRows.body.events.length, 2);
     assert.ok(ingestRows.body.events.every((event) => event.reduceStatus === 'reduced'));
 
+    const workflows = await requestJson(baseUrl, '/api/workflows', {
+      token: 'admin-token',
+    });
+    assert.equal(workflows.status, 200);
+    const remoteRun = workflows.body.processes.find((process) => process.id === sessionId);
+    assert.ok(remoteRun);
+    assert.equal(remoteRun.workerType, 'remote_worker');
+    assert.equal(remoteRun.status, 'running');
+
     const artifactBatch = {
       workerId: 'remote-indexer-1',
       artifacts: [{
