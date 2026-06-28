@@ -32,11 +32,14 @@ function closeServer(server) {
   });
 }
 
-async function requestJson(baseUrl, pathname, token) {
+async function requestJson(baseUrl, pathname, token, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
+    method: options.method || 'GET',
     headers: {
       authorization: `Bearer ${token}`,
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
     },
+    body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const text = await response.text();
   return {
@@ -113,6 +116,35 @@ test('workflow config exposes remote backlog indexer and marks legacy direct-db 
     assert.equal(legacy.deprecated, true);
     assert.equal(legacy.replacementWorkflowId, 'remote-backlog-indexer');
     assert.match(legacy.deprecationReason, /direct-DB/);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+
+test('web API refuses to start remote worker provisioning workflows', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken: 'worker-token',
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+
+  try {
+    const response = await requestJson(baseUrl, '/api/workflows/start', 'admin-token', {
+      method: 'POST',
+      body: {
+        workflowId: 'remote-backlog-indexer',
+        args: [],
+      },
+    });
+    assert.equal(response.status, 403);
+    assert.match(response.body.error, /sysadmin/);
   } finally {
     await closeServer(server);
     fs.rmSync(tempDir, { recursive: true, force: true });

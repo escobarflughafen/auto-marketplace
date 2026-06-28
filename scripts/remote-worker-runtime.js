@@ -231,8 +231,22 @@ function stripManagedCollectorArgs(args = []) {
     '--worker-id',
     '--log-file',
     '--snapshot-file',
+    '--host-url',
+    '--worker-token',
+    '--token-file',
+    '--local-db',
+    '--local-db-path',
+    '--worker-type',
+    '--strategy',
+    '--source-id',
+    '--capacity',
+    '--batch-size',
+    '--artifact-batch-size',
+    '--max-pending-artifact-bytes',
+    '--heartbeat-interval-ms',
+    '--poll-interval-ms',
   ]);
-  const managedBooleanFlags = new Set(['--once']);
+  const managedBooleanFlags = new Set(['--once', '--json']);
   const out = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = String(args[index] || '');
@@ -431,8 +445,8 @@ class RemoteWorkerRuntime {
       eventId: event.eventId || buildEventId(this.options.workerId, sequence, event.eventType, event.listingId || ''),
       sessionId: this.sessionId,
       workerId: this.options.workerId,
-      workerType: this.options.workerType,
-      strategy: this.options.strategy,
+      workerType: event.workerType || this.options.workerType,
+      strategy: event.strategy || this.options.strategy,
       sequence,
       eventAt: event.eventAt || new Date().toISOString(),
     });
@@ -522,12 +536,14 @@ class RemoteWorkerRuntime {
       if (command.commandType === 'shutdown') {
         this.shutdownRequested = true;
       }
-      await this.api.ackCommand(this.sessionId, command.commandId, {
-        status: 'acked',
-        payload: {
-          accepted: true,
-        },
-      });
+      if (command.commandType !== 'run_collector_once') {
+        await this.api.ackCommand(this.sessionId, command.commandId, {
+          status: 'acked',
+          payload: {
+            accepted: true,
+          },
+        });
+      }
     }
     return commands;
   }
@@ -559,9 +575,9 @@ class RemoteWorkerRuntime {
   }
 
 
-  collectorAdapterPaths() {
+  collectorAdapterPaths(strategyOverride = '') {
     const baseDir = path.dirname(this.options.localDbPath);
-    const strategy = String(this.options.strategy || '');
+    const strategy = String(strategyOverride || this.options.strategy || '');
     return {
       adapterDbPath: path.join(baseDir, collectorDbNameForStrategy(strategy)),
       logFile: path.join(baseDir, `${strategy}-collector.log`),
@@ -569,15 +585,15 @@ class RemoteWorkerRuntime {
     };
   }
 
-  async executeCollectorAdapterRun() {
-    const strategy = String(this.options.strategy || '');
+  async executeCollectorAdapterRun(overrides = {}) {
+    const strategy = String(overrides.strategy || this.options.strategy || '');
     const script = collectorScriptForStrategy(strategy);
-    const adapterRunId = `${this.options.workerId}:collector:${Date.now().toString(36)}`;
-    const paths = this.collectorAdapterPaths();
+    const adapterRunId = String(overrides.adapterRunId || `${this.options.workerId}:collector:${Date.now().toString(36)}`);
+    const paths = this.collectorAdapterPaths(strategy);
     await fs.promises.mkdir(path.dirname(paths.adapterDbPath), { recursive: true });
     const args = [
       script,
-      ...stripManagedCollectorArgs(this.options.adapterArgs),
+      ...stripManagedCollectorArgs(overrides.adapterArgs || this.options.adapterArgs),
       '--db-path', paths.adapterDbPath,
       '--worker-id', adapterRunId,
       '--log-file', paths.logFile,
@@ -585,7 +601,10 @@ class RemoteWorkerRuntime {
       '--once',
     ];
     const result = await runNodeScript(args);
-    const replay = await this.replayCollectorAdapterRun(paths.adapterDbPath, adapterRunId);
+    const replay = await this.replayCollectorAdapterRun(paths.adapterDbPath, adapterRunId, {
+      workerType: overrides.workerType || 'collector',
+      strategy,
+    });
     await this.uploadPendingEvents();
     if (result.code !== 0) {
       const message = result.stderr.trim().split('\n').slice(-1)[0] || `collector adapter exited with code ${result.code}`;
@@ -604,11 +623,15 @@ class RemoteWorkerRuntime {
     };
   }
 
-  async replayCollectorAdapterRun(adapterDbPath, adapterRunId) {
+  async replayCollectorAdapterRun(adapterDbPath, adapterRunId, context = {}) {
     const { workflowEvents, listingEvents } = readCollectorRunEvents(adapterDbPath, adapterRunId);
+    const replayWorkerType = context.workerType || 'collector';
+    const replayStrategy = context.strategy || this.options.strategy;
     for (const event of workflowEvents) {
       this.appendEvent({
         eventId: `${this.options.workerId}:remote:${event.eventId}`,
+        workerType: replayWorkerType,
+        strategy: replayStrategy,
         eventScope: 'workflow',
         eventType: event.eventType,
         eventAt: event.eventAt,
@@ -620,6 +643,8 @@ class RemoteWorkerRuntime {
     for (const event of listingEvents) {
       this.appendEvent({
         eventId: `${this.options.workerId}:remote:${event.eventId}`,
+        workerType: replayWorkerType,
+        strategy: replayStrategy,
         eventScope: 'listing',
         eventType: event.eventType,
         eventAt: event.eventAt,
@@ -723,6 +748,54 @@ class RemoteWorkerRuntime {
     };
   }
 
+  async executeCollectorCommand(command) {
+    const payload = command.payload || {};
+    const strategy = String(payload.strategy || '').trim();
+    const adapterArgs = Array.isArray(payload.adapterArgs) ? payload.adapterArgs : [];
+    if (!['feed', 'explorer', 'goofish_search'].includes(strategy)) {
+      await this.api.ackCommand(this.sessionId, command.commandId, {
+        status: 'failed',
+        error: `Unsupported collector strategy: ${strategy || '(empty)'}`,
+      });
+      return { failed: true, commandId: command.commandId };
+    }
+    try {
+      await this.sendHeartbeat('working');
+      const result = await this.executeCollectorAdapterRun({
+        strategy,
+        adapterArgs,
+        adapterRunId: `${this.options.workerId}:command:${command.commandId}`,
+      });
+      await this.uploadPendingEvents();
+      await this.uploadPendingArtifacts();
+      await this.api.ackCommand(this.sessionId, command.commandId, {
+        status: 'completed',
+        payload: {
+          accepted: true,
+          workflowId: payload.workflowId || '',
+          strategy,
+          adapterRunId: result.adapterRunId,
+          replay: result.replay,
+        },
+      });
+      return result;
+    } catch (error) {
+      await this.uploadPendingEvents().catch(() => null);
+      await this.api.ackCommand(this.sessionId, command.commandId, {
+        status: 'failed',
+        error: error.message || String(error),
+        payload: {
+          workflowId: payload.workflowId || '',
+          strategy,
+          exitCode: error.exitCode ?? null,
+          signal: error.signal || '',
+          replay: error.replay || null,
+        },
+      });
+      return { failed: true, commandId: command.commandId, error: error.message || String(error) };
+    }
+  }
+
   async executeClaim(claim) {
     if (claim.commandType !== 'index_resolved_listing_metadata_batch') {
       await this.api.completeLease(this.sessionId, claim.leaseId, {
@@ -746,6 +819,23 @@ class RemoteWorkerRuntime {
     await this.uploadPendingEvents();
     await this.uploadPendingArtifacts();
     const commands = await this.pollCommands();
+    const collectorCommands = commands.filter((command) => command.commandType === 'run_collector_once');
+    const commandResults = [];
+    for (const command of collectorCommands) {
+      commandResults.push(await this.executeCollectorCommand(command));
+    }
+    if (collectorCommands.length > 0) {
+      await this.sendHeartbeat(this.shutdownRequested ? 'stopping' : 'idle');
+      return {
+        sessionId: this.sessionId,
+        commands,
+        commandResults,
+        claims: [],
+        claimResults: [],
+        drainRequested: this.drainRequested,
+        backpressure: null,
+      };
+    }
     if (isCollectorRuntime(this.options)) {
       const collectorResult = await this.executeCollectorAdapterRun();
       await this.sendHeartbeat(this.shutdownRequested ? 'stopping' : 'idle');
@@ -754,6 +844,7 @@ class RemoteWorkerRuntime {
         commands,
         claims: [],
         claimResults: [],
+        commandResults,
         collectorResult,
         drainRequested: this.drainRequested,
         backpressure: null,
@@ -769,6 +860,7 @@ class RemoteWorkerRuntime {
       sessionId: this.sessionId,
       commands,
       claims: claimsResult.claims || [],
+      commandResults,
       claimResults,
       drainRequested: this.drainRequested || claimsResult.drainRequested === true,
       backpressure: claimsResult.backpressure || null,

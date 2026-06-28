@@ -1175,6 +1175,10 @@ function workflowTypeForId(workflowId) {
   return WORKFLOWS[workflowId]?.workerType || 'worker';
 }
 
+function isRemoteWorkerProvisioningWorkflow(workflow = {}) {
+  return workflow.runtimeModel === 'remote_outbox' || workflow.script === 'remote-worker';
+}
+
 function isRemoteWorkflowRun(run = {}) {
   const workflowId = String(run.workflow_id || run.workflowId || '').trim();
   const script = String(run.script || '').trim();
@@ -2656,6 +2660,11 @@ function startManagedWorkflow(db, workflowId, extraArgs = [], options = {}) {
     error.statusCode = 400;
     throw error;
   }
+  if (isRemoteWorkerProvisioningWorkflow(workflow)) {
+    const error = new Error('Remote worker services are started by a sysadmin on the worker host.');
+    error.statusCode = 403;
+    throw error;
+  }
 
   const running = getRunningManagedProcesses(db);
   const workerType = workflow.workerType || 'worker';
@@ -3693,8 +3702,8 @@ function normalizeRemoteEventForSession(session, event) {
     ...event,
     sessionId: session.session_id,
     workerId: session.worker_id,
-    workerType: session.worker_type,
-    strategy: session.strategy,
+    workerType: event.workerType || event.worker_type || session.worker_type,
+    strategy: event.strategy || session.strategy,
     payload,
   });
 }
@@ -3710,8 +3719,8 @@ function validateRemoteWorkerRegistryEvent(session, remoteEvent) {
   }
   validateWorkerEvent({
     eventType: remoteEvent.eventType,
-    workerType: session.worker_type,
-    strategy: session.strategy,
+    workerType: remoteEvent.workerType || session.worker_type,
+    strategy: remoteEvent.strategy || session.strategy,
     payload,
   });
   return payload;
@@ -3744,8 +3753,8 @@ function insertRemoteWorkerIngestRow(db, session, batchId, remoteEvent, payload,
     remoteEvent.eventId,
     session.session_id,
     session.worker_id,
-    session.worker_type,
-    session.strategy,
+    remoteEvent.workerType || session.worker_type,
+    remoteEvent.strategy || session.strategy,
     String(batchId || '').trim(),
     remoteEvent.sequence,
     remoteEvent.eventScope,
@@ -4067,7 +4076,8 @@ function reduceCollectorListingObservedEvent(db, session, remoteEvent, payload) 
   if (remoteEvent.eventType !== 'listing_observed' || !remoteEvent.listingId) {
     return;
   }
-  const source = String(payload.source || '').trim() || (session.strategy === 'explorer' ? 'search' : 'homepage');
+  const eventStrategy = String(remoteEvent.strategy || session.strategy || '').trim();
+  const source = String(payload.source || '').trim() || (eventStrategy === 'explorer' ? 'search' : 'homepage');
   const sourceKeyword = String(payload.sourceKeyword || payload.source_keyword || '').trim();
   const result = upsertHomepageListingWithStatus(db, {
     listingId: remoteEvent.listingId,
@@ -4430,6 +4440,104 @@ function createRemoteWorkerCommand(db, command = {}) {
     now,
   );
   return commandId;
+}
+
+
+function remoteCollectorTaskSpec(workflowId, workflow = {}) {
+  if (workflowId === 'remote-home-collect') {
+    return { workerType: 'collector', strategy: 'feed' };
+  }
+  if (workflowId === 'remote-search-explore') {
+    return { workerType: 'collector', strategy: 'explorer' };
+  }
+  if (workflowId === 'remote-goofish-search-explore') {
+    return { workerType: 'collector', strategy: 'goofish_search' };
+  }
+  return null;
+}
+
+function chooseRemoteWorkerForTask(db, options = {}) {
+  const requestedSessionId = String(
+    options.sessionId
+      || options.remoteWorkerSessionId
+      || options.remoteTargetSessionId
+      || options.assignedWorkerSessionId
+      || '',
+  ).trim();
+  const workers = listRemoteWorkersForUi(db, { limit: 250 });
+  if (requestedSessionId) {
+    const selected = workers.find((worker) => worker.sessionId === requestedSessionId);
+    if (!selected) {
+      const error = new Error(`Unknown remote worker session: ${requestedSessionId}`);
+      error.statusCode = 404;
+      error.code = 'remote_worker_session_not_found';
+      throw error;
+    }
+    if (['offline', 'stale', 'ended'].includes(selected.displayState)) {
+      const error = new Error(`Remote worker is not online: ${selected.workerId || selected.sessionId}`);
+      error.statusCode = 409;
+      error.code = 'remote_worker_not_online';
+      throw error;
+    }
+    return selected;
+  }
+  const candidates = workers
+    .filter((worker) => !['offline', 'stale', 'ended'].includes(worker.displayState))
+    .sort((left, right) => {
+      const leftRank = left.displayState === 'standby' ? 0 : left.displayState === 'queued' ? 1 : 2;
+      const rightRank = right.displayState === 'standby' ? 0 : right.displayState === 'queued' ? 1 : 2;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      if ((left.pendingEventCount || 0) !== (right.pendingEventCount || 0)) {
+        return (left.pendingEventCount || 0) - (right.pendingEventCount || 0);
+      }
+      return (left.queuedCommandCount || 0) - (right.queuedCommandCount || 0);
+    });
+  if (!candidates.length) {
+    const error = new Error('No online remote worker is available for assignment.');
+    error.statusCode = 409;
+    error.code = 'no_remote_worker_available';
+    throw error;
+  }
+  return candidates[0];
+}
+
+function createRemoteWorkflowTaskCommand(db, workflowId, args = [], body = {}) {
+  const workflow = WORKFLOWS[workflowId];
+  if (!workflow) {
+    const error = new Error(`Unknown workflow: ${workflowId}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const spec = remoteCollectorTaskSpec(workflowId, workflow);
+  if (!spec) {
+    const error = new Error('Remote worker services are started by a sysadmin on the worker host. This workflow does not define an assignable remote task yet.');
+    error.statusCode = 403;
+    error.code = 'remote_workflow_not_assignable';
+    throw error;
+  }
+  const safeArgs = validateWorkflowStartArgs(workflowId, args);
+  const worker = chooseRemoteWorkerForTask(db, body);
+  const commandId = createRemoteWorkerCommand(db, {
+    sessionId: worker.sessionId,
+    commandType: 'run_collector_once',
+    payload: {
+      workflowId,
+      workflowLabel: workflow.label || workflowId,
+      source: workflow.source || '',
+      workerType: spec.workerType,
+      strategy: spec.strategy,
+      adapterArgs: safeArgs,
+      requestedBy: 'web-ui',
+    },
+    priority: 20,
+  });
+  return {
+    commandId,
+    commandType: 'run_collector_once',
+    workflowId,
+    strategy: spec.strategy,
+    worker,
+  };
 }
 
 function remoteBacklogIndexerAccepted(body = {}) {
@@ -6294,6 +6402,13 @@ function createServer(options) {
       try {
         const sectionStartedAt = process.hrtime.bigint();
         const body = await readRequestJson(request);
+        const workflow = WORKFLOWS[body.workflowId];
+        if (workflow && isRemoteWorkerProvisioningWorkflow(workflow)) {
+          const remoteTask = createRemoteWorkflowTaskCommand(db, body.workflowId, body.args || [], body);
+          logSlowSection('api_workflows_start', sectionStartedAt, { workflowId: body.workflowId || '', remoteTask: true });
+          writeJson(response, 202, { remoteTask });
+          return;
+        }
         const started = startManagedWorkflow(db, body.workflowId, body.args);
         logSlowSection('api_workflows_start', sectionStartedAt, { workflowId: body.workflowId || '' });
         writeJson(response, 201, { process: started });

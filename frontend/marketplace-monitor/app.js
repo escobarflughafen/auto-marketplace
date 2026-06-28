@@ -2989,6 +2989,23 @@ function workflowDisplayLabel(workflow) {
   return workflow?.deprecated ? `${label} (Legacy)` : label;
 }
 
+function isRemoteWorkerProvisioningWorkflow(workflow) {
+  return workflow?.runtimeModel === 'remote_outbox' || workflow?.script === 'remote-worker';
+}
+
+function isRemoteAssignableWorkflow(workflow) {
+  return ['remote-home-collect', 'remote-search-explore', 'remote-goofish-search-explore'].includes(workflow?.id || '');
+}
+
+function remoteWorkerAssignmentOptions() {
+  const workers = (store.remoteWorkers || []).filter((worker) => (
+    !['offline', 'stale', 'ended'].includes(worker.displayState || '')
+  ));
+  return '<option value="">Auto: any standby worker</option>' + workers.map((worker) => (
+    '<option value="' + html(worker.sessionId) + '">' + html(remoteWorkerDisplayLabel(worker)) + ' - ' + html(remoteWorkerStateLabel(worker)) + '</option>'
+  )).join('');
+}
+
 function workflowWorkerTypes() {
   const preferred = ['collector', 'resolver', 'remote_worker', 'profile_onboarder', 'backlog_indexer'];
   const source = selectedWorkflowSource();
@@ -4354,10 +4371,14 @@ function renderWorkerControl() {
   const profileOptions = workerProfilesForWorkflow(workflow.id).map((profile) => (
     `<option value="${html(profile.profile_id)}">${html(profile.label)}</option>`
   )).join('');
+  const remoteProvisioningWorkflow = isRemoteWorkerProvisioningWorkflow(workflow);
+  const remoteAssignableWorkflow = isRemoteAssignableWorkflow(workflow);
   const workflowNotice = workflow.deprecated
     ? `<div class="settings-note workflow-deprecated-note">Legacy direct-DB worker. ${html(workflow.deprecationReason || 'Kept for compatibility during remote worker rollout.')}</div>`
-    : workflow.runtimeModel === 'remote_outbox'
-      ? '<div class="settings-note workflow-remote-note">Remote runtime path: local durable outbox, host API sync, heartbeat, and leases.</div>'
+    : remoteProvisioningWorkflow
+      ? (remoteAssignableWorkflow
+        ? '<div class="settings-note workflow-remote-note">Remote workers are installed, started, stopped, and removed by a sysadmin on the worker host. Starting this workflow assigns one task to a registered remote worker.</div>'
+        : '<div class="settings-note workflow-remote-note">Remote workers are installed, started, stopped, and removed by a sysadmin on the worker host. This page can select registered workers and queue host commands, but it does not create remote worker services.</div>')
       : '';
   els.workerControl.innerHTML = '<div class="worker-control-title">'
     + '<div><div class="label">Worker setup</div><div class="process-meta">Profiles save worker parameters and image capture defaults.</div></div>'
@@ -4399,8 +4420,15 @@ function renderWorkerControl() {
     + '</div>'
     + '</td></tr>'
     + `<tr><th>Command</th><td><textarea id="workerControlArgsPreview" readonly>${html(els.workflowArgsPreview.value)}</textarea></td></tr>`
+    + (remoteAssignableWorkflow
+      ? `<tr><th><label for="remoteWorkerAssignmentSelect">Remote target</label></th><td><select id="remoteWorkerAssignmentSelect">${remoteWorkerAssignmentOptions()}</select></td></tr>`
+      : '')
     + '<tr><th>Actions</th><td><div class="worker-control-actions">'
-    + '<button type="button" id="workerControlStartButton">Start</button>'
+    + (remoteAssignableWorkflow
+      ? '<button type="button" id="workerControlStartButton">Assign task</button>'
+      : remoteProvisioningWorkflow
+        ? '<button type="button" id="workerControlStartButton" disabled title="Remote workers are started by a sysadmin on the worker host.">Sysadmin-managed</button>'
+        : '<button type="button" id="workerControlStartButton">Start</button>')
     + '<button type="button" class="secondary" id="workerControlResetButton">Reset params</button>'
     + '<button type="button" class="secondary" id="workerControlRefreshButton">Refresh</button>'
     + '<button type="button" class="secondary" id="workerControlReconcileButton">Check OS state</button>'
@@ -4462,7 +4490,13 @@ function renderWorkerControl() {
       alert(error.message || 'Profile could not be deleted.');
     });
   });
-  document.getElementById('workerControlStartButton').addEventListener('click', () => document.getElementById('startWorkflowButton').click());
+  document.getElementById('workerControlStartButton').addEventListener('click', () => {
+    if (isRemoteWorkerProvisioningWorkflow(workflow) && !isRemoteAssignableWorkflow(workflow)) {
+      markWorkerConfigSaved('Remote workers are started by a sysadmin on the worker host.');
+      return;
+    }
+    document.getElementById('startWorkflowButton').click();
+  });
   document.getElementById('workerControlResetButton').addEventListener('click', () => {
     store.workflowDrafts[workflow.id] = defaultDraftForWorkflow(workflow);
     persistWorkflowDrafts();
@@ -6418,24 +6452,34 @@ function bindEvents() {
   document.getElementById('startWorkflowButton').addEventListener('click', async () => {
     const workflow = selectedWorkflow();
     if (!workflow) return;
+    const remoteAssignableWorkflow = isRemoteAssignableWorkflow(workflow);
+    if (isRemoteWorkerProvisioningWorkflow(workflow) && !remoteAssignableWorkflow) {
+      setWorkerStartPending(false, 'Remote workers are started by a sysadmin on the worker host.');
+      return;
+    }
     persistWorkflowDrafts();
     persistSelectedWorkflow();
     const args = buildWorkflowArgs(workflow);
     const startedAt = performance.now();
-    setWorkerStartPending(true, `Starting ${workflowDisplayLabel(workflow)} worker...`);
+    const remoteTargetSessionId = document.getElementById('remoteWorkerAssignmentSelect')?.value || '';
+    setWorkerStartPending(true, remoteAssignableWorkflow
+      ? `Assigning ${workflowDisplayLabel(workflow)} task...`
+      : `Starting ${workflowDisplayLabel(workflow)} worker...`);
     try {
       await fetchJson('/api/workflows/start', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ workflowId: workflow.id, args }),
+        body: JSON.stringify({ workflowId: workflow.id, args, remoteTargetSessionId }),
       });
       await loadWorkflows({ light: true });
       await loadSummary();
       const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
-      setWorkerStartPending(false, `Started ${workflowDisplayLabel(workflow)} in ${elapsedSeconds}s.`);
+      setWorkerStartPending(false, remoteAssignableWorkflow
+        ? `Assigned ${workflowDisplayLabel(workflow)} task in ${elapsedSeconds}s.`
+        : `Started ${workflowDisplayLabel(workflow)} in ${elapsedSeconds}s.`);
     } catch (error) {
       const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1);
-      setWorkerStartPending(false, `Start failed after ${elapsedSeconds}s: ${error.message || 'Workflow could not be started.'}`);
+      setWorkerStartPending(false, `${remoteAssignableWorkflow ? 'Assign' : 'Start'} failed after ${elapsedSeconds}s: ${error.message || 'Workflow could not be started.'}`);
       alert(error.message || 'Workflow could not be started.');
     } finally {
       setWorkerStartPending(false);
