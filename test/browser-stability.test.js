@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   buildChromiumLaunchOptions,
   buildMarketplaceRadiusPatterns,
+  resolveBrowserDisplayMode,
   defaultChromiumArgs,
   getKnownMarketplaceAreaFromLocation,
   getMarketplaceLocationOptions,
@@ -36,6 +37,24 @@ test('buildChromiumLaunchOptions appends configured Chromium args without duplic
 test('defaultChromiumArgs reads AUTO_BROWSER_CHROMIUM_ARGS', () => {
   assert.ok(defaultChromiumArgs({ AUTO_BROWSER_CHROMIUM_ARGS: '--foo --bar' }).includes('--foo'));
   assert.ok(defaultChromiumArgs({ AUTO_BROWSER_CHROMIUM_ARGS: '--foo --bar' }).includes('--bar'));
+});
+
+test('resolveBrowserDisplayMode maps GUI mode to headed browser with managed Linux display when needed', () => {
+  const resolved = resolveBrowserDisplayMode(
+    { browserMode: 'gui', xvfbDisplay: ':77', xvfbScreen: '1600x1000x24' },
+    {},
+  );
+  assert.equal(resolved.headless, false);
+  assert.equal(resolved.browserMode, 'gui');
+  assert.equal(resolved.useManagedXvfb, process.platform === 'linux');
+  if (process.platform === 'linux') {
+    assert.equal(resolved.display, ':77');
+    assert.equal(resolved.xvfbScreen, '1600x1000x24');
+  }
+
+  const headedWithDisplay = resolveBrowserDisplayMode({ browserMode: 'gui' }, { DISPLAY: ':1' });
+  assert.equal(headedWithDisplay.headless, false);
+  assert.equal(headedWithDisplay.useManagedXvfb, false);
 });
 
 function createMockPage(name, behavior = {}) {

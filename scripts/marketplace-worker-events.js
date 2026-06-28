@@ -6,7 +6,7 @@ const WORKER_TYPES = Object.freeze({
 });
 
 const WORKER_STRATEGIES = Object.freeze({
-  collector: Object.freeze(['feed', 'search', 'explorer']),
+  collector: Object.freeze(['feed', 'search', 'explorer', 'goofish_search']),
   resolver: Object.freeze(['queue', 'selected', 'filtered']),
   backlog_indexer: Object.freeze(['resolved_metadata']),
   profile_onboarder: Object.freeze(['guided_login']),
@@ -164,7 +164,7 @@ const EVENT_DEFINITIONS = Object.freeze([
     scope: EVENT_SCOPES.WORKFLOW,
     table: 'workflow_events',
     workerTypes: [WORKER_TYPES.COLLECTOR],
-    strategies: ['search', 'explorer'],
+    strategies: ['search', 'explorer', 'goofish_search'],
     requiredPayloadKeys: ['query'],
     optionalPayloadKeys: ['querySource', 'roundNumber', 'nextSeedRound'],
   }),

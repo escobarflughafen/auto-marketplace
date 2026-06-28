@@ -32,11 +32,12 @@ function createTempDbPath() {
 
 test('worker model exposes primary worker types with explicit strategies', () => {
   assert.deepEqual(Object.values(WORKER_TYPES).sort(), ['backlog_indexer', 'collector', 'profile_onboarder', 'resolver']);
-  assert.deepEqual(WORKER_STRATEGIES.collector, ['feed', 'search', 'explorer']);
+  assert.deepEqual(WORKER_STRATEGIES.collector, ['feed', 'search', 'explorer', 'goofish_search']);
   assert.deepEqual(WORKER_STRATEGIES.resolver, ['queue', 'selected', 'filtered']);
   assert.deepEqual(WORKER_STRATEGIES.backlog_indexer, ['resolved_metadata']);
   assert.deepEqual(WORKER_STRATEGIES.profile_onboarder, ['guided_login']);
   assert.equal(normalizeWorkerStrategy('collector', 'SEARCH'), 'search');
+  assert.equal(normalizeWorkerStrategy('collector', 'GOOFISH_SEARCH'), 'goofish_search');
   assert.equal(normalizeWorkerStrategy('backlog_indexer', 'RESOLVED_METADATA'), 'resolved_metadata');
   assert.equal(normalizeWorkerStrategy('profile_onboarder', 'GUIDED_LOGIN'), 'guided_login');
   assert.throws(
@@ -124,6 +125,17 @@ test('event validation enforces worker type, strategy, and required payload keys
   assert.equal(valid.eventType, 'collector_cycle_completed');
   assert.equal(valid.workerType, 'collector');
   assert.equal(valid.strategy, 'feed');
+
+  const goofish = validateWorkerEvent({
+    eventType: 'collector_cycle_failed',
+    workerType: 'collector',
+    strategy: 'goofish_search',
+    payload: {
+      strategy: 'goofish_search',
+      reason: 'selector_timeout',
+    },
+  });
+  assert.equal(goofish.strategy, 'goofish_search');
 
   assert.throws(
     () => validateWorkerEvent({

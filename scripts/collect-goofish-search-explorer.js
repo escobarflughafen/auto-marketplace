@@ -3,6 +3,8 @@ const path = require('path');
 const { chromium } = require('playwright');
 const {
   buildChromiumLaunchOptions,
+  normalizeBrowserMode,
+  startManagedBrowserDisplay,
   createLogger,
   ensureDir,
   cleanText,
@@ -35,7 +37,7 @@ const GOOFISH_SEARCH_INPUT_SELECTOR = [
   'input[placeholder]',
 ].join(', ');
 const GOOFISH_SEARCH_API_PATTERN = /mtop\.taobao\.idlemtopsearch\.pc\.search/i;
-const TERMINAL_ACCESS_STOP_REASONS = new Set(['auth_required', 'browser_crashed', 'challenge']);
+const TERMINAL_ACCESS_STOP_REASONS = new Set(['auth_required', 'browser_crashed', 'challenge', 'access_blocked']);
 const log = createLogger('collect-goofish-search-explorer');
 
 function readFlagValue(argv, index, flagName) {
@@ -146,6 +148,8 @@ function parseArgs(argv) {
     maxRuntimeSeconds: 180,
     once: false,
     headless: true,
+    browserMode: 'headless',
+    xvfbScreen: '1440x1200x24',
     preferHomepageSearch: true,
     saveApiResponses: false,
     workerId: `pid-${process.pid}`,
@@ -282,10 +286,29 @@ function parseArgs(argv) {
         options.workerScreenshotQuality = parseIntegerFlag(readFlagValue(argv, index, arg), arg, 1);
         index += 1;
         break;
+      case '--browser-mode':
+        options.browserMode = normalizeBrowserMode(readFlagValue(argv, index, arg), options.browserMode);
+        options.headless = options.browserMode === 'headless';
+        index += 1;
+        break;
+      case '--xvfb-screen':
+        options.xvfbScreen = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--gui':
+        options.browserMode = 'gui';
+        options.headless = false;
+        break;
+      case '--xvfb':
+        options.browserMode = 'xvfb';
+        options.headless = false;
+        break;
       case '--headed':
+        options.browserMode = 'headed';
         options.headless = false;
         break;
       case '--headless':
+        options.browserMode = 'headless';
         options.headless = true;
         break;
       default:
@@ -323,6 +346,8 @@ function parseArgs(argv) {
   if (options.refreshJitterMax < options.refreshJitterMin) {
     throw new Error('Expected --refresh-jitter-max to be >= --refresh-jitter-min');
   }
+  options.browserMode = normalizeBrowserMode(options.browserMode, options.headless === false ? 'headed' : 'headless');
+  options.headless = options.browserMode === 'headless';
   normalizeWorkerScreenshotOptions(options);
   return options;
 }
@@ -379,29 +404,49 @@ function detectGoofishChallengeUrl(value) {
   return /_____tmd_____|baxia|mini_login|qrcode|captcha|nocaptcha|passport\.goofish\.com/i.test(String(value || ''));
 }
 
+function classifyGoofishAccessStatus(input = {}) {
+  const text = cleanText(input.text || input.textSample || '');
+  const title = String(input.title || '');
+  const url = String(input.url || '');
+  const combined = `${url} ${title} ${text}`;
+  const hasItemLink = Boolean(input.hasItemLink);
+  const hasLoginInput = Boolean(input.hasLoginInput)
+    || /立即登录|手机扫码|短信登录|登录后可以更懂你/.test(text);
+  const isAccessBlocked = /非法访问|正常浏览器访问闲鱼|为了保障您的体验，请使用正常浏览器访问闲鱼/i.test(combined);
+  const isLoadingOnly = /加载中/.test(text) && !hasItemLink;
+  const isErrorPage = /error page|哎哟喂|被挤爆啦|网络繁忙|请稍后重试/i.test(combined);
+  const isChallenge = isAccessBlocked
+    || /captcha|verify.*human|security check|baxia|_____tmd_____|nocaptcha|滑块|安全验证|请完成验证/i.test(combined);
+  return {
+    url,
+    title,
+    hasLoginInput,
+    hasItemLink,
+    isLoadingOnly,
+    isErrorPage,
+    isChallenge,
+    isAccessBlocked,
+    textSample: text.slice(0, 240),
+  };
+}
+
 async function readGoofishAccessStatus(page) {
-  return page.evaluate(() => {
+  const status = await page.evaluate(() => {
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
     const title = document.title || '';
     const hasItemLink = Boolean(document.querySelector('a[href*="/item"]'));
     const hasLoginInput = Boolean(document.querySelector('input[type="password"], input[name="loginId"], input[name="phone"]'))
       || /立即登录|手机扫码|短信登录|登录后可以更懂你/.test(text);
-    const isLoadingOnly = /加载中/.test(text) && !hasItemLink;
-    const isErrorPage = /error page|哎哟喂|被挤爆啦|网络繁忙|请稍后重试/i.test(`${title} ${text}`);
-    const isChallenge = /captcha|verify.*human|security check|baxia|_____tmd_____|nocaptcha|滑块|安全验证|请完成验证/i.test(`${location.href} ${title} ${text}`);
     return {
       url: location.href,
       title,
       hasLoginInput,
       hasItemLink,
-      isLoadingOnly,
-      isErrorPage,
-      isChallenge,
-      textSample: text.slice(0, 240),
+      text,
     };
   });
+  return classifyGoofishAccessStatus(status);
 }
-
 async function safeReadGoofishAccessStatus(page) {
   try {
     return await readGoofishAccessStatus(page);
@@ -414,6 +459,7 @@ async function safeReadGoofishAccessStatus(page) {
       isLoadingOnly: false,
       isErrorPage: false,
       isChallenge: detectGoofishChallengeUrl(page.url()),
+      isAccessBlocked: false,
       browserCrashed: /target crashed|page crashed/i.test(String(error && error.message ? error.message : error)),
       error: String(error && error.message ? error.message : error),
       textSample: '',
@@ -831,7 +877,7 @@ async function collectGoofishSearchItems(page, queryPlan, options, apiCapture) {
     const added = addCollectedItems(itemsByListingId, pageItems, options);
 
     if ((detectGoofishChallengeUrl(page.url()) || accessStatus.isChallenge || challengeDetected) && added === 0) {
-      stopReason = 'challenge';
+      stopReason = accessStatus.isAccessBlocked ? 'access_blocked' : 'challenge';
       pageSummaries.push({
         page: pageNumber,
         url: page.url(),
@@ -840,6 +886,7 @@ async function collectGoofishSearchItems(page, queryPlan, options, apiCapture) {
         added,
         navigationMode,
         challenge: true,
+        accessBlocked: Boolean(accessStatus.isAccessBlocked),
         accessStatus,
       });
       break;
@@ -900,7 +947,8 @@ async function collectGoofishSearchItems(page, queryPlan, options, apiCapture) {
       maxItemsTarget: options.collectAll ? null : options.maxItems,
       runtimeLimitSeconds: options.maxRuntimeSeconds,
       runtimeLimitReached: stopReason === 'max_runtime',
-      challengeDetected: stopReason === 'challenge' || challengeDetected,
+      challengeDetected: stopReason === 'challenge' || stopReason === 'access_blocked' || challengeDetected,
+      accessBlocked: stopReason === 'access_blocked',
     },
   };
 }
@@ -1061,7 +1109,7 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(path.dirname(options.logFile));
   await ensureDir(options.workerScreenshotDir);
-  await appendLog(options.logFile, `goofish_search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" seed_queries=${JSON.stringify(options.seedQueries)} max_pages=${options.maxPages} min_price=${options.minPrice ?? ''} max_price=${options.maxPrice ?? ''} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} headless=${options.headless} homepage_search=${options.preferHomepageSearch} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`);
+  await appendLog(options.logFile, `goofish_search_explorer_start db_path=${options.dbPath} seed_query="${options.query}" seed_queries=${JSON.stringify(options.seedQueries)} max_pages=${options.maxPages} min_price=${options.minPrice ?? ''} max_price=${options.maxPrice ?? ''} refresh_seconds=${options.refreshSeconds} refresh_jitter_min=${options.refreshJitterMin} refresh_jitter_max=${options.refreshJitterMax} max_items=${options.collectAll ? 'all' : options.maxItems} collect_all=${options.collectAll} headless=${options.headless} browser_mode=${options.browserMode} homepage_search=${options.preferHomepageSearch} worker_id=${options.workerId} worker_screenshot_interval_seconds=${options.workerScreenshotIntervalSeconds} worker_screenshot_history_limit=${options.workerScreenshotHistoryLimit} worker_screenshot_format=${options.workerScreenshotFormat} worker_screenshot_quality=${options.workerScreenshotQuality}`);
 
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
   const resolvedUserDataDir = path.isAbsolute(options.userDataDir) ? options.userDataDir : path.join(process.cwd(), options.userDataDir);
@@ -1078,19 +1126,34 @@ async function main() {
       seedQueries: options.seedQueries,
     },
   });
+  let browserDisplay = {
+    browserMode: options.browserMode,
+    headless: options.headless,
+    display: process.env.DISPLAY || '',
+    useManagedXvfb: false,
+    stop: async () => {},
+  };
   appendCollectorWorkflowEvent(db, options, 'browser_context_launch_started', {
     status: 'starting',
-    payload: { userDataDir: resolvedUserDataDir, headless: options.headless },
+    payload: { userDataDir: resolvedUserDataDir, headless: options.headless, browserMode: options.browserMode },
   });
 
-  const context = await chromium.launchPersistentContext(resolvedUserDataDir, buildChromiumLaunchOptions({
+  browserDisplay = await startManagedBrowserDisplay({
+    browserMode: options.browserMode,
     headless: options.headless,
+    xvfbScreen: options.xvfbScreen,
+  });
+  if (browserDisplay.useManagedXvfb) {
+    await appendLog(options.logFile, `goofish_browser_xvfb_started display=${browserDisplay.display} screen=${browserDisplay.xvfbScreen}`);
+  }
+  const context = await chromium.launchPersistentContext(resolvedUserDataDir, buildChromiumLaunchOptions({
+    headless: browserDisplay.headless,
     locale: 'zh-CN',
     viewport: { width: 1440, height: 1200 },
   }));
   appendCollectorWorkflowEvent(db, options, 'browser_context_ready', {
     status: 'running',
-    payload: { userDataDir: resolvedUserDataDir, headless: options.headless },
+    payload: { userDataDir: resolvedUserDataDir, headless: browserDisplay.headless, browserMode: browserDisplay.browserMode, display: browserDisplay.display, managedXvfb: browserDisplay.useManagedXvfb },
   });
   appendCollectorWorkflowEvent(db, options, 'session_ready', {
     status: 'ready',
@@ -1174,6 +1237,7 @@ async function main() {
       payload: { reason: lifecycle.shutdownRequested ? 'shutdown' : 'complete' },
     });
     await context.close().catch(() => {});
+    await browserDisplay.stop().catch(() => {});
     appendCollectorWorkflowEvent(db, options, 'browser_context_closed', {
       status: 'closed',
       payload: { reason: lifecycle.shutdownRequested ? 'shutdown' : 'complete' },
@@ -1194,6 +1258,7 @@ module.exports = {
   GOOFISH_SOURCE,
   buildGoofishSearchUrl,
   canonicalizeGoofishItemUrl,
+  classifyGoofishAccessStatus,
   collectGoofishTags,
   decodeMtopJson,
   extractGoofishApiItems,

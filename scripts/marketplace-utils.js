@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 
 const DEFAULT_GOTO_TIMEOUT_MS = 60000;
 const DEFAULT_READY_TIMEOUT_MS = 15000;
@@ -41,6 +42,86 @@ function buildChromiumLaunchOptions(options = {}, env = process.env) {
   return {
     ...options,
     args: uniqueList([...(options.args || []), ...defaultChromiumArgs(env)]),
+  };
+}
+
+function normalizeBrowserMode(value, fallback = 'headless') {
+  const mode = String(value || fallback || 'headless').trim().toLowerCase().replace(/[ _]+/g, '-');
+  if (['headless', 'headed', 'gui', 'xvfb'].includes(mode)) return mode;
+  throw new Error(`Unsupported browser mode: ${value}`);
+}
+
+function resolveBrowserDisplayMode(options = {}, env = process.env) {
+  const browserMode = normalizeBrowserMode(options.browserMode, options.headless === false ? 'headed' : 'headless');
+  const headless = browserMode === 'headless';
+  const hasDisplay = Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
+  const useManagedXvfb = process.platform === 'linux'
+    && !headless
+    && (browserMode === 'xvfb' || (browserMode === 'gui' && !hasDisplay));
+  return {
+    browserMode,
+    headless,
+    hasDisplay,
+    useManagedXvfb,
+    display: useManagedXvfb ? String(options.xvfbDisplay || env.AUTO_BROWSER_XVFB_DISPLAY || ':99') : (env.DISPLAY || ''),
+    xvfbScreen: String(options.xvfbScreen || env.AUTO_BROWSER_XVFB_SCREEN || '1440x1200x24'),
+  };
+}
+
+async function startManagedBrowserDisplay(options = {}, env = process.env) {
+  const displayMode = resolveBrowserDisplayMode(options, env);
+  if (!displayMode.useManagedXvfb) {
+    return {
+      ...displayMode,
+      env,
+      stop: async () => {},
+    };
+  }
+
+  const previousDisplay = process.env.DISPLAY;
+  const child = spawn('Xvfb', [displayMode.display, '-screen', '0', displayMode.xvfbScreen, '-ac'], {
+    env,
+    stdio: 'ignore',
+  });
+  let exited = false;
+  let exitCode = null;
+  let exitSignal = null;
+  child.once('exit', (code, signal) => {
+    exited = true;
+    exitCode = code;
+    exitSignal = signal;
+  });
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(resolve, Number(options.xvfbStartupMs || 500));
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(new Error(`Failed to start Xvfb for browser mode ${displayMode.browserMode}: ${error.message}`));
+    });
+  });
+
+  if (exited) {
+    throw new Error(`Xvfb exited before Chromium launch display=${displayMode.display} code=${exitCode ?? ''} signal=${exitSignal || ''}`);
+  }
+
+  process.env.DISPLAY = displayMode.display;
+  return {
+    ...displayMode,
+    env: { ...env, DISPLAY: displayMode.display },
+    stop: async () => {
+      if (previousDisplay === undefined) delete process.env.DISPLAY;
+      else process.env.DISPLAY = previousDisplay;
+      if (!exited) {
+        child.kill('SIGTERM');
+        await new Promise((resolve) => {
+          const timeout = setTimeout(resolve, 1000);
+          child.once('exit', () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+        });
+      }
+    },
   };
 }
 
@@ -1836,6 +1917,9 @@ module.exports = {
   buildMarketplaceLocationPatterns,
   buildMarketplaceRadiusPatterns,
   buildChromiumLaunchOptions,
+  normalizeBrowserMode,
+  resolveBrowserDisplayMode,
+  startManagedBrowserDisplay,
   createLogger,
   defaultChromiumArgs,
   ensureDir,

@@ -2969,7 +2969,8 @@ function workflowModeLabel(workflow) {
     return workflow.strategy === 'backlog_indexer' ? 'Backlog Indexer'
       : workflow.strategy === 'feed' ? 'Homepage Collector'
         : workflow.strategy === 'explorer' ? 'Search Explorer'
-          : workflow.label;
+          : workflow.strategy === 'goofish_search' ? 'Goofish Search'
+            : workflow.label;
   }
   if (workflow.workerType === 'profile_onboarder') {
     return workflow.strategy === 'guided_login' ? 'Guided Login'

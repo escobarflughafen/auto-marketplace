@@ -354,9 +354,11 @@ const WORKFLOWS = {
         id: 'browserMode',
         label: 'Browser mode',
         kind: 'choice',
-        defaultValue: 'headed',
+        defaultValue: 'gui',
         options: [
+          { value: 'gui', label: 'GUI auto', args: ['--browser-mode', 'gui'] },
           { value: 'headed', label: 'Headed', args: ['--headed'] },
+          { value: 'xvfb', label: 'Linux Xvfb', args: ['--browser-mode', 'xvfb'] },
           { value: 'headless', label: 'Headless', args: ['--headless'] },
         ],
       },
@@ -372,6 +374,10 @@ const WORKFLOWS = {
       },
       { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax 67', activeWhen: { field: 'queryMode', equals: 'single' } },
       { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'searchEntryMode', label: 'Search entry', kind: 'choice', defaultValue: 'homepage', options: [
+        { value: 'homepage', label: 'Homepage search', args: ['--homepage-search'] },
+        { value: 'direct', label: 'Direct search URL', args: ['--direct-search'] },
+      ] },
       { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
       { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
       { id: 'maxPages', label: 'Max pages', kind: 'number', flag: '--max-pages', defaultValue: 1, min: 1 },
@@ -703,8 +709,10 @@ const WORKFLOWS = {
       { id: 'remoteStrategy', label: 'Strategy', kind: 'choice', defaultValue: 'goofish_search', options: [
         { value: 'goofish_search', label: 'Goofish Search', args: ['--strategy', 'goofish_search'] },
       ] },
-      { id: 'browserMode', label: 'Browser mode', kind: 'choice', defaultValue: 'headed', options: [
+      { id: 'browserMode', label: 'Browser mode', kind: 'choice', defaultValue: 'gui', options: [
+        { value: 'gui', label: 'GUI auto', args: ['--browser-mode', 'gui'] },
         { value: 'headed', label: 'Headed', args: ['--headed'] },
+        { value: 'xvfb', label: 'Linux Xvfb', args: ['--browser-mode', 'xvfb'] },
         { value: 'headless', label: 'Headless', args: ['--headless'] },
       ] },
       { id: 'queryMode', label: 'Query mode', kind: 'choice', defaultValue: 'single', options: [
@@ -713,6 +721,10 @@ const WORKFLOWS = {
       ] },
       { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax 67', activeWhen: { field: 'queryMode', equals: 'single' } },
       { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'searchEntryMode', label: 'Search entry', kind: 'choice', defaultValue: 'homepage', options: [
+        { value: 'homepage', label: 'Homepage search', args: ['--homepage-search'] },
+        { value: 'direct', label: 'Direct search URL', args: ['--direct-search'] },
+      ] },
       { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
       { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
       { id: 'maxPages', label: 'Max pages', kind: 'number', flag: '--max-pages', defaultValue: 1, min: 1 },

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   buildGoofishSearchUrl,
   canonicalizeGoofishItemUrl,
+  classifyGoofishAccessStatus,
   extractGoofishApiItems,
   goofishItemIdFromUrl,
   goofishListingId,
@@ -36,8 +37,37 @@ test('Goofish search explorer defaults to homepage DOM submission', () => {
   const options = parseArgs(['--query', 'pentax 67', '--once', '--headed']);
   assert.equal(options.preferHomepageSearch, true);
   assert.equal(options.headless, false);
+  assert.equal(options.browserMode, 'headed');
   assert.equal(options.query, 'pentax 67');
   assert.equal(options.once, true);
+});
+
+test('Goofish search explorer supports cross-platform GUI browser mode', () => {
+  const gui = parseArgs(['--query', 'pentax 67', '--browser-mode', 'gui']);
+  assert.equal(gui.browserMode, 'gui');
+  assert.equal(gui.headless, false);
+
+  const xvfb = parseArgs(['--query', 'pentax 67', '--xvfb', '--xvfb-screen', '1600x1000x24']);
+  assert.equal(xvfb.browserMode, 'xvfb');
+  assert.equal(xvfb.headless, false);
+  assert.equal(xvfb.xvfbScreen, '1600x1000x24');
+
+  const headless = parseArgs(['--query', 'pentax 67', '--browser-mode', 'headless']);
+  assert.equal(headless.browserMode, 'headless');
+  assert.equal(headless.headless, true);
+});
+
+test('Goofish access status classifies Xianyu illegal browser interstitial as blocked', () => {
+  const status = classifyGoofishAccessStatus({
+    url: 'https://www.goofish.com/search?q=%E7%9B%B8%E6%9C%BA',
+    title: '相机_闲鱼',
+    text: '非法访问 为了保障您的体验，请使用正常浏览器访问闲鱼~ 关闭 反馈问题',
+    hasItemLink: false,
+  });
+
+  assert.equal(status.isAccessBlocked, true);
+  assert.equal(status.isChallenge, true);
+  assert.equal(status.isLoadingOnly, false);
 });
 
 test('Goofish search explorer parses query targets', () => {
