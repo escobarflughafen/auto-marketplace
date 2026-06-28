@@ -97,6 +97,42 @@ test('extractListingId and canonicalizeListingUrl normalize Marketplace links', 
   );
 });
 
+
+test('Goofish item URLs preserve item ids in canonical hrefs', () => {
+  assert.equal(
+    canonicalizeListingUrl('https://www.goofish.com/item?spm=a21ybx.search&id=1057648990425&categoryId=126864790'),
+    'https://www.goofish.com/item?id=1057648990425&categoryId=126864790',
+  );
+  assert.equal(
+    canonicalizeListingUrl('https://www.goofish.com/item?id=1058700807807'),
+    'https://www.goofish.com/item?id=1058700807807',
+  );
+
+  const dbPath = createTempDbPath();
+  const { db } = openMarketplaceHomepageDatabase(dbPath);
+  try {
+    upsertHomepageListingWithStatus(db, {
+      listingId: 'goofish:1057648990425',
+      href: 'https://www.goofish.com/item?id=1057648990425&categoryId=126864790',
+      title: 'Pentax 67 A',
+      text: '¥6880 | Pentax 67 A',
+      price: '¥6880',
+    }, { source: 'goofish', sourceKeyword: 'pentax 67' });
+    upsertHomepageListingWithStatus(db, {
+      listingId: 'goofish:1058700807807',
+      href: 'https://www.goofish.com/item?id=1058700807807&categoryId=126864790',
+      title: 'Pentax 67 B',
+      text: '¥5080 | Pentax 67 B',
+      price: '¥5080',
+    }, { source: 'goofish', sourceKeyword: 'pentax 67' });
+
+    assert.equal(getHomepageListing(db, 'goofish:1057648990425').href, 'https://www.goofish.com/item?id=1057648990425&categoryId=126864790');
+    assert.equal(getHomepageListing(db, 'goofish:1058700807807').href, 'https://www.goofish.com/item?id=1058700807807&categoryId=126864790');
+  } finally {
+    closeMarketplaceHomepageDatabase(db);
+  }
+});
+
 test('listing events are append-only detail history', () => {
   const dbPath = createTempDbPath();
   const { db } = openMarketplaceHomepageDatabase(dbPath);

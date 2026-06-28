@@ -51,6 +51,8 @@ test('workflow concurrency is lenient except selected browser caps', () => {
   assert.equal(workflowConcurrencyScope('search-explore', 'collector'), 'workflow');
   assert.equal(workflowConcurrencyLimit('ebay-search-collect', 'collector'), 2);
   assert.equal(workflowConcurrencyScope('ebay-search-collect', 'collector'), 'workflow');
+  assert.equal(workflowConcurrencyLimit('goofish-search-explore', 'collector'), 1);
+  assert.equal(workflowConcurrencyScope('goofish-search-explore', 'collector'), 'workflow');
   assert.equal(workflowConcurrencyLimit('backlog-resolve', 'resolver'), 2);
   assert.equal(workflowConcurrencyScope('backlog-resolve', 'resolver'), 'workerType');
   assert.equal(workflowConcurrencyLimit('home-collect', 'collector'), Number.POSITIVE_INFINITY);
@@ -132,6 +134,31 @@ test('workflow start args allow eBay search collector controls', () => {
     '--query-targets', targets,
     '--max-pages', '3',
     '--page-delay-seconds', '2',
+    '--collect-all',
+    '--worker-screenshot-format', 'jpeg',
+    '--worker-screenshot-quality', '40',
+  ]);
+});
+
+
+test('workflow start args allow Goofish search explorer controls', () => {
+  const targets = JSON.stringify([
+    { keyword: 'pentax 67', minPrice: '2000', maxPrice: '8000' },
+    { keyword: '宾得67' },
+  ]);
+  const args = validateWorkflowStartArgs('goofish-search-explore', [
+    '--query-targets', targets,
+    '--max-pages', '1',
+    '--page-delay-seconds', '8',
+    '--collect-all',
+    '--worker-screenshot-format', 'jpeg',
+    '--worker-screenshot-quality', '40',
+  ]);
+
+  assert.deepEqual(args, [
+    '--query-targets', targets,
+    '--max-pages', '1',
+    '--page-delay-seconds', '8',
     '--collect-all',
     '--worker-screenshot-format', 'jpeg',
     '--worker-screenshot-quality', '40',

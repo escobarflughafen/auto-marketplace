@@ -343,6 +343,48 @@ const WORKFLOWS = {
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
     ],
   },
+  'goofish-search-explore': {
+    label: 'Goofish Search Explorer',
+    script: 'marketplace:goofish:search:explore',
+    source: 'goofish',
+    workerType: 'collector',
+    strategy: 'search',
+    fields: [
+      {
+        id: 'browserMode',
+        label: 'Browser mode',
+        kind: 'choice',
+        defaultValue: 'headed',
+        options: [
+          { value: 'headed', label: 'Headed', args: ['--headed'] },
+          { value: 'headless', label: 'Headless', args: ['--headless'] },
+        ],
+      },
+      {
+        id: 'queryMode',
+        label: 'Query mode',
+        kind: 'choice',
+        defaultValue: 'single',
+        options: [
+          { value: 'single', label: 'Single query', args: [] },
+          { value: 'list', label: 'Keyword list', args: [] },
+        ],
+      },
+      { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax 67', activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPages', label: 'Max pages', kind: 'number', flag: '--max-pages', defaultValue: 1, min: 1 },
+      { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
+      { id: 'maxItems', label: 'Max items', kind: 'number', flag: '--max-items', defaultValue: '', min: 1, activeWhen: { field: 'collectAll', equals: false } },
+      { id: 'pageDelaySeconds', label: 'Delay after search submit (seconds)', kind: 'number', flag: '--page-delay-seconds', defaultValue: 8, min: 0 },
+      { id: 'refreshSeconds', label: 'Refresh every (seconds)', kind: 'number', flag: '--refresh-seconds', defaultValue: 300, min: 1 },
+      { id: 'refreshJitterMin', label: 'Refresh jitter low', kind: 'number', flag: '--refresh-jitter-min', defaultValue: 0.5, min: 0, step: 0.1 },
+      { id: 'refreshJitterMax', label: 'Refresh jitter high', kind: 'number', flag: '--refresh-jitter-max', defaultValue: 1.5, min: 0, step: 0.1 },
+      { id: 'maxRuntimeSeconds', label: 'Run window (seconds)', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 180, min: 1 },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+    ],
+  },
   'backlog-resolve': {
     label: 'Resolve Pending Backlog',
     script: 'marketplace:home:process',
@@ -673,6 +715,7 @@ const WORKFLOWS = {
 const WORKFLOW_CONCURRENCY_LIMITS = {
   'search-explore': 2,
   'ebay-search-collect': 2,
+  'goofish-search-explore': 1,
   'profile-onboarder': 1,
 };
 const WORKER_TYPE_CONCURRENCY_LIMITS = {
@@ -684,6 +727,7 @@ const WORKFLOW_SCRIPTS_WITH_WORKER_ID = new Set([
   'marketplace:home:collect',
   'marketplace:search:explore',
   'marketplace:ebay:search:collect',
+  'marketplace:goofish:search:explore',
   'marketplace:home:process',
   'marketplace:home:index',
   'remote-worker',
@@ -2276,7 +2320,7 @@ function workflowArgSpec(workflow, options = {}) {
     addValueFlag(field.flag, (value) => assertSafeWorkflowArgValue(field.flag, value));
   }
 
-  if (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect') {
+  if (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect' || workflow.id === 'goofish-search-explore') {
     addValueFlag('--queries', (value) => assertSafeWorkflowArgValue('--queries', value));
     addValueFlag('--seed-queries', (value) => assertSafeWorkflowArgValue('--seed-queries', value));
     addValueFlag('--seed-query-targets', (value) => validateSearchQueryTargetsValue('--seed-query-targets', value));

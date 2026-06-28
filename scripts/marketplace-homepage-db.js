@@ -22,6 +22,15 @@ function extractListingId(url) {
   return match ? match[1] : '';
 }
 
+function extractGoofishListingId(url) {
+  const text = String(url || '');
+  const match = text.match(/[?&]id=(\d{9,})/i)
+    || text.match(/[?&]itemId=(\d{9,})/i)
+    || text.match(/[?&]item_id=(\d{9,})/i)
+    || text.match(/\/item\/(\d{9,})/i);
+  return match ? match[1] : '';
+}
+
 function canonicalizeListingUrl(url) {
   const listingId = extractListingId(url);
   if (listingId) {
@@ -30,6 +39,13 @@ function canonicalizeListingUrl(url) {
 
   try {
     const parsed = new URL(String(url || ''));
+    if (/goofish\.com$/i.test(parsed.hostname) && parsed.pathname === '/item') {
+      const goofishListingId = extractGoofishListingId(parsed.toString());
+      if (goofishListingId) {
+        const categoryId = parsed.searchParams.get('categoryId') || '';
+        return `https://www.goofish.com/item?id=${goofishListingId}${categoryId ? `&categoryId=${encodeURIComponent(categoryId)}` : ''}`;
+      }
+    }
     return `${parsed.origin}${parsed.pathname}`;
   } catch (_) {
     return String(url || '').trim();
