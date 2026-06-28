@@ -389,3 +389,23 @@ test('parseArgs accepts legacy worker token env for container compatibility', ()
     }
   }
 });
+
+test('parseArgs forwards collector-specific flags to the adapter runtime', () => {
+  const options = parseArgs([
+    '--host-url', 'http://127.0.0.1:3080',
+    '--worker-token', 'runtime-token',
+    '--local-db', '/tmp/remote-worker.db',
+    '--worker-type', 'collector',
+    '--strategy', 'explorer',
+    '--query', 'pentax 67',
+    '--max-items', '2',
+    '--headless',
+  ]);
+  assert.equal(options.workerType, 'collector');
+  assert.equal(options.strategy, 'explorer');
+  assert.deepEqual(options.adapterArgs, [
+    '--query', 'pentax 67',
+    '--max-items', '2',
+    '--headless',
+  ]);
+});

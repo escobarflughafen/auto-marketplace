@@ -2,8 +2,13 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
+const { DatabaseSync } = require('node:sqlite');
 const { listedAgoToUnixRange } = require('./marketplace-listed-time-normalizer');
 const { RemoteWorkerApiClient } = require('./remote-worker-api-client');
+const {
+  listListingMedia,
+} = require('./marketplace-homepage-db');
 const {
   openRemoteWorkerLocalStore,
   getState,
@@ -68,6 +73,7 @@ function parseArgs(argv) {
     heartbeatIntervalMs: 30000,
     pollIntervalMs: 5000,
     json: false,
+    adapterArgs: [],
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -141,6 +147,15 @@ function parseArgs(argv) {
         process.exit(0);
         break;
       default:
+        if (arg.startsWith('--')) {
+          options.adapterArgs.push(arg);
+          const next = argv[index + 1];
+          if (next && !next.startsWith('--')) {
+            options.adapterArgs.push(next);
+            index += 1;
+          }
+          break;
+        }
         throw new Error(`Unknown argument: ${arg}`);
     }
   }
@@ -178,6 +193,161 @@ function buildEventId(workerId, sequence, eventType, entity = '') {
     .digest('hex')
     .slice(0, 12);
   return `${workerId}:${sequence}:${eventType}:${hash}`;
+}
+
+
+function isCollectorRuntime(options = {}) {
+  return String(options.workerType || '') === 'collector'
+    && ['feed', 'explorer'].includes(String(options.strategy || ''));
+}
+
+function collectorScriptForStrategy(strategy) {
+  switch (String(strategy || '')) {
+    case 'feed':
+      return 'scripts/collect-marketplace-homepage.js';
+    case 'explorer':
+      return 'scripts/collect-marketplace-search-explorer.js';
+    default:
+      throw new Error(`Unsupported collector strategy for remote runtime: ${strategy}`);
+  }
+}
+
+function collectorDbNameForStrategy(strategy) {
+  return String(strategy || '') === 'explorer' ? 'search-explorer.db' : 'homepage-collector.db';
+}
+
+function stripManagedCollectorArgs(args = []) {
+  const managedValueFlags = new Set([
+    '--db-path',
+    '--worker-id',
+    '--log-file',
+    '--snapshot-file',
+  ]);
+  const managedBooleanFlags = new Set(['--once']);
+  const out = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index] || '');
+    if (managedBooleanFlags.has(arg)) {
+      continue;
+    }
+    if (managedValueFlags.has(arg)) {
+      if (args[index + 1] && !String(args[index + 1]).startsWith('--')) {
+        index += 1;
+      }
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+function runNodeScript(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on('data', (chunk) => {
+      stdout.push(chunk);
+      if (!options.quiet) process.stdout.write(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr.push(chunk);
+      if (!options.quiet) process.stderr.write(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code, signal) => {
+      resolve({
+        code,
+        signal,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+      });
+    });
+  });
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function readCollectorRunEvents(dbPath, adapterRunId) {
+  if (!fs.existsSync(dbPath)) {
+    return { workflowEvents: [], listingEvents: [] };
+  }
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const workflowEvents = db.prepare(`
+      SELECT event_id, event_type, event_at, status, content_json, error
+      FROM workflow_events
+      WHERE workflow_run_id = ?
+      ORDER BY event_at ASC, event_id ASC
+    `).all(adapterRunId).map((row) => ({
+      eventId: row.event_id,
+      eventType: row.event_type,
+      eventAt: row.event_at,
+      status: row.status || '',
+      payload: parseJsonObject(row.content_json),
+      error: row.error || '',
+    }));
+    const listingEvents = db.prepare(`
+      SELECT event_id, listing_id, event_type, event_at, status, source_url, content_json, error
+      FROM listing_events
+      WHERE workflow_run_id = ?
+      ORDER BY event_at ASC, event_id ASC
+    `).all(adapterRunId).map((row) => {
+      const payload = parseJsonObject(row.content_json);
+      const listing = db.prepare(`
+        SELECT listing_id, href, source, source_keyword, card_title, card_text, detail_price, last_seen_rank
+        FROM homepage_listings
+        WHERE listing_id = ?
+      `).get(row.listing_id) || {};
+      const media = listListingMedia(db, row.listing_id, { limit: 20 }).map((item) => ({
+        mediaKey: item.media_key,
+        mediaType: item.media_type,
+        source: item.source,
+        sourceUrl: item.source_url,
+        artifactPath: item.artifact_path,
+        altText: item.alt_text,
+        width: item.width,
+        height: item.height,
+        position: item.position,
+        metadata: item.metadata || {},
+      }));
+      return {
+        eventId: row.event_id,
+        listingId: row.listing_id,
+        eventType: row.event_type,
+        eventAt: row.event_at,
+        status: row.status || '',
+        sourceUrl: row.source_url || listing.href || payload.href || '',
+        payload: {
+          ...payload,
+          listingId: payload.listingId || listing.listing_id || row.listing_id,
+          href: payload.href || listing.href || row.source_url || '',
+          source: payload.source || listing.source || '',
+          sourceKeyword: payload.sourceKeyword || listing.source_keyword || '',
+          rank: payload.rank ?? listing.last_seen_rank ?? null,
+          cardTitle: payload.cardTitle || listing.card_title || '',
+          cardText: payload.cardText || listing.card_text || '',
+          price: payload.price || listing.detail_price || '',
+          photos: media,
+        },
+        error: row.error || '',
+      };
+    });
+    return { workflowEvents, listingEvents };
+  } finally {
+    db.close();
+  }
 }
 
 class RemoteWorkerRuntime {
@@ -379,6 +549,83 @@ class RemoteWorkerRuntime {
     });
   }
 
+
+  collectorAdapterPaths() {
+    const baseDir = path.dirname(this.options.localDbPath);
+    const strategy = String(this.options.strategy || '');
+    return {
+      adapterDbPath: path.join(baseDir, collectorDbNameForStrategy(strategy)),
+      logFile: path.join(baseDir, `${strategy}-collector.log`),
+      snapshotFile: path.join(baseDir, `${strategy}-collector-latest-cycle.json`),
+    };
+  }
+
+  async executeCollectorAdapterRun() {
+    const strategy = String(this.options.strategy || '');
+    const script = collectorScriptForStrategy(strategy);
+    const adapterRunId = `${this.options.workerId}:collector:${Date.now().toString(36)}`;
+    const paths = this.collectorAdapterPaths();
+    await fs.promises.mkdir(path.dirname(paths.adapterDbPath), { recursive: true });
+    const args = [
+      script,
+      ...stripManagedCollectorArgs(this.options.adapterArgs),
+      '--db-path', paths.adapterDbPath,
+      '--worker-id', adapterRunId,
+      '--log-file', paths.logFile,
+      '--snapshot-file', paths.snapshotFile,
+      '--once',
+    ];
+    const result = await runNodeScript(args);
+    const replay = await this.replayCollectorAdapterRun(paths.adapterDbPath, adapterRunId);
+    await this.uploadPendingEvents();
+    if (result.code !== 0) {
+      const message = result.stderr.trim().split('\n').slice(-1)[0] || `collector adapter exited with code ${result.code}`;
+      const error = new Error(message);
+      error.exitCode = result.code;
+      error.signal = result.signal;
+      error.replay = replay;
+      throw error;
+    }
+    return {
+      adapterRunId,
+      adapterDbPath: paths.adapterDbPath,
+      replay,
+      exitCode: result.code,
+      signal: result.signal || '',
+    };
+  }
+
+  async replayCollectorAdapterRun(adapterDbPath, adapterRunId) {
+    const { workflowEvents, listingEvents } = readCollectorRunEvents(adapterDbPath, adapterRunId);
+    for (const event of workflowEvents) {
+      this.appendEvent({
+        eventId: `${this.options.workerId}:remote:${event.eventId}`,
+        eventScope: 'workflow',
+        eventType: event.eventType,
+        eventAt: event.eventAt,
+        status: event.status,
+        payload: event.payload,
+        error: event.error,
+      });
+    }
+    for (const event of listingEvents) {
+      this.appendEvent({
+        eventId: `${this.options.workerId}:remote:${event.eventId}`,
+        eventScope: 'listing',
+        eventType: event.eventType,
+        eventAt: event.eventAt,
+        listingId: event.listingId,
+        status: event.status,
+        payload: event.payload,
+        error: event.error,
+      });
+    }
+    return {
+      workflowEvents: workflowEvents.length,
+      listingEvents: listingEvents.length,
+    };
+  }
+
   executeBacklogIndexerClaim(claim) {
     const startedAt = new Date().toISOString();
     this.appendEvent({
@@ -490,6 +737,19 @@ class RemoteWorkerRuntime {
     await this.uploadPendingEvents();
     await this.uploadPendingArtifacts();
     const commands = await this.pollCommands();
+    if (isCollectorRuntime(this.options)) {
+      const collectorResult = await this.executeCollectorAdapterRun();
+      await this.sendHeartbeat(this.shutdownRequested ? 'stopping' : 'idle');
+      return {
+        sessionId: this.sessionId,
+        commands,
+        claims: [],
+        claimResults: [],
+        collectorResult,
+        drainRequested: this.drainRequested,
+        backpressure: null,
+      };
+    }
     const claimsResult = await this.claimWork();
     const claimResults = [];
     for (const claim of claimsResult.claims || []) {

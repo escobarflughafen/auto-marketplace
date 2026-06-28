@@ -74,6 +74,28 @@ test('workflow config exposes remote backlog indexer and marks legacy direct-db 
       '--strategy', 'resolved_metadata',
     ]);
 
+    const remoteHome = workflows.find((workflow) => workflow.id === 'remote-home-collect');
+    assert.ok(remoteHome);
+    assert.equal(remoteHome.script, 'remote-worker');
+    assert.equal(remoteHome.workerType, 'remote_worker');
+    assert.equal(remoteHome.strategy, 'feed');
+    assert.equal(remoteHome.runtimeModel, 'remote_outbox');
+    assert.ok(remoteHome.defaultArgs.includes('--worker-type'));
+    assert.ok(remoteHome.defaultArgs.includes('collector'));
+    assert.ok(remoteHome.defaultArgs.includes('--strategy'));
+    assert.ok(remoteHome.defaultArgs.includes('feed'));
+
+    const remoteSearch = workflows.find((workflow) => workflow.id === 'remote-search-explore');
+    assert.ok(remoteSearch);
+    assert.equal(remoteSearch.script, 'remote-worker');
+    assert.equal(remoteSearch.workerType, 'remote_worker');
+    assert.equal(remoteSearch.strategy, 'explorer');
+    assert.equal(remoteSearch.runtimeModel, 'remote_outbox');
+    assert.ok(remoteSearch.defaultArgs.includes('--worker-type'));
+    assert.ok(remoteSearch.defaultArgs.includes('collector'));
+    assert.ok(remoteSearch.defaultArgs.includes('--strategy'));
+    assert.ok(remoteSearch.defaultArgs.includes('explorer'));
+
     const legacy = workflows.find((workflow) => workflow.id === 'backlog-indexer');
     assert.ok(legacy);
     assert.equal(legacy.deprecated, true);

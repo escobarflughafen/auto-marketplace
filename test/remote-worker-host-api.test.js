@@ -488,6 +488,183 @@ test('remote worker host API registers, heartbeats, ingests events, and projects
   }
 });
 
+
+
+test('remote worker host API projects remote homepage collector listing events into central listings', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const workerToken = 'test-worker-token';
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+  let sessionId = '';
+
+  try {
+    const registered = await requestJson(baseUrl, '/api/v2/remote-workers/sessions', {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'remote-feed-collector-1',
+        workerType: 'collector',
+        strategy: 'feed',
+        workerVersion: 'collector-test',
+        sourceId: 'remote-feed-test',
+      },
+    });
+    assert.equal(registered.status, 201);
+    sessionId = registered.body.sessionId;
+
+    const ingested = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/events`, {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'remote-feed-collector-1',
+        batchId: 'remote-feed-batch-1',
+        events: [{
+          eventId: 'remote-feed-listing-event-1',
+          sequence: 1,
+          eventAt: '2026-06-20T12:00:00.000Z',
+          eventScope: 'listing',
+          eventType: 'listing_observed',
+          listingId: 'remote-feed-listing-1',
+          status: 'new',
+          payload: {
+            listingId: 'remote-feed-listing-1',
+            href: 'https://www.facebook.com/marketplace/item/remote-feed-listing-1/',
+            source: 'homepage',
+            outcome: 'new',
+            rank: 1,
+            cardTitle: 'Remote feed listing',
+            cardText: 'CA$100 | Remote feed listing',
+            price: 'CA$100',
+            photos: [{
+              sourceUrl: 'https://example.test/feed.jpg',
+              altText: 'feed photo',
+              width: 640,
+              height: 480,
+              position: 0,
+              source: 'collector_card',
+            }],
+          },
+        }],
+      },
+    });
+    assert.equal(ingested.status, 200, JSON.stringify(ingested.body));
+    assert.deepEqual(ingested.body.rejected, []);
+  } finally {
+    await closeServer(server);
+  }
+
+  try {
+    const db = new DatabaseSync(dbPath);
+    const listing = db.prepare('SELECT * FROM homepage_listings WHERE listing_id = ?').get('remote-feed-listing-1');
+    assert.equal(listing.source, 'homepage');
+    assert.equal(listing.card_title, 'Remote feed listing');
+    assert.equal(listing.card_text, 'CA$100 | Remote feed listing');
+    assert.equal(listing.detail_price, 'CA$100');
+    assert.equal(listing.detail_status, 'pending');
+
+    const media = db.prepare('SELECT * FROM listing_media WHERE listing_id = ?').get('remote-feed-listing-1');
+    assert.equal(media.source_url, 'https://example.test/feed.jpg');
+    assert.equal(media.source, 'collector_card');
+
+    const listingEvent = db.prepare('SELECT * FROM listing_events WHERE event_id = ?').get('remote-feed-listing-event-1');
+    assert.equal(listingEvent.worker_id, 'remote-feed-collector-1');
+    assert.equal(listingEvent.event_type, 'listing_observed');
+    db.close();
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('remote worker host API projects remote search explorer listing events into keyword indexes', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const workerToken = 'test-worker-token';
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+  let sessionId = '';
+
+  try {
+    const registered = await requestJson(baseUrl, '/api/v2/remote-workers/sessions', {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'remote-search-collector-1',
+        workerType: 'collector',
+        strategy: 'explorer',
+        workerVersion: 'collector-test',
+        sourceId: 'remote-search-test',
+      },
+    });
+    assert.equal(registered.status, 201);
+    sessionId = registered.body.sessionId;
+
+    const ingested = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/events`, {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'remote-search-collector-1',
+        batchId: 'remote-search-batch-1',
+        events: [{
+          eventId: 'remote-search-listing-event-1',
+          sequence: 1,
+          eventAt: '2026-06-20T12:01:00.000Z',
+          eventScope: 'listing',
+          eventType: 'listing_observed',
+          listingId: 'remote-search-listing-1',
+          status: 'new',
+          payload: {
+            listingId: 'remote-search-listing-1',
+            href: 'https://www.facebook.com/marketplace/item/remote-search-listing-1/',
+            source: 'search',
+            sourceKeyword: 'pentax 67',
+            outcome: 'new',
+            rank: 3,
+            cardTitle: 'Pentax 67 105mm kit',
+            cardText: 'CA$1200 | Pentax 67 105mm kit',
+            price: 'CA$1200',
+          },
+        }],
+      },
+    });
+    assert.equal(ingested.status, 200, JSON.stringify(ingested.body));
+    assert.deepEqual(ingested.body.rejected, []);
+  } finally {
+    await closeServer(server);
+  }
+
+  try {
+    const db = new DatabaseSync(dbPath);
+    const listing = db.prepare('SELECT * FROM homepage_listings WHERE listing_id = ?').get('remote-search-listing-1');
+    assert.equal(listing.source, 'search');
+    assert.equal(listing.source_keyword, 'pentax 67');
+    assert.equal(listing.card_title, 'Pentax 67 105mm kit');
+
+    const keyword = db.prepare('SELECT * FROM listing_search_keywords WHERE listing_id = ? AND normalized_keyword = ?')
+      .get('remote-search-listing-1', 'pentax 67');
+    assert.equal(keyword.keyword, 'pentax 67');
+
+    const titleBag = db.prepare('SELECT * FROM search_title_bag WHERE normalized_keyword = ?').get('pentax 67');
+    assert.equal(titleBag.keyword, 'pentax 67');
+    assert.equal(titleBag.last_source_keyword, 'pentax 67');
+    db.close();
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('remote worker host API issues backlog indexer claims and protects stale leases', async () => {
   const { tempDir, dbPath } = createTempDbPath();
   const workerToken = 'test-worker-token';

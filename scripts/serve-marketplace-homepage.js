@@ -13,6 +13,8 @@ const {
   closeMarketplaceHomepageDatabase,
   getHomepageListingCounts,
   upsertHomepageListingWithStatus,
+  upsertListingSearchKeyword,
+  upsertSearchTitleBagKeyword,
   createPurchaseHistoryDocument,
   listPurchaseHistoryDocuments,
   getPurchaseHistoryDocument,
@@ -558,6 +560,88 @@ const WORKFLOWS = {
       { id: 'pollIntervalMs', label: 'Poll interval (ms)', kind: 'number', flag: '--poll-interval-ms', defaultValue: 5000, min: 1000 },
       { id: 'heartbeatIntervalMs', label: 'Heartbeat interval (ms)', kind: 'number', flag: '--heartbeat-interval-ms', defaultValue: 30000, min: 5000 },
       { id: 'maxPendingArtifactBytes', label: 'Artifact backpressure bytes', kind: 'number', flag: '--max-pending-artifact-bytes', defaultValue: 1073741824, min: 0 },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+      { id: 'localDbPath', label: 'Local worker DB path', kind: 'text', flag: '--local-db', defaultValue: '' },
+    ],
+  },
+  'remote-home-collect': {
+    label: 'Remote Homepage Collector',
+    script: 'remote-worker',
+    source: 'facebook',
+    workerType: 'remote_worker',
+    strategy: 'feed',
+    runtimeModel: 'remote_outbox',
+    fields: [
+      { id: 'hostUrl', label: 'Host API URL', kind: 'text', flag: '--host-url', defaultValue: '' },
+      { id: 'remoteWorkerType', label: 'Remote worker type', kind: 'choice', defaultValue: 'collector', options: [
+        { value: 'collector', label: 'Collector', args: ['--worker-type', 'collector'] },
+      ] },
+      { id: 'remoteStrategy', label: 'Strategy', kind: 'choice', defaultValue: 'feed', options: [
+        { value: 'feed', label: 'Homepage feed', args: ['--strategy', 'feed'] },
+      ] },
+      AUTH_MODE_FIELD,
+      CREDENTIAL_PROFILE_FIELD,
+      { id: 'browserMode', label: 'Browser mode', kind: 'choice', defaultValue: 'headless', options: [
+        { value: 'headless', label: 'Headless', args: ['--headless'] },
+        { value: 'headed', label: 'Headed', args: ['--headed'] },
+      ] },
+      { id: 'collectionMode', label: 'Collection mode', kind: 'choice', defaultValue: 'feed', options: [
+        { value: 'feed', label: 'Homepage feed', args: [] },
+        { value: 'keywords', label: 'Keyword targets', args: [] },
+      ] },
+      { id: 'keywordTargets', label: 'Keyword targets', kind: 'textarea', editor: 'keywordTargets', flag: '--keyword-targets', defaultValue: '', activeWhen: { field: 'collectionMode', equals: 'keywords' } },
+      { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
+      { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
+      { id: 'radiusMiles', label: 'Radius (miles)', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
+      { id: 'maxItems', label: 'Max items', kind: 'number', flag: '--max-items', defaultValue: 10, min: 1, activeWhen: { field: 'collectAll', equals: false } },
+      { id: 'firstLoadOnly', label: 'First load only', kind: 'boolean', flag: '--first-load-only', defaultValue: false },
+      { id: 'initialLoadWaitMs', label: 'Initial wait (ms)', kind: 'number', flag: '--initial-load-wait-ms', defaultValue: 5000, min: 0 },
+      { id: 'maxRuntimeSeconds', label: 'Run window (seconds)', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
+      { id: 'pollIntervalMs', label: 'Remote poll interval (ms)', kind: 'number', flag: '--poll-interval-ms', defaultValue: 5000, min: 1000 },
+      { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
+      { id: 'localDbPath', label: 'Local worker DB path', kind: 'text', flag: '--local-db', defaultValue: '' },
+    ],
+  },
+  'remote-search-explore': {
+    label: 'Remote Search Explorer',
+    script: 'remote-worker',
+    source: 'facebook',
+    workerType: 'remote_worker',
+    strategy: 'explorer',
+    runtimeModel: 'remote_outbox',
+    fields: [
+      { id: 'hostUrl', label: 'Host API URL', kind: 'text', flag: '--host-url', defaultValue: '' },
+      { id: 'remoteWorkerType', label: 'Remote worker type', kind: 'choice', defaultValue: 'collector', options: [
+        { value: 'collector', label: 'Collector', args: ['--worker-type', 'collector'] },
+      ] },
+      { id: 'remoteStrategy', label: 'Strategy', kind: 'choice', defaultValue: 'explorer', options: [
+        { value: 'explorer', label: 'Search Explorer', args: ['--strategy', 'explorer'] },
+      ] },
+      AUTH_MODE_FIELD,
+      CREDENTIAL_PROFILE_FIELD,
+      { id: 'browserMode', label: 'Browser mode', kind: 'choice', defaultValue: 'headless', options: [
+        { value: 'headless', label: 'Headless', args: ['--headless'] },
+        { value: 'headed', label: 'Headed', args: ['--headed'] },
+      ] },
+      { id: 'queryMode', label: 'Query mode', kind: 'choice', defaultValue: 'single', options: [
+        { value: 'single', label: 'Single query', args: [] },
+        { value: 'list', label: 'Keyword list', args: [] },
+      ] },
+      { id: 'query', label: 'Search query', kind: 'text', flag: '--query', defaultValue: 'pentax', activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'queryTargets', label: 'Keyword price targets', kind: 'textarea', editor: 'searchQueryTargets', flag: '--query-targets', defaultValue: '', activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'randomWalksBetweenSeeds', label: 'Random walks between entries', kind: 'number', flag: '--random-walks-between-seeds', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'list' } },
+      { id: 'location', label: 'Location', kind: 'text', flag: '--location', defaultValue: '', options: MARKETPLACE_LOCATION_OPTIONS },
+      { id: 'radiusMiles', label: 'Radius (miles)', kind: 'number', flag: '--radius-miles', defaultValue: '', min: 1 },
+      { id: 'minPrice', label: 'Min price', kind: 'number', flag: '--min-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'maxPrice', label: 'Max price', kind: 'number', flag: '--max-price', defaultValue: '', min: 0, activeWhen: { field: 'queryMode', equals: 'single' } },
+      { id: 'daysSinceListed', label: 'Listed within days', kind: 'number', flag: '--days-since-listed', defaultValue: '', min: 1 },
+      { id: 'itemCondition', label: 'Condition filter', kind: 'text', flag: '--item-condition', defaultValue: '' },
+      { id: 'collectAll', label: 'Collect all visible rows', kind: 'boolean', flag: '--collect-all', defaultValue: true },
+      { id: 'maxItems', label: 'Max items', kind: 'number', flag: '--max-items', defaultValue: 50, min: 1, activeWhen: { field: 'collectAll', equals: false } },
+      { id: 'firstLoadOnly', label: 'First load only', kind: 'boolean', flag: '--first-load-only', defaultValue: false },
+      { id: 'initialLoadWaitMs', label: 'Initial wait (ms)', kind: 'number', flag: '--initial-load-wait-ms', defaultValue: 5000, min: 0 },
+      { id: 'maxRuntimeSeconds', label: 'Run window (seconds)', kind: 'number', flag: '--max-runtime-seconds', defaultValue: 120, min: 1 },
+      { id: 'pollIntervalMs', label: 'Remote poll interval (ms)', kind: 'number', flag: '--poll-interval-ms', defaultValue: 5000, min: 1000 },
       { id: 'once', label: 'Run once', kind: 'boolean', flag: '--once', defaultValue: false },
       { id: 'localDbPath', label: 'Local worker DB path', kind: 'text', flag: '--local-db', defaultValue: '' },
     ],
@@ -3562,6 +3646,7 @@ function projectRemoteWorkerEvent(db, session, remoteEvent, payload) {
     return;
   }
   if (remoteEvent.eventScope === 'listing') {
+    reduceCollectorListingObservedEvent(db, session, remoteEvent, payload);
     appendListingEvent(db, {
       eventId: remoteEvent.eventId,
       workflowRunId: session.session_id,
@@ -3845,6 +3930,45 @@ function buildRemoteLeaseId() {
 function isoToUnixSeconds(value) {
   const parsed = Date.parse(String(value || ''));
   return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+
+function reduceCollectorListingObservedEvent(db, session, remoteEvent, payload) {
+  if (remoteEvent.eventType !== 'listing_observed' || !remoteEvent.listingId) {
+    return;
+  }
+  const source = String(payload.source || '').trim() || (session.strategy === 'explorer' ? 'search' : 'homepage');
+  const sourceKeyword = String(payload.sourceKeyword || payload.source_keyword || '').trim();
+  const result = upsertHomepageListingWithStatus(db, {
+    listingId: remoteEvent.listingId,
+    href: payload.href || remoteEvent.sourceUrl || '',
+    title: payload.cardTitle || payload.title || '',
+    text: payload.cardText || payload.text || '',
+    price: payload.price || payload.cardPrice || '',
+    rank: Number.isFinite(Number(payload.rank)) ? Number(payload.rank) : null,
+    source,
+    sourceKeyword,
+    photos: Array.isArray(payload.photos) ? payload.photos : Array.isArray(payload.media) ? payload.media : [],
+  }, {
+    seenAt: remoteEvent.eventAt || new Date().toISOString(),
+    source,
+    sourceKeyword,
+  });
+  if (source === 'search' && sourceKeyword) {
+    upsertListingSearchKeyword(db, result.row.listing_id, sourceKeyword, {
+      seenAt: remoteEvent.eventAt || new Date().toISOString(),
+    });
+    if (payload.cardTitle || payload.title) {
+      upsertSearchTitleBagKeyword(db, payload.cardTitle || payload.title, {
+        seenAt: remoteEvent.eventAt || new Date().toISOString(),
+        sourceKeyword,
+      });
+    }
+    upsertSearchTitleBagKeyword(db, sourceKeyword, {
+      seenAt: remoteEvent.eventAt || new Date().toISOString(),
+      sourceKeyword,
+    });
+  }
 }
 
 function reduceBacklogListingMetadataEvent(db, session, remoteEvent, payload) {

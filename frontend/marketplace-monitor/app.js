@@ -2967,7 +2967,9 @@ function workflowModeLabel(workflow) {
   }
   if (workflow.workerType === 'remote_worker') {
     return workflow.strategy === 'backlog_indexer' ? 'Backlog Indexer'
-      : workflow.label;
+      : workflow.strategy === 'feed' ? 'Homepage Collector'
+        : workflow.strategy === 'explorer' ? 'Search Explorer'
+          : workflow.label;
   }
   if (workflow.workerType === 'profile_onboarder') {
     return workflow.strategy === 'guided_login' ? 'Guided Login'
