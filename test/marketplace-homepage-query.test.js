@@ -8,6 +8,12 @@ const {
   buildCountQuery,
   buildListingsStatsQueries,
 } = require('../scripts/marketplace-homepage-query');
+const {
+  buildListingsQuery: buildPostgresListingsQuery,
+  buildListingIdsQuery: buildPostgresListingIdsQuery,
+  buildCountQuery: buildPostgresCountQuery,
+  buildListingsStatsQueries: buildPostgresListingsStatsQueries,
+} = require('../scripts/marketplace-homepage-query-postgres');
 
 test('parseQuery extracts plain terms and field filters', () => {
   const parsed = parseQuery('nikon status:pending location:vancouver keyword:leica "m6 classic" sort:rank');
@@ -161,4 +167,58 @@ test('buildListingsStatsQueries supports lite KQL filters', () => {
   assert.match(stats.priceSummary.sql, /FROM homepage_listings/);
   assert.doesNotMatch(stats.priceSummary.sql, /LIMIT \? OFFSET \?/);
   assert.deepEqual(stats.priceSummary.params, [1000, '%leica%', '%leica%', 'queued-b']);
+});
+
+
+test('PostgreSQL listing query compiles legacy filters with dollar placeholders', () => {
+  const query = buildPostgresListingsQuery({
+    query: 'leica status:done price:>500',
+    limit: '25',
+    offset: '10',
+  });
+
+  assert.equal(query.parsedQuery.dialect, 'postgres');
+  assert.match(query.sql, /FROM homepage_listings/);
+  assert.match(query.sql, /detail_status = \$11/);
+  assert.match(query.sql, /regexp_match\(detail_price/);
+  assert.match(query.sql, /LIMIT \$13 OFFSET \$14/);
+  assert.doesNotMatch(query.sql, /LIMIT \? OFFSET \?/);
+  assert.equal(query.limit, 25);
+  assert.equal(query.offset, 10);
+  assert.deepEqual(query.params.slice(-4), ['done', 500, 25, 10]);
+});
+
+test('PostgreSQL query helpers compile ids, count, stats, and histogram shapes', () => {
+  const ids = buildPostgresListingIdsQuery({
+    query: 'status != done and title contains "nikon"',
+    sort: 'latest',
+    sortDirection: 'desc',
+  });
+  assert.match(ids.sql, /SELECT listing_id/);
+  assert.match(ids.sql, /detail_status IN \('pending', 'error', 'processing'\)/);
+  assert.match(ids.sql, /detail_status != \$1/);
+  assert.match(ids.sql, /card_title LIKE \$2/);
+  assert.deepEqual(ids.params, ['done', '%nikon%', '%nikon%']);
+
+  const count = buildPostgresCountQuery({
+    query: 'status:pending',
+    excludeListingIds: ['queued-a'],
+  });
+  assert.match(count.sql, /SELECT COUNT\(\*\) AS total/);
+  assert.match(count.sql, /detail_status = \$1/);
+  assert.match(count.sql, /listing_id NOT IN \(\$2\)/);
+  assert.deepEqual(count.params, ['pending', 'queued-a']);
+
+  const stats = buildPostgresListingsStatsQueries({
+    query: 'title contains "pentax" and price >= 2000',
+    excludeListingIds: ['queued-a'],
+  });
+  assert.match(stats.priceSummary.sql, /COUNT\(\*\) AS "totalRows"/);
+  assert.match(stats.priceSummary.sql, /regexp_match\(detail_price/);
+  assert.deepEqual(stats.priceSummary.params, ['%pentax%', '%pentax%', 2000, 'queued-a']);
+
+  const histogram = stats.priceHistogram({ min: 2000, max: 5000, binCount: 6 });
+  assert.match(histogram.sql, /FLOOR\(\(numeric_price - \$7\) \/ \$8\)::BIGINT/);
+  assert.doesNotMatch(histogram.sql, /CAST\(/);
+  assert.deepEqual(histogram.params, ['%pentax%', '%pentax%', 2000, 'queued-a', 5000, 5, 2000, 500]);
 });

@@ -6,7 +6,7 @@ Goal: move the production marketplace database out of the in-process SQLite file
 
 The application is still SQLite-first. `scripts/marketplace-homepage-db.js` owns schema creation and exports synchronous `DatabaseSync` helpers that are used by collectors, resolvers, the monitor server, maintenance jobs, and tests. The production SQLite DB is mounted at `/app/artifacts/marketplace-homepage/marketplace-homepage.db` and is currently several GB.
 
-Because the runtime is not behind a database adapter yet, the first safe milestone is a PostgreSQL shadow copy: export SQLite schema/data, load it into PostgreSQL, verify counts and representative queries, then add the runtime adapter/cutover in a later step.
+The runtime is only partially behind a PostgreSQL-capable read layer. The safe migration path is still: export SQLite schema/data, load it into PostgreSQL, verify counts and representative queries, run read-only PostgreSQL shadow checks, then explicitly cut traffic over after the write path is covered.
 
 ## Artifact Export
 
@@ -47,6 +47,17 @@ psql "$MARKETPLACE_DATABASE_URL" -f "$MIGRATION_DIR/003_verify.sql"
 Every row in `003_verify.sql` must return `status = 'ok'` before the PostgreSQL store is considered a valid shadow copy.
 
 
+## Runtime Read Layer
+
+The listing read query surface now has PostgreSQL compilers alongside the SQLite builders:
+
+- `scripts/lite-kql-postgres.js` compiles Lite KQL listing reads, counts, IDs, and stats with `$n` placeholders.
+- `scripts/marketplace-homepage-query-postgres.js` compiles the legacy listing search syntax with PostgreSQL price extraction, escaping, stats aliases, and histogram SQL.
+- `scripts/marketplace-query-builders.js` selects SQLite or PostgreSQL builders by dialect.
+- `scripts/marketplace-postgres-reader.js` provides an async read adapter for listing rows and result stats using a `pg`-compatible pool.
+
+This is intentionally read-only. It is suitable for shadow-read comparisons against the loaded PostgreSQL copy, but it does not cut over collectors, resolver writes, remote-worker command state, event ingestion, maintenance jobs, or purchase-history writes.
+
 ## Production Shadow Migration Script
 
 After the repo is synced to the production host, the reviewed script can perform the shadow migration end to end:
@@ -73,11 +84,12 @@ Use `--skip-load` to start PostgreSQL and export artifacts without loading, or `
 3. PostgreSQL load completes without rejected rows.
 4. Verification row counts match every exported table.
 5. Representative dashboard/read queries are benchmarked against PostgreSQL.
-6. Runtime code has a database adapter for monitor APIs and workers.
-7. App can run in read-only PostgreSQL shadow mode for comparison.
-8. Writes are cut over only after dual-read or shadow-read checks pass.
-9. SQLite file is retained as rollback source until at least one successful backup/restore drill completes.
+6. Listing read APIs pass shadow-read comparisons through the PostgreSQL read adapter.
+7. Runtime write paths have PostgreSQL adapters or an explicit dual-write plan for monitor APIs and workers.
+8. App can run in read-only PostgreSQL shadow mode for comparison.
+9. Writes are cut over only after dual-read or shadow-read checks pass.
+10. SQLite file is retained as rollback source until at least one successful backup/restore drill completes.
 
 ## Current Limitation
 
-This repository does not yet include the PostgreSQL runtime adapter. The migration exporter creates a verified PostgreSQL shadow copy, but the production app will continue reading/writing SQLite until the adapter and deployment configuration are added and explicitly deployed.
+The repository now includes PostgreSQL migration artifacts and a listing read adapter, but the production app still opens SQLite by default and all write-heavy paths remain SQLite-first. Production will continue reading/writing SQLite until the PostgreSQL service is loaded, shadow reads are verified, write-path adapters are implemented, and deployment configuration is explicitly cut over.
