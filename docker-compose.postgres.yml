@@ -1,7 +1,7 @@
 services:
   marketplace-postgres:
     image: postgres:16
-    container_name: marketplace-postgres
+    container_name: ${MARKETPLACE_POSTGRES_CONTAINER:-marketplace-postgres}
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${MARKETPLACE_POSTGRES_DB:-marketplace}
