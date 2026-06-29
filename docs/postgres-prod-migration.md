@@ -58,7 +58,7 @@ The listing read query surface now has PostgreSQL compilers alongside the SQLite
 
 This is intentionally read-only. It is suitable for shadow-read comparisons against the loaded PostgreSQL copy, but it does not cut over collectors, resolver writes, remote-worker command state, event ingestion, maintenance jobs, or purchase-history writes.
 
-The first runtime write surface with PostgreSQL-capable code is the remote backlog-indexer claim store in `scripts/remote-worker-postgres-store.js`. It covers session lookup, backlog-indexer candidate selection, claim creation, lease renewal, and lease completion through a `pg`-compatible pool. It is not enabled by default yet; the next cutover step is to route `/api/v2/remote-workers/*` to this store under an explicit PostgreSQL runtime flag after session registration, heartbeat, event ingest, artifact ingest, and command ACK paths are covered.
+The first runtime write surface with PostgreSQL-capable code is the remote worker store in `scripts/remote-worker-postgres-store.js`. It covers session registration, heartbeat projection, session lookup, command creation, command polling/ACK, backlog-indexer candidate selection, claim creation, lease renewal, and lease completion through a `pg`-compatible pool. It is not enabled by default yet; the next cutover step is to cover event ingest/artifact ingest reducers and then route `/api/v2/remote-workers/*` to this store under an explicit PostgreSQL runtime flag.
 
 
 ## Shadow Read Comparison

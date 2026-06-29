@@ -35,6 +35,10 @@ function buildRemoteLeaseId() {
   return randomId('remote-lease');
 }
 
+function buildRemoteSessionId() {
+  return randomId('remote-session');
+}
+
 function requirePgPool() {
   try {
     return require('pg').Pool;
@@ -115,6 +119,7 @@ function createPoolFromOptions(options = {}) {
 function createRemoteWorkerPostgresStore(options = {}) {
   const pool = createPoolFromOptions(options);
   const idFactory = {
+    sessionId: options.idFactory?.sessionId || buildRemoteSessionId,
     commandId: options.idFactory?.commandId || buildRemoteCommandId,
     claimId: options.idFactory?.claimId || buildRemoteClaimId,
     leaseId: options.idFactory?.leaseId || buildRemoteLeaseId,
@@ -155,12 +160,263 @@ function createRemoteWorkerPostgresStore(options = {}) {
     `, [String(sessionId || '').trim()]);
   }
 
+  async function insertRemoteWorkflowRun(session, now, client = pool) {
+    await client.query(`
+      INSERT INTO workflow_runs (
+        run_id,
+        workflow_id,
+        label,
+        script,
+        args_json,
+        pid,
+        status,
+        started_at,
+        updated_at,
+        os_alive,
+        logs_json
+      ) VALUES ($1, $2, $3, 'remote-worker', '[]', NULL, 'running', $4, $5, 1, '[]')
+    `, [
+      session.session_id,
+      `remote-${session.worker_type}`,
+      `Remote ${session.worker_type}`,
+      now,
+      now,
+    ]);
+  }
+
+  async function registerRemoteWorkerSession(body = {}) {
+    const now = nowIso();
+    const sessionId = String(body.sessionId || body.session_id || idFactory.sessionId()).trim();
+    const workerId = String(body.workerId || '').trim();
+    const workerType = String(body.workerType || '').trim();
+    const strategy = String(body.strategy || '').trim();
+    if (!workerId || !workerType) {
+      throw makeHttpError('workerId and workerType are required.', 400, 'invalid_remote_worker_session');
+    }
+    const lastLocalSequence = Number(body.lastCheckpoint?.lastLocalSequence || 0);
+    const lastAckedSequence = Number(body.lastCheckpoint?.lastAckedSequence || 0);
+    await withTransaction(async (client) => {
+      const session = {
+        session_id: sessionId,
+        worker_id: workerId,
+        worker_type: workerType,
+        strategy,
+      };
+      await client.query(`
+        INSERT INTO remote_worker_sessions (
+          session_id,
+          worker_id,
+          worker_type,
+          strategy,
+          worker_version,
+          source_id,
+          capabilities_json,
+          status,
+          liveness_state,
+          last_local_sequence,
+          last_acked_sequence,
+          pending_event_count,
+          registered_at,
+          last_seen_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'registered', 'online', $8, $9, 0, $10, $11, $12)
+      `, [
+        sessionId,
+        workerId,
+        workerType,
+        strategy,
+        String(body.workerVersion || '').trim(),
+        String(body.sourceId || '').trim(),
+        safeJson(body.capabilities || {}),
+        lastLocalSequence,
+        lastAckedSequence,
+        now,
+        now,
+        now,
+      ]);
+      await insertRemoteWorkflowRun(session, now, client);
+    });
+    return {
+      sessionId,
+      status: 'registered',
+      hostCheckpoint: {
+        lastAcceptedSequence: lastAckedSequence,
+      },
+    };
+  }
+
+  async function updateRemoteWorkerHeartbeat(sessionId, body = {}) {
+    const session = await getRemoteWorkerSession(sessionId);
+    if (!session) {
+      throw makeHttpError(`Unknown remote worker session: ${sessionId}`, 404, 'remote_worker_session_not_found');
+    }
+    if (String(body.workerId || '').trim() !== session.worker_id) {
+      throw makeHttpError('workerId does not match remote worker session.', 409, 'remote_worker_session_mismatch');
+    }
+    const now = nowIso();
+    await withTransaction(async (client) => {
+      await client.query(`
+        UPDATE remote_worker_sessions
+        SET
+          runtime_state = $1,
+          liveness_state = 'online',
+          last_local_sequence = $2,
+          pending_event_count = $3,
+          last_seen_at = $4,
+          updated_at = $5
+        WHERE session_id = $6
+      `, [
+        String(body.runtimeState || '').trim(),
+        Number(body.lastLocalSequence || 0),
+        Number(body.pendingEventCount || 0),
+        now,
+        now,
+        session.session_id,
+      ]);
+      await client.query(`
+        UPDATE workflow_runs
+        SET status = 'running', updated_at = $1, os_alive = 1
+        WHERE run_id = $2
+      `, [now, session.session_id]);
+    });
+    const updated = await getRemoteWorkerSession(sessionId);
+    return {
+      status: 'ok',
+      hostCheckpoint: {
+        lastAcceptedSequence: Number(updated?.last_acked_sequence || 0),
+      },
+    };
+  }
+
   async function touchRemoteWorkerSession(sessionId, client = pool) {
     await client.query(`
       UPDATE remote_worker_sessions
       SET last_seen_at = $1, liveness_state = 'online'
       WHERE session_id = $2
     `, [nowIso(), String(sessionId || '').trim()]);
+  }
+
+  async function createRemoteWorkerCommand(command = {}, client = pool) {
+    const commandType = String(command.commandType || command.command_type || command.type || '').trim();
+    if (!commandType) {
+      throw new Error('remote worker command requires commandType');
+    }
+    const now = command.createdAt || nowIso();
+    const commandId = String(command.commandId || command.command_id || idFactory.commandId()).trim();
+    await client.query(`
+      INSERT INTO remote_worker_commands (
+        command_id,
+        session_id,
+        worker_id,
+        worker_type,
+        strategy,
+        type,
+        command_type,
+        payload_json,
+        priority,
+        status,
+        created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10)
+    `, [
+      commandId,
+      String(command.sessionId || command.session_id || '').trim(),
+      String(command.workerId || command.worker_id || '').trim(),
+      String(command.workerType || command.worker_type || '').trim(),
+      String(command.strategy || '').trim(),
+      commandType,
+      commandType,
+      safeJson(command.payload || {}),
+      Number.isFinite(Number(command.priority)) ? Number(command.priority) : 0,
+      now,
+    ]);
+    return commandId;
+  }
+
+  async function listRemoteWorkerCommands(sessionId, input = {}) {
+    const session = await getRemoteWorkerSession(sessionId);
+    if (!session) {
+      throw makeHttpError(`Unknown remote worker session: ${sessionId}`, 404, 'remote_worker_session_not_found');
+    }
+    const limit = boundedInteger(input.limit, 25, 1, 100);
+    const now = nowIso();
+    const rows = await queryRows(pool, `
+      SELECT *
+      FROM remote_worker_commands
+      WHERE status = 'queued'
+        AND (session_id = '' OR session_id = $1)
+        AND (worker_id = '' OR worker_id = $2)
+        AND (worker_type = '' OR worker_type = $3)
+        AND (strategy = '' OR strategy = $4)
+      ORDER BY priority DESC, created_at ASC
+      LIMIT $5
+    `, [session.session_id, session.worker_id, session.worker_type, session.strategy, limit]);
+    if (rows.length > 0) {
+      await withTransaction(async (client) => {
+        for (const row of rows) {
+          await client.query(`
+            UPDATE remote_worker_commands
+            SET delivered_at = CASE WHEN delivered_at = '' THEN $1 ELSE delivered_at END
+            WHERE command_id = $2
+          `, [now, row.command_id]);
+        }
+        await touchRemoteWorkerSession(session.session_id, client);
+      });
+    }
+    return {
+      commands: rows.map((row) => ({
+        commandId: row.command_id,
+        commandType: row.command_type,
+        payload: parseListingDetailJson({ detail_json: row.payload_json }),
+        priority: Number(row.priority) || 0,
+        createdAt: row.created_at,
+        deliveredAt: row.delivered_at || now,
+      })),
+    };
+  }
+
+  async function ackRemoteWorkerCommand(sessionId, commandId, body = {}) {
+    const session = await getRemoteWorkerSession(sessionId);
+    if (!session) {
+      throw makeHttpError(`Unknown remote worker session: ${sessionId}`, 404, 'remote_worker_session_not_found');
+    }
+    const command = await queryOne(pool, `
+      SELECT *
+      FROM remote_worker_commands
+      WHERE command_id = $1
+    `, [String(commandId || '').trim()]);
+    if (!command) {
+      throw makeHttpError(`Unknown remote worker command: ${commandId}`, 404, 'remote_worker_command_not_found');
+    }
+    const matchesSession = !command.session_id || command.session_id === session.session_id;
+    const matchesWorker = !command.worker_id || command.worker_id === session.worker_id;
+    if (!matchesSession || !matchesWorker) {
+      throw makeHttpError('Command does not belong to this remote worker session.', 409, 'remote_worker_command_mismatch');
+    }
+    const ackStatus = String(body.status || body.ackStatus || 'acked').trim();
+    const terminalStatus = ackStatus === 'failed' ? 'failed' : 'acked';
+    const now = nowIso();
+    await pool.query(`
+      UPDATE remote_worker_commands
+      SET
+        status = $1,
+        ack_status = $2,
+        ack_payload_json = $3,
+        acked_at = $4,
+        last_error = $5
+      WHERE command_id = $6
+    `, [
+      terminalStatus,
+      ackStatus,
+      safeJson(body.payload || {}),
+      now,
+      String(body.error || '').trim(),
+      command.command_id,
+    ]);
+    return {
+      status: terminalStatus,
+      commandId: command.command_id,
+      ackStatus,
+    };
   }
 
   async function listRemoteBacklogIndexerCandidates(input = {}, client = pool) {
@@ -419,6 +675,11 @@ function createRemoteWorkerPostgresStore(options = {}) {
     dialect: 'postgres',
     pool,
     getRemoteWorkerSession,
+    registerRemoteWorkerSession,
+    updateRemoteWorkerHeartbeat,
+    createRemoteWorkerCommand,
+    listRemoteWorkerCommands,
+    ackRemoteWorkerCommand,
     listRemoteBacklogIndexerCandidates,
     createBacklogIndexerClaim,
     claimRemoteWorkerWork,
