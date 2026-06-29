@@ -22,6 +22,7 @@ Options:
   --skip-export             Reuse an existing artifact directory.
   --skip-load               Start PostgreSQL and export only.
   --skip-start              Do not start PostgreSQL.
+  --skip-shadow-compare     Do not run SQLite-vs-PostgreSQL listing query comparison.
   --drop-existing           Include DROP TABLE statements in generated schema. Default: on.
   --no-drop-existing        Do not include DROP TABLE statements.
   -h, --help                Show this help.
@@ -38,6 +39,7 @@ MIGRATION_NAME="prod-$(date -u +%Y%m%dT%H%M%SZ)"
 SKIP_EXPORT=0
 SKIP_LOAD=0
 SKIP_START=0
+SKIP_SHADOW_COMPARE=0
 DROP_EXISTING=1
 
 while [[ $# -gt 0 ]]; do
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --skip-export) SKIP_EXPORT=1; shift ;;
     --skip-load) SKIP_LOAD=1; shift ;;
     --skip-start) SKIP_START=1; shift ;;
+    --skip-shadow-compare) SKIP_SHADOW_COMPARE=1; shift ;;
     --drop-existing) DROP_EXISTING=1; shift ;;
     --no-drop-existing) DROP_EXISTING=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -72,6 +75,10 @@ if [[ ! -f docker-compose.postgres.yml ]]; then
 fi
 if [[ ! -f scripts/export-marketplace-postgres-migration.js ]]; then
   echo "Missing scripts/export-marketplace-postgres-migration.js in $PROJECT_DIR" >&2
+  exit 1
+fi
+if [[ ! -f scripts/compare-marketplace-postgres-shadow.js ]]; then
+  echo "Missing scripts/compare-marketplace-postgres-shadow.js in $PROJECT_DIR" >&2
   exit 1
 fi
 
@@ -149,6 +156,18 @@ if [[ "$SKIP_LOAD" -ne 1 ]]; then
   if grep -q 'mismatch' "$MIGRATION_HOST_DIR/verify-output.txt"; then
     echo "PostgreSQL verification reported mismatches." >&2
     exit 1
+  fi
+
+  if [[ "$SKIP_SHADOW_COMPARE" -ne 1 ]]; then
+    echo "==> Comparing representative SQLite and PostgreSQL listing reads"
+    node scripts/compare-marketplace-postgres-shadow.js \
+      --sqlite-container "$APP_CONTAINER" \
+      --sqlite-db "$SQLITE_DB" \
+      --postgres-container "$POSTGRES_CONTAINER" \
+      --postgres-user "$MARKETPLACE_POSTGRES_USER" \
+      --postgres-db "$MARKETPLACE_POSTGRES_DB" \
+      --output "$MIGRATION_HOST_DIR/shadow-compare.json" \
+      --fail-fast
   fi
 fi
 

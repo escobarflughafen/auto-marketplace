@@ -19,13 +19,17 @@ const DEFAULT_PROBES = [
 ];
 
 function usage() {
-  process.stdout.write(`Usage:\n  node scripts/compare-marketplace-postgres-shadow.js [options]\n\nOptions:\n  --sqlite-db PATH        SQLite DB path. Default: artifacts/marketplace-homepage/marketplace-homepage.db\n  --postgres-url URL      PostgreSQL URL. Default: MARKETPLACE_POSTGRES_URL or DATABASE_URL\n  --query QUERY           Add a query probe. Repeatable. Defaults to representative probes.\n  --limit N               Limit for --query probes. Default: 10\n  --output PATH           Write JSON report to a file.\n  --json                  Print JSON report instead of text summary.\n  --fail-fast             Stop after the first mismatch/error.\n  -h, --help              Show this help.\n`);
+  process.stdout.write(`Usage:\n  node scripts/compare-marketplace-postgres-shadow.js [options]\n\nOptions:\n  --sqlite-db PATH        SQLite DB path. Default: artifacts/marketplace-homepage/marketplace-homepage.db\n  --sqlite-container NAME Run SQLite queries inside this app container.\n  --postgres-url URL      PostgreSQL URL. Default: MARKETPLACE_POSTGRES_URL or DATABASE_URL\n  --postgres-container NAME\n                           Run psql inside this PostgreSQL container.\n  --postgres-user USER    PostgreSQL user for --postgres-container. Default: marketplace\n  --postgres-db DB        PostgreSQL database for --postgres-container. Default: marketplace\n  --query QUERY           Add a query probe. Repeatable. Defaults to representative probes.\n  --limit N               Limit for --query probes. Default: 10\n  --output PATH           Write JSON report to a file.\n  --json                  Print JSON report instead of text summary.\n  --fail-fast             Stop after the first mismatch/error.\n  -h, --help              Show this help.\n`);
 }
 
 function parseArgs(argv) {
   const options = {
     sqliteDb: DEFAULT_DB_PATH,
     postgresUrl: process.env.MARKETPLACE_POSTGRES_URL || process.env.DATABASE_URL || '',
+    sqliteContainer: '',
+    postgresContainer: '',
+    postgresUser: process.env.MARKETPLACE_POSTGRES_USER || 'marketplace',
+    postgresDb: process.env.MARKETPLACE_POSTGRES_DB || 'marketplace',
     queries: [],
     limit: 10,
     output: '',
@@ -38,8 +42,20 @@ function parseArgs(argv) {
       case '--sqlite-db':
         options.sqliteDb = argv[++index] || '';
         break;
+      case '--sqlite-container':
+        options.sqliteContainer = argv[++index] || '';
+        break;
       case '--postgres-url':
         options.postgresUrl = argv[++index] || '';
+        break;
+      case '--postgres-container':
+        options.postgresContainer = argv[++index] || '';
+        break;
+      case '--postgres-user':
+        options.postgresUser = argv[++index] || '';
+        break;
+      case '--postgres-db':
+        options.postgresDb = argv[++index] || '';
         break;
       case '--query':
         options.queries.push(argv[++index] || '');
@@ -94,6 +110,74 @@ function inlinePostgresParams(sql, params = []) {
 
 function wrapRowsJsonSql(sql) {
   return `SELECT COALESCE(json_agg(row_to_json(_shadow_rows)), '[]'::json) AS rows FROM (${sql}) _shadow_rows`;
+}
+
+
+function runSqliteContainerRows(containerName, dbPath, spec, runner = spawnSync) {
+  const request = JSON.stringify({ sql: spec.sql, params: spec.params || [] });
+  const script = `
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(process.argv[1], { readOnly: true });
+const request = JSON.parse(process.argv[2]);
+try {
+  const rows = db.prepare(request.sql).all(...(request.params || []));
+  process.stdout.write(JSON.stringify(rows));
+} finally {
+  db.close();
+}
+`;
+  const result = runner('docker', [
+    'exec',
+    '-i',
+    containerName,
+    'node',
+    '-e',
+    script,
+    dbPath,
+    request,
+  ], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024 * 64,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const error = new Error(`docker sqlite query failed with status ${result.status}: ${String(result.stderr || '').trim()}`);
+    error.status = result.status;
+    throw error;
+  }
+  return normalizeRows(JSON.parse(String(result.stdout || '[]')));
+}
+
+function runPsqlContainerJson(containerName, sql, options = {}, runner = spawnSync) {
+  const result = runner('docker', [
+    'exec',
+    '-i',
+    containerName,
+    'psql',
+    '-X',
+    '-A',
+    '-t',
+    '-q',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-U',
+    options.postgresUser || 'marketplace',
+    '-d',
+    options.postgresDb || 'marketplace',
+    '-c',
+    sql,
+  ], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024 * 64,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const error = new Error(`docker psql failed with status ${result.status}: ${String(result.stderr || '').trim()}`);
+    error.status = result.status;
+    throw error;
+  }
+  const text = String(result.stdout || '').trim();
+  return text ? JSON.parse(text) : [];
 }
 
 function runPsqlJson(postgresUrl, sql, runner = spawnSync) {
@@ -151,21 +235,28 @@ function diffValues(expected, actual) {
   return { expected, actual };
 }
 
-function sqliteAll(db, spec) {
-  return normalizeRows(db.prepare(spec.sql).all(...(spec.params || [])));
+function sqliteAll(source, spec, runner) {
+  if (source.sqliteContainer) {
+    return runSqliteContainerRows(source.sqliteContainer, source.sqliteDb, spec, runner);
+  }
+  return normalizeRows(source.db.prepare(spec.sql).all(...(spec.params || [])));
 }
 
-function sqliteGet(db, spec) {
-  return normalizeRows([db.prepare(spec.sql).get(...(spec.params || [])) || {}])[0];
+function sqliteGet(source, spec, runner) {
+  const rows = sqliteAll(source, spec, runner);
+  return rows[0] || {};
 }
 
-function postgresAll(postgresUrl, spec, runner) {
+function postgresAll(source, spec, runner) {
   const sql = wrapRowsJsonSql(inlinePostgresParams(spec.sql, spec.params));
-  return normalizeRows(runPsqlJson(postgresUrl, sql, runner));
+  if (source.postgresContainer) {
+    return normalizeRows(runPsqlContainerJson(source.postgresContainer, sql, source, runner));
+  }
+  return normalizeRows(runPsqlJson(source.postgresUrl, sql, runner));
 }
 
-function postgresGet(postgresUrl, spec, runner) {
-  const rows = postgresAll(postgresUrl, spec, runner);
+function postgresGet(source, spec, runner) {
+  const rows = postgresAll(source, spec, runner);
   return rows[0] || {};
 }
 
@@ -187,7 +278,7 @@ function probesForOptions(options) {
   return DEFAULT_PROBES;
 }
 
-function compareProbe(db, postgresUrl, probe, runner) {
+function compareProbe(source, probe, runner) {
   const listingOptions = {
     query: probe.query,
     limit: probe.limit,
@@ -202,14 +293,14 @@ function compareProbe(db, postgresUrl, probe, runner) {
   const sqliteStatsQueries = sqliteQueries.buildListingsStatsQueries({ query: probe.query });
   const postgresStatsQueries = postgresQueries.buildListingsStatsQueries({ query: probe.query });
 
-  const sqliteRows = sqliteAll(db, sqliteListingQuery);
-  const postgresRows = postgresAll(postgresUrl, postgresListingQuery, runner);
+  const sqliteRows = sqliteAll(source, sqliteListingQuery, runner);
+  const postgresRows = postgresAll(source, postgresListingQuery, runner);
   const sqliteIds = sqliteRows.map((row) => row.listing_id);
   const postgresIds = postgresRows.map((row) => row.listing_id);
-  const sqliteCount = sqliteGet(db, sqliteCountQuery);
-  const postgresCount = postgresGet(postgresUrl, postgresCountQuery, runner);
-  const sqliteSummary = sqliteGet(db, sqliteStatsQueries.priceSummary);
-  const postgresSummary = postgresGet(postgresUrl, postgresStatsQueries.priceSummary, runner);
+  const sqliteCount = sqliteGet(source, sqliteCountQuery, runner);
+  const postgresCount = postgresGet(source, postgresCountQuery, runner);
+  const sqliteSummary = sqliteGet(source, sqliteStatsQueries.priceSummary, runner);
+  const postgresSummary = postgresGet(source, postgresStatsQueries.priceSummary, runner);
 
   const checks = [
     { name: 'listing_ids', diff: diffValues(sqliteIds, postgresIds) },
@@ -228,17 +319,30 @@ function compareProbe(db, postgresUrl, probe, runner) {
 }
 
 function compareShadow(options, runner = spawnSync) {
-  const sqliteDb = resolveDbPath(options.sqliteDb || DEFAULT_DB_PATH);
-  if (!options.postgresUrl) throw new Error('Missing --postgres-url or MARKETPLACE_POSTGRES_URL.');
-  if (!fs.existsSync(sqliteDb)) throw new Error(`SQLite DB not found: ${sqliteDb}`);
-  const { DatabaseSync } = require('node:sqlite');
-  const db = new DatabaseSync(sqliteDb, { readOnly: true });
+  const sqliteDb = options.sqliteContainer
+    ? (options.sqliteDb || DEFAULT_DB_PATH)
+    : resolveDbPath(options.sqliteDb || DEFAULT_DB_PATH);
+  if (!options.postgresUrl && !options.postgresContainer) throw new Error('Missing --postgres-url, --postgres-container, MARKETPLACE_POSTGRES_URL, or DATABASE_URL.');
+  if (!options.sqliteContainer && !fs.existsSync(sqliteDb)) throw new Error(`SQLite DB not found: ${sqliteDb}`);
+  const source = {
+    sqliteDb,
+    sqliteContainer: options.sqliteContainer || '',
+    postgresUrl: options.postgresUrl || '',
+    postgresContainer: options.postgresContainer || '',
+    postgresUser: options.postgresUser || 'marketplace',
+    postgresDb: options.postgresDb || 'marketplace',
+    db: null,
+  };
+  if (!source.sqliteContainer) {
+    const { DatabaseSync } = require('node:sqlite');
+    source.db = new DatabaseSync(sqliteDb, { readOnly: true });
+  }
   const startedAt = new Date().toISOString();
   const probes = [];
   try {
     for (const probe of probesForOptions(options)) {
       try {
-        probes.push(compareProbe(db, options.postgresUrl, probe, runner));
+        probes.push(compareProbe(source, probe, runner));
       } catch (error) {
         probes.push({ name: probe.name, query: probe.query, ok: false, error: error.message });
         if (options.failFast) break;
@@ -246,7 +350,7 @@ function compareShadow(options, runner = spawnSync) {
       if (options.failFast && probes.at(-1)?.ok === false) break;
     }
   } finally {
-    db.close();
+    if (source.db) source.db.close();
   }
   const failed = probes.filter((probe) => !probe.ok).length;
   return {
@@ -303,6 +407,8 @@ module.exports = {
   wrapRowsJsonSql,
   normalizeRows,
   diffValues,
+  runSqliteContainerRows,
+  runPsqlContainerJson,
   compareProbe,
   compareShadow,
 };

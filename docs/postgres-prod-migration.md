@@ -70,7 +70,7 @@ npm run marketplace:postgres:shadow-compare -- \
   --output artifacts/postgres-migration/shadow-compare.json
 ```
 
-The comparison script uses the local `psql` client, not the optional Node `pg` adapter. It checks listing IDs, total counts, and price summary aggregates for representative legacy and Lite KQL listing queries. It exits nonzero if any probe differs. Add targeted probes with repeated `--query` flags when validating a known dashboard workflow.
+The comparison script can use the local `psql` client, or the production script can run it in container mode by querying SQLite through the app container and PostgreSQL through the PostgreSQL container. It checks listing IDs, total counts, and price summary aggregates for representative legacy and Lite KQL listing queries. It exits nonzero if any probe differs. Add targeted probes with repeated `--query` flags when validating a known dashboard workflow.
 
 ## Production Shadow Migration Script
 
@@ -88,8 +88,9 @@ The script:
 3. Exports the current production SQLite DB into `artifacts/postgres-migration/<migration-name>`.
 4. Loads schema and data into PostgreSQL.
 5. Writes row-count verification output to `verify-output.txt`.
+6. Runs representative SQLite-vs-PostgreSQL listing read comparisons and writes `shadow-compare.json` unless `--skip-shadow-compare` is passed.
 
-Use `--skip-load` to start PostgreSQL and export artifacts without loading, or `--skip-export --migration-name <name>` to retry loading an existing export.
+Use `--skip-load` to start PostgreSQL and export artifacts without loading, `--skip-export --migration-name <name>` to retry loading an existing export, or `--skip-shadow-compare` for generic schema smoke tests that do not contain marketplace listing tables.
 
 ## Cutover Gates
 

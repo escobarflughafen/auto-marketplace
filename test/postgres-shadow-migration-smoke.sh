@@ -54,6 +54,7 @@ trap cleanup EXIT
 
 mkdir -p "$project/scripts" "$project/ops" "$project/artifacts/marketplace-homepage" "$project/artifacts/postgres-migration"
 cp "$repo_root/scripts/export-marketplace-postgres-migration.js" "$project/scripts/"
+cp "$repo_root/scripts/compare-marketplace-postgres-shadow.js" "$project/scripts/"
 cp "$repo_root/ops/postgres-prod-shadow-migration.sh" "$project/ops/"
 cp "$repo_root/docker-compose.postgres.yml" "$project/"
 cat > "$project/package.json" <<'JSON'
@@ -108,7 +109,8 @@ ops/postgres-prod-shadow-migration.sh \
   --postgres-container "$postgres_container" \
   --env-file .postgres-migration.env \
   --migration-name smoke \
-  --sqlite-db /app/artifacts/marketplace-homepage/marketplace-homepage.db
+  --sqlite-db /app/artifacts/marketplace-homepage/marketplace-homepage.db \
+  --skip-shadow-compare
 
 grep -q 'smoke_items' artifacts/postgres-migration/smoke/verify-output.txt
 grep -q 'ok' artifacts/postgres-migration/smoke/verify-output.txt

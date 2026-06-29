@@ -16,6 +16,8 @@ const {
   inlinePostgresParams,
   wrapRowsJsonSql,
   normalizeRows,
+  runSqliteContainerRows,
+  runPsqlContainerJson,
   diffValues,
   compareShadow,
 } = require('../scripts/compare-marketplace-postgres-shadow');
@@ -136,4 +138,35 @@ test('compareShadow reports matching SQLite and PostgreSQL shadow probes', () =>
   } finally {
     fake.close();
   }
+});
+
+
+test('container query helpers execute SQLite and psql through docker exec', () => {
+  const calls = [];
+  const runner = (cmd, args) => {
+    calls.push({ cmd, args });
+    if (args.includes('node')) {
+      return { status: 0, stdout: '[{"listing_id":"listing-a","numeric_price":"1200"}]', stderr: '' };
+    }
+    return { status: 0, stdout: '[{"total":"2"}]', stderr: '' };
+  };
+
+  const sqliteRows = runSqliteContainerRows('auto-browser', '/app/db.sqlite', {
+    sql: 'SELECT listing_id FROM homepage_listings WHERE detail_status = ?',
+    params: ['done'],
+  }, runner);
+  assert.deepEqual(sqliteRows, [{ listing_id: 'listing-a', numeric_price: 1200 }]);
+  assert.equal(calls[0].cmd, 'docker');
+  assert.deepEqual(calls[0].args.slice(0, 4), ['exec', '-i', 'auto-browser', 'node']);
+  assert.equal(calls[0].args.at(-2), '/app/db.sqlite');
+
+  const postgresRows = runPsqlContainerJson('marketplace-postgres', 'SELECT 1', {
+    postgresUser: 'marketplace',
+    postgresDb: 'marketplace',
+  }, runner);
+  assert.deepEqual(postgresRows, [{ total: '2' }]);
+  assert.equal(calls[1].cmd, 'docker');
+  assert.deepEqual(calls[1].args.slice(0, 5), ['exec', '-i', 'marketplace-postgres', 'psql', '-X']);
+  assert.ok(calls[1].args.includes('-U'));
+  assert.ok(calls[1].args.includes('marketplace'));
 });
