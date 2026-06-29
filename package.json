@@ -31,7 +31,8 @@
     "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh",
     "marketplace:postgres:export": "node scripts/export-marketplace-postgres-migration.js",
     "marketplace:postgres:shadow-compare": "node scripts/compare-marketplace-postgres-shadow.js",
-    "marketplace:postgres:status": "node scripts/postgres-migration-status.js"
+    "marketplace:postgres:status": "node scripts/postgres-migration-status.js",
+    "marketplace:postgres:cutover:inventory": "node scripts/postgres-cutover-inventory.js"
   },
   "dependencies": {
     "playwright": "^1.58.2",

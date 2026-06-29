@@ -104,6 +104,18 @@ The script:
 
 Use `--skip-load` to start PostgreSQL and export artifacts without loading, `--skip-export --migration-name <name>` to retry loading an existing export, or `--skip-shadow-compare` for generic schema smoke tests that do not contain marketplace listing tables.
 
+
+## Cutover Inventory
+
+Use the cutover inventory command to keep the remaining PostgreSQL runtime work explicit:
+
+```bash
+npm run marketplace:postgres:cutover:inventory -- --json
+npm run marketplace:postgres:cutover:inventory -- --strict
+```
+
+The inventory classifies every export from `scripts/marketplace-homepage-db.js` as pure, read, write, transaction, maintenance, or runtime. `--strict` intentionally fails until each DB helper needed for cutover has PostgreSQL coverage or an explicit replacement. This is the working backlog for moving from shadow-read readiness to real runtime cutover.
+
 ## Cutover Gates
 
 1. PostgreSQL service exists on separate storage with backups configured.
@@ -114,10 +126,11 @@ Use `--skip-load` to start PostgreSQL and export artifacts without loading, `--s
 6. `npm run marketplace:postgres:shadow-compare` passes against the loaded PostgreSQL copy.
 7. `npm run marketplace:postgres:status -- --strict` passes on the production host.
 8. Listing read APIs pass shadow-read comparisons through the PostgreSQL read adapter.
-9. Runtime write paths have PostgreSQL adapters or an explicit dual-write plan for monitor APIs and workers.
-10. App can run in read-only PostgreSQL shadow mode for comparison.
-11. Writes are cut over only after dual-read or shadow-read checks pass.
-12. SQLite file is retained as rollback source until at least one successful backup/restore drill completes.
+9. `npm run marketplace:postgres:cutover:inventory -- --strict` has no remaining required DB-helper gaps.
+10. Runtime write paths have PostgreSQL adapters or an explicit dual-write plan for monitor APIs and workers.
+11. App can run in read-only PostgreSQL shadow mode for comparison.
+12. Writes are cut over only after dual-read or shadow-read checks pass.
+13. SQLite file is retained as rollback source until at least one successful backup/restore drill completes.
 
 ## Current Limitation
 
