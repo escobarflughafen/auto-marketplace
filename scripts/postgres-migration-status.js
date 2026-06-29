@@ -1,0 +1,252 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+function usage() {
+  process.stdout.write(`Usage:\n  node scripts/postgres-migration-status.js [options]\n\nOptions:\n  --project-dir DIR          Project dir. Default: current directory.\n  --env-file FILE            PostgreSQL env file. Default: .postgres-migration.env\n  --migration-name NAME      Artifact directory under artifacts/postgres-migration. Default: latest.\n  --postgres-container NAME  PostgreSQL container override.\n  --json                     Print JSON report.\n  --strict                   Exit nonzero unless all readiness checks pass.\n  -h, --help                 Show this help.\n`);
+}
+
+function parseArgs(argv) {
+  const options = {
+    projectDir: process.cwd(),
+    envFile: '.postgres-migration.env',
+    migrationName: '',
+    postgresContainer: '',
+    json: false,
+    strict: false,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case '--project-dir':
+        options.projectDir = argv[++index] || '';
+        break;
+      case '--env-file':
+        options.envFile = argv[++index] || '';
+        break;
+      case '--migration-name':
+        options.migrationName = argv[++index] || '';
+        break;
+      case '--postgres-container':
+        options.postgresContainer = argv[++index] || '';
+        break;
+      case '--json':
+        options.json = true;
+        break;
+      case '--strict':
+        options.strict = true;
+        break;
+      case '-h':
+      case '--help':
+        options.help = true;
+        break;
+      default:
+        throw new Error(`Unknown option: ${arg}`);
+    }
+  }
+  return options;
+}
+
+function readEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const env = {};
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    let value = match[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    env[match[1]] = value;
+  }
+  return env;
+}
+
+function check(name, ok, details = {}) {
+  return { ...details, name, ok: Boolean(ok) };
+}
+
+function latestMigrationName(root) {
+  if (!fs.existsSync(root)) return '';
+  const entries = fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const fullPath = path.join(root, entry.name);
+      return { name: entry.name, mtimeMs: fs.statSync(fullPath).mtimeMs };
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs);
+  return entries[0]?.name || '';
+}
+
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+function runDocker(args, runner = spawnSync) {
+  const result = runner('docker', args, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 16 });
+  if (result.error) return { ok: false, error: result.error.message, stdout: '', stderr: '' };
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    stdout: String(result.stdout || '').trim(),
+    stderr: String(result.stderr || '').trim(),
+  };
+}
+
+function inspectContainer(containerName, runner = spawnSync) {
+  if (!containerName) return { exists: false, running: false, health: '', error: 'missing container name' };
+  const result = runDocker(['inspect', '--format', '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}', containerName], runner);
+  if (!result.ok) return { exists: false, running: false, health: '', error: result.stderr || result.error || 'docker inspect failed' };
+  const [running, health = ''] = result.stdout.split(/\s+/);
+  return { exists: true, running: running === 'true', health };
+}
+
+function pgIsReady(containerName, user, database, runner = spawnSync) {
+  if (!containerName) return { ok: false, error: 'missing container name' };
+  const result = runDocker(['exec', containerName, 'pg_isready', '-U', user, '-d', database], runner);
+  return { ok: result.ok, output: result.stdout || result.stderr || result.error || '' };
+}
+
+function postgresTableCount(containerName, user, database, runner = spawnSync) {
+  if (!containerName) return { ok: false, count: null, error: 'missing container name' };
+  const sql = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE';";
+  const result = runDocker(['exec', '-i', containerName, 'psql', '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', database, '-c', sql], runner);
+  if (!result.ok) return { ok: false, count: null, error: result.stderr || result.error || 'psql failed' };
+  const count = Number.parseInt(result.stdout, 10);
+  return { ok: Number.isFinite(count), count: Number.isFinite(count) ? count : null };
+}
+
+function verifyOutputStatus(filePath) {
+  if (!fs.existsSync(filePath)) return { exists: false, ok: false, mismatches: null };
+  const text = fs.readFileSync(filePath, 'utf8');
+  const mismatches = /mismatch/i.test(text);
+  const hasOk = /\bok\b/i.test(text);
+  return { exists: true, ok: hasOk && !mismatches, mismatches };
+}
+
+function shadowCompareStatus(filePath) {
+  if (!fs.existsSync(filePath)) return { exists: false, ok: false };
+  const parsed = readJsonFile(filePath);
+  if (parsed.error) return { exists: true, ok: false, error: parsed.error };
+  return {
+    exists: true,
+    ok: parsed.ok === true,
+    probeCount: parsed.probeCount ?? null,
+    failed: parsed.failed ?? null,
+  };
+}
+
+function buildStatusReport(options = {}, runner = spawnSync) {
+  const projectDir = path.resolve(options.projectDir || process.cwd());
+  const envFileOption = options.envFile || '.postgres-migration.env';
+  const envFile = path.isAbsolute(envFileOption) ? envFileOption : path.join(projectDir, envFileOption);
+  const env = readEnvFile(envFile);
+  const postgresContainer = options.postgresContainer || env.MARKETPLACE_POSTGRES_CONTAINER || 'marketplace-postgres';
+  const postgresUser = env.MARKETPLACE_POSTGRES_USER || 'marketplace';
+  const postgresDb = env.MARKETPLACE_POSTGRES_DB || 'marketplace';
+  const migrationRoot = path.join(projectDir, 'artifacts', 'postgres-migration');
+  const migrationName = options.migrationName || latestMigrationName(migrationRoot);
+  const migrationDir = migrationName ? path.join(migrationRoot, migrationName) : '';
+  const manifestPath = migrationDir ? path.join(migrationDir, 'manifest.json') : '';
+  const verifyPath = migrationDir ? path.join(migrationDir, 'verify-output.txt') : '';
+  const comparePath = migrationDir ? path.join(migrationDir, 'shadow-compare.json') : '';
+  const manifest = manifestPath && fs.existsSync(manifestPath) ? readJsonFile(manifestPath) : null;
+  const verify = verifyOutputStatus(verifyPath);
+  const compare = shadowCompareStatus(comparePath);
+  const container = inspectContainer(postgresContainer, runner);
+  const ready = pgIsReady(postgresContainer, postgresUser, postgresDb, runner);
+  const tableCount = postgresTableCount(postgresContainer, postgresUser, postgresDb, runner);
+  const requiredArtifactFiles = ['001_schema.sql', '002_load.sql', '003_verify.sql'];
+  const artifactFiles = Object.fromEntries(requiredArtifactFiles.map((file) => [file, Boolean(migrationDir && fs.existsSync(path.join(migrationDir, file)))]));
+
+  const checks = [
+    check('project_dir', fs.existsSync(projectDir), { path: projectDir }),
+    check('env_file', fs.existsSync(envFile), { path: envFile }),
+    check('compose_overlay', fs.existsSync(path.join(projectDir, 'docker-compose.postgres.yml'))),
+    check('shadow_script', fs.existsSync(path.join(projectDir, 'ops', 'postgres-prod-shadow-migration.sh'))),
+    check('exporter_script', fs.existsSync(path.join(projectDir, 'scripts', 'export-marketplace-postgres-migration.js'))),
+    check('compare_script', fs.existsSync(path.join(projectDir, 'scripts', 'compare-marketplace-postgres-shadow.js'))),
+    check('postgres_container_exists', container.exists, { container: postgresContainer, error: container.error || '' }),
+    check('postgres_container_running', container.running, { health: container.health || '' }),
+    check('postgres_ready', ready.ok, { output: ready.output || '' }),
+    check('migration_dir', Boolean(migrationDir && fs.existsSync(migrationDir)), { migrationName, path: migrationDir }),
+    check('manifest', Boolean(manifest && !manifest.error), { path: manifestPath, tableCount: manifest?.tables?.length ?? null }),
+    check('artifact_files', Object.values(artifactFiles).every(Boolean), { files: artifactFiles }),
+    check('verify_output', verify.ok, verify),
+    check('shadow_compare', compare.ok, compare),
+    check('postgres_loaded_tables', tableCount.ok && tableCount.count > 0, tableCount),
+  ];
+  const ok = checks.every((item) => item.ok);
+  return {
+    ok,
+    checkedAt: new Date().toISOString(),
+    projectDir,
+    envFile,
+    postgres: {
+      container: postgresContainer,
+      user: postgresUser,
+      database: postgresDb,
+      running: container.running,
+      health: container.health || '',
+      ready: ready.ok,
+      tableCount: tableCount.count,
+    },
+    migration: {
+      name: migrationName,
+      dir: migrationDir,
+      manifestPath,
+      verifyPath,
+      shadowComparePath: comparePath,
+      manifestTables: manifest?.tables?.length ?? null,
+      manifestRows: Array.isArray(manifest?.tables) ? manifest.tables.reduce((sum, table) => sum + Number(table.rowCount || 0), 0) : null,
+    },
+    checks,
+  };
+}
+
+function printTextReport(report) {
+  process.stdout.write(`postgres_migration_status ok=${report.ok} migration=${report.migration.name || 'none'} postgres=${report.postgres.container}\n`);
+  for (const item of report.checks) {
+    process.stdout.write(`- ${item.ok ? 'ok' : 'FAIL'} ${item.name}\n`);
+  }
+}
+
+function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  if (options.help) {
+    usage();
+    return 0;
+  }
+  const report = buildStatusReport(options);
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    printTextReport(report);
+  }
+  return options.strict && !report.ok ? 1 : 0;
+}
+
+if (require.main === module) {
+  try {
+    process.exitCode = main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+module.exports = {
+  parseArgs,
+  readEnvFile,
+  latestMigrationName,
+  verifyOutputStatus,
+  shadowCompareStatus,
+  buildStatusReport,
+};
