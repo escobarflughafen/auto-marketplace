@@ -102,6 +102,9 @@ const {
 const {
   validateWorkerEvent,
 } = require('./marketplace-worker-events');
+const {
+  createRemoteWorkerPostgresStore,
+} = require('./remote-worker-postgres-store');
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
@@ -163,6 +166,8 @@ function parseArgs(argv) {
     adminToken: process.env.MARKETPLACE_MONITOR_ADMIN_TOKEN || '',
     readOnlyToken: process.env.MARKETPLACE_MONITOR_READONLY_TOKEN || '',
     workerToken: process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || process.env.MARKETPLACE_WORKER_TOKEN || '',
+    remoteWorkerStoreMode: process.env.MARKETPLACE_REMOTE_WORKER_STORE || '',
+    remoteWorkerPostgresUrl: process.env.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL || '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -187,6 +192,17 @@ function parseArgs(argv) {
       case '--read-only-token':
       case '--readonly-token':
         options.readOnlyToken = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--remote-worker-store':
+        options.remoteWorkerStoreMode = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--remote-worker-postgres':
+        options.remoteWorkerStoreMode = 'postgres';
+        break;
+      case '--remote-worker-postgres-url':
+        options.remoteWorkerPostgresUrl = readFlagValue(argv, index, arg);
         index += 1;
         break;
       default:
@@ -3558,6 +3574,59 @@ function remoteWorkerAccessForRequest(options, request) {
   return { ok: true };
 }
 
+function normalizeRemoteWorkerStoreMode(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[_-]+/g, '_');
+  if (['postgres', 'postgresql', 'pg'].includes(normalized)) return 'postgres';
+  if (['', 'sqlite', 'sqlite3', 'local'].includes(normalized)) return 'sqlite';
+  throw new Error(`Unsupported remote worker store mode: ${value}`);
+}
+
+function remoteWorkerStoreModeForOptions(options = {}) {
+  if (options.remoteWorkerStoreMode) {
+    return normalizeRemoteWorkerStoreMode(options.remoteWorkerStoreMode);
+  }
+  if (process.env.MARKETPLACE_REMOTE_WORKER_POSTGRES === '1') {
+    return 'postgres';
+  }
+  return normalizeRemoteWorkerStoreMode(process.env.MARKETPLACE_REMOTE_WORKER_STORE || 'sqlite');
+}
+
+function createSqliteRemoteWorkerStore(db) {
+  return {
+    dialect: 'sqlite',
+    registerRemoteWorkerSession: (body) => registerRemoteWorkerSession(db, body),
+    updateRemoteWorkerHeartbeat: (sessionId, body) => updateRemoteWorkerHeartbeat(db, sessionId, body),
+    ingestRemoteWorkerEvents: (sessionId, body) => ingestRemoteWorkerEvents(db, sessionId, body),
+    listRemoteWorkerIngestEvents: (sessionId) => listRemoteWorkerIngestEvents(db, sessionId),
+    ingestRemoteWorkerArtifacts: (sessionId, body) => ingestRemoteWorkerArtifacts(db, sessionId, body),
+    claimRemoteWorkerWork: (sessionId, body) => claimRemoteWorkerWork(db, sessionId, body),
+    renewRemoteWorkerLease: (sessionId, leaseId, body) => renewRemoteWorkerLease(db, sessionId, leaseId, body),
+    completeRemoteWorkerLease: (sessionId, leaseId, body) => completeRemoteWorkerLease(db, sessionId, leaseId, body),
+    listRemoteWorkerCommands: (sessionId, input) => listRemoteWorkerCommands(db, sessionId, input),
+    ackRemoteWorkerCommand: (sessionId, commandId, body) => ackRemoteWorkerCommand(db, sessionId, commandId, body),
+  };
+}
+
+function createRemoteWorkerApiStore(options = {}, db) {
+  if (options.remoteWorkerStore) {
+    return options.remoteWorkerStore;
+  }
+  const mode = remoteWorkerStoreModeForOptions(options);
+  if (mode === 'postgres') {
+    const storeOptions = {
+      ...(options.remoteWorkerPostgresStoreOptions || {}),
+    };
+    if (options.remoteWorkerPostgresPool) {
+      storeOptions.pool = options.remoteWorkerPostgresPool;
+    }
+    if (options.remoteWorkerPostgresUrl) {
+      storeOptions.connectionString = options.remoteWorkerPostgresUrl;
+    }
+    return createRemoteWorkerPostgresStore(storeOptions);
+  }
+  return createSqliteRemoteWorkerStore(db);
+}
+
 function buildRemoteSessionId() {
   return `remote-session-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`;
 }
@@ -4962,7 +5031,7 @@ function completeRemoteWorkerLease(db, sessionId, leaseId, body = {}) {
   };
 }
 
-async function handleRemoteWorkerApi(request, response, requestUrl, options, db) {
+async function handleRemoteWorkerApi(request, response, requestUrl, options, remoteWorkerStore) {
   if (!requestUrl.pathname.startsWith('/api/v2/remote-workers/')) {
     return false;
   }
@@ -4975,28 +5044,28 @@ async function handleRemoteWorkerApi(request, response, requestUrl, options, db)
   try {
     if (requestUrl.pathname === '/api/v2/remote-workers/sessions' && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 201, registerRemoteWorkerSession(db, body));
+      writeJson(response, 201, await remoteWorkerStore.registerRemoteWorkerSession(body));
       return true;
     }
 
     const heartbeatMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/heartbeat$/);
     if (heartbeatMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, updateRemoteWorkerHeartbeat(db, decodeURIComponent(heartbeatMatch[1]), body));
+      writeJson(response, 200, await remoteWorkerStore.updateRemoteWorkerHeartbeat(decodeURIComponent(heartbeatMatch[1]), body));
       return true;
     }
 
     const eventsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/events$/);
     if (eventsMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, ingestRemoteWorkerEvents(db, decodeURIComponent(eventsMatch[1]), body));
+      writeJson(response, 200, await remoteWorkerStore.ingestRemoteWorkerEvents(decodeURIComponent(eventsMatch[1]), body));
       return true;
     }
 
     const ingestEventsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/ingest-events$/);
     if (ingestEventsMatch && request.method === 'GET') {
       writeJson(response, 200, {
-        events: listRemoteWorkerIngestEvents(db, decodeURIComponent(ingestEventsMatch[1])),
+        events: await remoteWorkerStore.listRemoteWorkerIngestEvents(decodeURIComponent(ingestEventsMatch[1])),
       });
       return true;
     }
@@ -5004,22 +5073,21 @@ async function handleRemoteWorkerApi(request, response, requestUrl, options, db)
     const artifactsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/artifacts$/);
     if (artifactsMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, ingestRemoteWorkerArtifacts(db, decodeURIComponent(artifactsMatch[1]), body));
+      writeJson(response, 200, await remoteWorkerStore.ingestRemoteWorkerArtifacts(decodeURIComponent(artifactsMatch[1]), body));
       return true;
     }
 
     const claimsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/claims$/);
     if (claimsMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, claimRemoteWorkerWork(db, decodeURIComponent(claimsMatch[1]), body));
+      writeJson(response, 200, await remoteWorkerStore.claimRemoteWorkerWork(decodeURIComponent(claimsMatch[1]), body));
       return true;
     }
 
     const leaseRenewMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/leases\/([^/]+)\/renew$/);
     if (leaseRenewMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, renewRemoteWorkerLease(
-        db,
+      writeJson(response, 200, await remoteWorkerStore.renewRemoteWorkerLease(
         decodeURIComponent(leaseRenewMatch[1]),
         decodeURIComponent(leaseRenewMatch[2]),
         body,
@@ -5030,8 +5098,7 @@ async function handleRemoteWorkerApi(request, response, requestUrl, options, db)
     const leaseCompleteMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/leases\/([^/]+)\/complete$/);
     if (leaseCompleteMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, completeRemoteWorkerLease(
-        db,
+      writeJson(response, 200, await remoteWorkerStore.completeRemoteWorkerLease(
         decodeURIComponent(leaseCompleteMatch[1]),
         decodeURIComponent(leaseCompleteMatch[2]),
         body,
@@ -5041,7 +5108,7 @@ async function handleRemoteWorkerApi(request, response, requestUrl, options, db)
 
     const commandsMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/commands$/);
     if (commandsMatch && request.method === 'GET') {
-      writeJson(response, 200, listRemoteWorkerCommands(db, decodeURIComponent(commandsMatch[1]), {
+      writeJson(response, 200, await remoteWorkerStore.listRemoteWorkerCommands(decodeURIComponent(commandsMatch[1]), {
         limit: requestUrl.searchParams.get('limit'),
       }));
       return true;
@@ -5050,8 +5117,7 @@ async function handleRemoteWorkerApi(request, response, requestUrl, options, db)
     const commandAckMatch = requestUrl.pathname.match(/^\/api\/v2\/remote-workers\/sessions\/([^/]+)\/commands\/([^/]+)\/ack$/);
     if (commandAckMatch && request.method === 'POST') {
       const body = await readRequestJson(request);
-      writeJson(response, 200, ackRemoteWorkerCommand(
-        db,
+      writeJson(response, 200, await remoteWorkerStore.ackRemoteWorkerCommand(
         decodeURIComponent(commandAckMatch[1]),
         decodeURIComponent(commandAckMatch[2]),
         body,
@@ -5328,6 +5394,7 @@ function createServer(options) {
     serverRuntimeOptions.port = options.port;
   }
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
+  const remoteWorkerStore = createRemoteWorkerApiStore(options, db);
   const stopPurchaseHistoryMatchScanner = startPurchaseHistoryMatchScanner(db);
 
   const server = http.createServer(async (request, response) => {
@@ -5366,7 +5433,7 @@ function createServer(options) {
       return;
     }
 
-    if (await handleRemoteWorkerApi(request, response, requestUrl, options, db)) {
+    if (await handleRemoteWorkerApi(request, response, requestUrl, options, remoteWorkerStore)) {
       return;
     }
 
@@ -6573,6 +6640,7 @@ function createServer(options) {
 
   server.on('close', () => {
     stopPurchaseHistoryMatchScanner();
+    Promise.resolve(remoteWorkerStore.close?.()).catch(() => {});
     closeMarketplaceHomepageDatabase(db);
   });
 

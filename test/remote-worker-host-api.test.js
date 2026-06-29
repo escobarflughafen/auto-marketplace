@@ -7,6 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const {
   createServer,
+  parseArgs,
 } = require('../scripts/serve-marketplace-homepage');
 const {
   openMarketplaceHomepageDatabase,
@@ -54,6 +55,98 @@ async function requestJson(baseUrl, pathname, options = {}) {
     body: text ? JSON.parse(text) : null,
   };
 }
+
+function createFakePostgresPool(handler) {
+  const calls = [];
+  const client = {
+    async query(sql, params = []) {
+      calls.push({ sql, params, client: true });
+      return { rows: handler(sql, params, calls.length) || [] };
+    },
+    release() {},
+  };
+  return {
+    calls,
+    ended: false,
+    async connect() {
+      calls.push({ sql: 'CONNECT', params: [], connect: true });
+      return client;
+    },
+    async query(sql, params = []) {
+      calls.push({ sql, params, pool: true });
+      return { rows: handler(sql, params, calls.length) || [] };
+    },
+    async end() {
+      this.ended = true;
+    },
+  };
+}
+
+test('parseArgs supports explicit PostgreSQL remote worker store flags', () => {
+  const options = parseArgs([
+    '--admin-token', 'admin-token',
+    '--read-only-token', 'readonly-token',
+    '--remote-worker-store', 'postgres',
+    '--remote-worker-postgres-url', 'postgres://marketplace@example.test/marketplace',
+  ]);
+
+  assert.equal(options.remoteWorkerStoreMode, 'postgres');
+  assert.equal(options.remoteWorkerPostgresUrl, 'postgres://marketplace@example.test/marketplace');
+});
+
+test('remote worker v2 API can route session registration through PostgreSQL store', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const pool = createFakePostgresPool(() => []);
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken: 'worker-token',
+    remoteWorkerStoreMode: 'postgres',
+    remoteWorkerPostgresStoreOptions: {
+      pool,
+      nowIso: () => '2026-01-03T00:00:00.000Z',
+      idFactory: {
+        sessionId: () => 'pg-session-1',
+      },
+    },
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+
+  try {
+    const registered = await requestJson(baseUrl, '/api/v2/remote-workers/sessions', {
+      method: 'POST',
+      token: 'worker-token',
+      body: {
+        workerId: 'pg-worker-1',
+        workerType: 'collector',
+        strategy: 'explorer',
+        lastCheckpoint: {
+          lastLocalSequence: 4,
+          lastAckedSequence: 3,
+        },
+      },
+    });
+
+    assert.equal(registered.status, 201);
+    assert.deepEqual(registered.body, {
+      sessionId: 'pg-session-1',
+      status: 'registered',
+      hostCheckpoint: {
+        lastAcceptedSequence: 3,
+      },
+    });
+    const sessionInsert = pool.calls.find((call) => /INSERT INTO remote_worker_sessions/.test(call.sql));
+    assert.ok(sessionInsert);
+    assert.deepEqual(sessionInsert.params.slice(0, 4), ['pg-session-1', 'pg-worker-1', 'collector', 'explorer']);
+    assert.equal(pool.calls.some((call) => /INSERT INTO workflow_runs/.test(call.sql)), true);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test('remote worker host API accepts legacy worker token env name for restarted containers', async () => {
   const { tempDir, dbPath } = createTempDbPath();
