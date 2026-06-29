@@ -28,7 +28,8 @@
     "marketplace:deploy": "bash scripts/deploy-marketplace.sh",
     "history:normalize-inventory": "node scripts/normalize-inventory-trading-history.js",
     "test:ui:mock": "node test/marketplace-monitor-ui-integration.test.js",
-    "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh"
+    "marketplace:poll:mamiya-645af": "bash scripts/start-mamiya-645af-poll.sh",
+    "marketplace:postgres:export": "node scripts/export-marketplace-postgres-migration.js"
   },
   "dependencies": {
     "playwright": "^1.58.2",
