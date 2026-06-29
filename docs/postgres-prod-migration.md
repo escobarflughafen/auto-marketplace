@@ -58,6 +58,20 @@ The listing read query surface now has PostgreSQL compilers alongside the SQLite
 
 This is intentionally read-only. It is suitable for shadow-read comparisons against the loaded PostgreSQL copy, but it does not cut over collectors, resolver writes, remote-worker command state, event ingestion, maintenance jobs, or purchase-history writes.
 
+
+## Shadow Read Comparison
+
+After PostgreSQL is loaded and row-count verification passes, compare representative listing reads against the SQLite source before any runtime cutover:
+
+```bash
+export MARKETPLACE_POSTGRES_URL='postgres://marketplace:...@127.0.0.1:25432/marketplace'
+npm run marketplace:postgres:shadow-compare -- \
+  --sqlite-db artifacts/marketplace-homepage/marketplace-homepage.db \
+  --output artifacts/postgres-migration/shadow-compare.json
+```
+
+The comparison script uses the local `psql` client, not the optional Node `pg` adapter. It checks listing IDs, total counts, and price summary aggregates for representative legacy and Lite KQL listing queries. It exits nonzero if any probe differs. Add targeted probes with repeated `--query` flags when validating a known dashboard workflow.
+
 ## Production Shadow Migration Script
 
 After the repo is synced to the production host, the reviewed script can perform the shadow migration end to end:
@@ -84,11 +98,12 @@ Use `--skip-load` to start PostgreSQL and export artifacts without loading, or `
 3. PostgreSQL load completes without rejected rows.
 4. Verification row counts match every exported table.
 5. Representative dashboard/read queries are benchmarked against PostgreSQL.
-6. Listing read APIs pass shadow-read comparisons through the PostgreSQL read adapter.
-7. Runtime write paths have PostgreSQL adapters or an explicit dual-write plan for monitor APIs and workers.
-8. App can run in read-only PostgreSQL shadow mode for comparison.
-9. Writes are cut over only after dual-read or shadow-read checks pass.
-10. SQLite file is retained as rollback source until at least one successful backup/restore drill completes.
+6. `npm run marketplace:postgres:shadow-compare` passes against the loaded PostgreSQL copy.
+7. Listing read APIs pass shadow-read comparisons through the PostgreSQL read adapter.
+8. Runtime write paths have PostgreSQL adapters or an explicit dual-write plan for monitor APIs and workers.
+9. App can run in read-only PostgreSQL shadow mode for comparison.
+10. Writes are cut over only after dual-read or shadow-read checks pass.
+11. SQLite file is retained as rollback source until at least one successful backup/restore drill completes.
 
 ## Current Limitation
 
