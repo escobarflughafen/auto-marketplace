@@ -6,6 +6,68 @@ function safeJson(value) {
   return JSON.stringify(value ?? {});
 }
 
+function normalizeKeyword(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function extractListingId(url) {
+  const match = String(url || '').match(/\/marketplace\/item\/(\d+)/);
+  return match ? match[1] : '';
+}
+
+function extractGoofishListingId(url) {
+  const text = String(url || '');
+  const match = text.match(/[?&]id=(\d{9,})/i)
+    || text.match(/[?&]itemId=(\d{9,})/i)
+    || text.match(/[?&]item_id=(\d{9,})/i)
+    || text.match(/\/item\/(\d{9,})/i);
+  return match ? match[1] : '';
+}
+
+function canonicalizeListingUrl(url) {
+  const listingId = extractListingId(url);
+  if (listingId) {
+    return `https://www.facebook.com/marketplace/item/${listingId}/`;
+  }
+  try {
+    const parsed = new URL(String(url || ''));
+    if (/goofish\.com$/i.test(parsed.hostname) && parsed.pathname === '/item') {
+      const goofishListingId = extractGoofishListingId(parsed.toString());
+      if (goofishListingId) {
+        const categoryId = parsed.searchParams.get('categoryId') || '';
+        return `https://www.goofish.com/item?id=${goofishListingId}${categoryId ? `&categoryId=${encodeURIComponent(categoryId)}` : ''}`;
+      }
+    }
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return String(url || '').trim();
+  }
+}
+
+function normalizeListingMediaItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => {
+      const sourceUrl = String(item.sourceUrl || item.source_url || item.src || item.url || '').trim();
+      const artifactPath = String(item.artifactPath || item.artifact_path || item.screenshotPath || item.screenshot_path || '').trim();
+      if (!sourceUrl && !artifactPath) return null;
+      const mediaKey = String(item.mediaKey || item.media_key || '').trim()
+        || crypto.createHash('sha1').update(`${sourceUrl}\n${artifactPath}`).digest('hex');
+      return {
+        mediaKey,
+        mediaType: String(item.mediaType || item.media_type || 'image').trim() || 'image',
+        source: String(item.source || '').trim(),
+        sourceUrl,
+        artifactPath,
+        altText: String(item.altText || item.alt_text || item.alt || '').trim(),
+        width: Number.isFinite(Number(item.width)) ? Number(item.width) : null,
+        height: Number.isFinite(Number(item.height)) ? Number(item.height) : null,
+        position: Number.isFinite(Number(item.position)) ? Number(item.position) : index,
+        metadata: item.metadata || item.metadata_json || {},
+      };
+    })
+    .filter(Boolean);
+}
+
 function parseListingDetailJson(row) {
   try {
     const parsed = JSON.parse(row?.detail_json || '{}');
@@ -518,6 +580,201 @@ function createRemoteWorkerPostgresStore(options = {}) {
     ]);
   }
 
+  async function upsertObservedHomepageListing(remoteEvent, payload, source, sourceKeyword, seenAt, client = pool) {
+    const href = canonicalizeListingUrl(payload.href || remoteEvent.sourceUrl || '');
+    const listingId = String(remoteEvent.listingId || payload.listingId || extractListingId(href) || href).trim();
+    if (!listingId) return '';
+    const rank = Number.isFinite(Number(payload.rank)) ? Number(payload.rank) : null;
+    const cardTitle = String(payload.cardTitle || payload.title || '').trim();
+    const cardText = String(payload.cardText || payload.text || '').trim();
+    const cardPrice = String(payload.price || payload.cardPrice || payload.detailPrice || payload.detail_price || '').trim();
+    const rawCardJson = safeJson({
+      ...payload,
+      href,
+      listingId,
+      rank,
+      source,
+      sourceKeyword,
+    });
+    await client.query(`
+      INSERT INTO homepage_listings (
+        listing_id,
+        href,
+        source,
+        source_keyword,
+        card_title,
+        card_text,
+        raw_card_json,
+        first_seen_at,
+        last_seen_at,
+        last_seen_rank,
+        detail_status,
+        detail_price,
+        detail_last_error
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, '')
+      ON CONFLICT(listing_id) DO UPDATE SET
+        href = EXCLUDED.href,
+        source = EXCLUDED.source,
+        source_keyword = EXCLUDED.source_keyword,
+        card_title = EXCLUDED.card_title,
+        card_text = EXCLUDED.card_text,
+        raw_card_json = EXCLUDED.raw_card_json,
+        last_seen_at = EXCLUDED.last_seen_at,
+        last_seen_rank = EXCLUDED.last_seen_rank,
+        detail_price = CASE
+          WHEN EXCLUDED.detail_price = ''
+            THEN homepage_listings.detail_price
+          WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
+            AND homepage_listings.detail_price <> ''
+            THEN homepage_listings.detail_price
+          ELSE EXCLUDED.detail_price
+        END,
+        detail_status = CASE
+          WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
+            THEN homepage_listings.detail_status
+          ELSE 'pending'
+        END,
+        detail_last_error = CASE
+          WHEN homepage_listings.detail_status IN ('done', 'processing', 'sold', 'pending_sale')
+            THEN homepage_listings.detail_last_error
+          ELSE ''
+        END
+    `, [
+      listingId,
+      href,
+      source,
+      sourceKeyword,
+      cardTitle,
+      cardText,
+      rawCardJson,
+      seenAt,
+      seenAt,
+      rank,
+      cardPrice,
+    ]);
+    return listingId;
+  }
+
+  async function upsertObservedListingMedia(listingId, items = [], source, seenAt, client = pool) {
+    const normalizedListingId = String(listingId || '').trim();
+    const mediaItems = normalizeListingMediaItems(items);
+    if (!normalizedListingId || mediaItems.length === 0) return;
+    for (const item of mediaItems) {
+      await client.query(`
+        INSERT INTO listing_media (
+          listing_id,
+          media_key,
+          media_type,
+          source,
+          source_url,
+          artifact_path,
+          alt_text,
+          width,
+          height,
+          position,
+          first_seen_at,
+          last_seen_at,
+          metadata_json
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT(listing_id, media_key) DO UPDATE SET
+          media_type = EXCLUDED.media_type,
+          source = EXCLUDED.source,
+          source_url = EXCLUDED.source_url,
+          artifact_path = EXCLUDED.artifact_path,
+          alt_text = EXCLUDED.alt_text,
+          width = EXCLUDED.width,
+          height = EXCLUDED.height,
+          position = EXCLUDED.position,
+          last_seen_at = EXCLUDED.last_seen_at,
+          metadata_json = EXCLUDED.metadata_json
+      `, [
+        normalizedListingId,
+        item.mediaKey,
+        item.mediaType,
+        item.source || source,
+        item.sourceUrl,
+        item.artifactPath,
+        item.altText,
+        item.width,
+        item.height,
+        item.position,
+        seenAt,
+        seenAt,
+        safeJson(item.metadata || {}),
+      ]);
+    }
+  }
+
+  async function upsertListingSearchKeyword(listingId, keyword, seenAt, client = pool) {
+    const normalizedListingId = String(listingId || '').trim();
+    const normalizedKeyword = normalizeKeyword(keyword).toLowerCase();
+    if (!normalizedListingId || !normalizedKeyword) return;
+    const canonicalKeyword = normalizeKeyword(keyword);
+    await client.query(`
+      INSERT INTO listing_search_keywords (
+        listing_id,
+        normalized_keyword,
+        keyword,
+        first_seen_at,
+        last_seen_at,
+        times_seen
+      ) VALUES ($1, $2, $3, $4, $5, 1)
+      ON CONFLICT(listing_id, normalized_keyword) DO UPDATE SET
+        keyword = EXCLUDED.keyword,
+        last_seen_at = EXCLUDED.last_seen_at,
+        times_seen = listing_search_keywords.times_seen + 1
+    `, [normalizedListingId, normalizedKeyword, canonicalKeyword, seenAt, seenAt]);
+  }
+
+  async function upsertSearchTitleBagKeyword(keyword, sourceKeyword, seenAt, client = pool) {
+    const normalizedKeyword = normalizeKeyword(keyword).toLowerCase();
+    if (!normalizedKeyword) return;
+    await client.query(`
+      INSERT INTO search_title_bag (
+        normalized_keyword,
+        keyword,
+        first_seen_at,
+        last_seen_at,
+        times_seen,
+        last_source_keyword
+      ) VALUES ($1, $2, $3, $4, 1, $5)
+      ON CONFLICT(normalized_keyword) DO UPDATE SET
+        keyword = EXCLUDED.keyword,
+        last_seen_at = EXCLUDED.last_seen_at,
+        times_seen = search_title_bag.times_seen + 1,
+        last_source_keyword = EXCLUDED.last_source_keyword
+    `, [
+      normalizedKeyword,
+      normalizeKeyword(keyword),
+      seenAt,
+      seenAt,
+      normalizeKeyword(sourceKeyword || ''),
+    ]);
+  }
+
+  async function reduceCollectorListingObservedEvent(session, remoteEvent, payload, client = pool) {
+    if (remoteEvent.eventType !== 'listing_observed' || !remoteEvent.listingId) return;
+    const eventStrategy = String(remoteEvent.strategy || session.strategy || '').trim();
+    const source = String(payload.source || '').trim() || (eventStrategy === 'explorer' ? 'search' : 'homepage');
+    const sourceKeyword = String(payload.sourceKeyword || payload.source_keyword || '').trim();
+    const seenAt = remoteEvent.eventAt || nowIso();
+    const listingId = await upsertObservedHomepageListing(remoteEvent, payload, source, sourceKeyword, seenAt, client);
+    await upsertObservedListingMedia(
+      listingId,
+      Array.isArray(payload.photos) ? payload.photos : Array.isArray(payload.media) ? payload.media : [],
+      source,
+      seenAt,
+      client,
+    );
+    if (source === 'search' && sourceKeyword) {
+      await upsertListingSearchKeyword(listingId, sourceKeyword, seenAt, client);
+      if (payload.cardTitle || payload.title) {
+        await upsertSearchTitleBagKeyword(payload.cardTitle || payload.title, sourceKeyword, seenAt, client);
+      }
+      await upsertSearchTitleBagKeyword(sourceKeyword, sourceKeyword, seenAt, client);
+    }
+  }
+
   async function reduceBacklogListingMetadataEvent(session, remoteEvent, payload, client = pool) {
     if (remoteEvent.eventType !== 'backlog_listing_metadata_indexed' || !remoteEvent.listingId) return;
     const earliestUnix = Number.isFinite(Number(payload.listedAtEarliestUnix))
@@ -564,6 +821,7 @@ function createRemoteWorkerPostgresStore(options = {}) {
       return;
     }
     if (remoteEvent.eventScope === 'listing') {
+      await reduceCollectorListingObservedEvent(session, remoteEvent, payload, client);
       await appendListingEvent(session, remoteEvent, payload, client);
       await reduceBacklogListingMetadataEvent(session, remoteEvent, payload, client);
       return;

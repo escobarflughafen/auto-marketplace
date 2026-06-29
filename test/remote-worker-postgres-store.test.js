@@ -381,6 +381,92 @@ test('ingestRemoteWorkerEvents handles duplicates without rewriting projections'
   assert.equal(pool.calls.some((call) => /INSERT INTO workflow_events/.test(call.sql)), false);
 });
 
+test('ingestRemoteWorkerEvents projects collector listing observations into PostgreSQL listing tables', async () => {
+  const collectorSession = {
+    ...sessionRow,
+    worker_type: 'collector',
+    strategy: 'explorer',
+  };
+  const pool = createFakePool((sql) => {
+    if (/FROM remote_worker_sessions/.test(sql)) return [collectorSession];
+    if (/FROM remote_worker_event_ingest\s+WHERE event_id/.test(sql)) return [];
+    if (/MAX\(sequence\)/.test(sql)) return [{ lastAcceptedSequence: '12' }];
+    return [];
+  });
+  const store = createRemoteWorkerPostgresStore({ pool, nowIso: () => '2026-01-03T00:00:00.000Z' });
+
+  const result = await store.ingestRemoteWorkerEvents('session-1', {
+    workerId: 'worker-1',
+    batchId: 'batch-listing-observed',
+    events: [{
+      eventId: 'event-observed',
+      sequence: 12,
+      eventScope: 'listing',
+      eventType: 'listing_observed',
+      eventAt: '2026-01-03T00:02:00.000Z',
+      listingId: '1234567890',
+      status: 'ok',
+      payload: {
+        listingId: '1234567890',
+        href: 'https://www.facebook.com/marketplace/item/1234567890/?ref=search',
+        source: 'search',
+        sourceKeyword: 'camera bag',
+        outcome: 'new',
+        rank: 2,
+        cardTitle: 'Nikon camera bag',
+        cardText: 'Clean bag in Vancouver',
+      },
+    }],
+  });
+
+  assert.equal(result.accepted.length, 1);
+  const homepageInsert = pool.calls.find((call) => /INSERT INTO homepage_listings/.test(call.sql));
+  assert.ok(homepageInsert);
+  assert.deepEqual(homepageInsert.params.slice(0, 6), [
+    '1234567890',
+    'https://www.facebook.com/marketplace/item/1234567890/',
+    'search',
+    'camera bag',
+    'Nikon camera bag',
+    'Clean bag in Vancouver',
+  ]);
+  assert.equal(homepageInsert.params[7], '2026-01-03T00:02:00.000Z');
+  assert.equal(homepageInsert.params[8], '2026-01-03T00:02:00.000Z');
+  assert.equal(homepageInsert.params[9], 2);
+  assert.match(homepageInsert.sql, /ON CONFLICT\(listing_id\) DO UPDATE/);
+
+  const searchKeywordInsert = pool.calls.find((call) => /INSERT INTO listing_search_keywords/.test(call.sql));
+  assert.ok(searchKeywordInsert);
+  assert.deepEqual(searchKeywordInsert.params, [
+    '1234567890',
+    'camera bag',
+    'camera bag',
+    '2026-01-03T00:02:00.000Z',
+    '2026-01-03T00:02:00.000Z',
+  ]);
+
+  const titleBagInserts = pool.calls.filter((call) => /INSERT INTO search_title_bag/.test(call.sql));
+  assert.equal(titleBagInserts.length, 2);
+  assert.deepEqual(titleBagInserts.map((call) => call.params.slice(0, 2)), [
+    ['nikon camera bag', 'Nikon camera bag'],
+    ['camera bag', 'camera bag'],
+  ]);
+  assert.equal(titleBagInserts[0].params[4], 'camera bag');
+
+  const listingEventInsert = pool.calls.find((call) => /INSERT INTO listing_events/.test(call.sql));
+  assert.ok(listingEventInsert);
+  assert.deepEqual(listingEventInsert.params.slice(0, 6), [
+    'event-observed',
+    'session-1',
+    '1234567890',
+    'listing_observed',
+    '2026-01-03T00:02:00.000Z',
+    'worker-1',
+  ]);
+  assert.ok(pool.calls.findIndex((call) => /INSERT INTO homepage_listings/.test(call.sql))
+    < pool.calls.findIndex((call) => /INSERT INTO listing_events/.test(call.sql)));
+});
+
 test('ingestRemoteWorkerEvents projects listing metadata updates for backlog indexer', async () => {
   const pool = createFakePool((sql) => {
     if (/FROM remote_worker_sessions/.test(sql)) return [sessionRow];
