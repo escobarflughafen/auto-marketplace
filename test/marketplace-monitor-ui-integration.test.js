@@ -24,6 +24,7 @@ test('worker config query mode submits mutually exclusive search explorer args',
   try {
     await page.goto(`${baseUrl}/?token=test-token#/workers`);
     await page.locator('#workerControlTypeSelect').waitFor({ timeout: 10_000 });
+    await page.selectOption('#workerExecutionTargetSelect', 'local');
 
     await page.selectOption('#workflowField-queryMode', 'list');
     await page.locator('input[data-search-target-name="keyword"]').first().fill('leica');
@@ -41,6 +42,8 @@ test('worker config query mode submits mutually exclusive search explorer args',
 
     assert.equal(mockServer.state.startRequests.length, 1);
     assert.equal(mockServer.state.startRequests[0].workflowId, 'search-explore');
+    assert.equal(mockServer.state.startRequests[0].executionTarget, 'local');
+    assert.equal(mockServer.state.startRequests[0].remoteTargetSessionId, '');
     assert.deepEqual(mockServer.state.startRequests[0].args, [
       '--headless',
       '--query-targets',
@@ -72,6 +75,8 @@ test('worker config query mode submits mutually exclusive search explorer args',
     await waitForRequestCount(mockServer, 2);
 
     assert.equal(mockServer.state.startRequests.length, 2);
+    assert.equal(mockServer.state.startRequests[1].executionTarget, 'local');
+    assert.equal(mockServer.state.startRequests[1].remoteTargetSessionId, '');
     assert.deepEqual(mockServer.state.startRequests[1].args, [
       '--headless',
       '--query',
@@ -100,6 +105,78 @@ test('worker config query mode submits mutually exclusive search explorer args',
   }
 });
 
+test('worker config can assign a normal workflow to a healthy remote endpoint', async () => {
+  const mockServer = createMockMarketplaceMonitorServer();
+  const baseUrl = await mockServer.start();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+
+  try {
+    await page.goto(`${baseUrl}/?token=test-token#/workers`);
+    await page.locator('#workerControlWorkflowSelect').waitFor({ timeout: 10_000 });
+    await page.getByText('Task Overview', { exact: true }).waitFor({ timeout: 5_000 });
+    await page.getByText('Task setup', { exact: true }).waitFor({ timeout: 5_000 });
+    assert.equal(await page.locator('#workerControlStartButton').innerText(), 'Assign task');
+
+    await page.selectOption('#workerExecutionTargetSelect', 'local');
+    await page.locator('#remoteWorkerAssignmentSelect').waitFor({ state: 'detached', timeout: 5_000 });
+    assert.equal(await page.locator('#workerControlStartButton').innerText(), 'Start');
+
+    await page.selectOption('#workerExecutionTargetSelect', 'remote');
+    await page.locator('#remoteWorkerAssignmentSelect').waitFor({ timeout: 5_000 });
+    assert.equal(await page.locator('#workerControlStartButton').innerText(), 'Assign task');
+
+    const remoteOptions = await page.locator('#remoteWorkerAssignmentSelect option').evaluateAll((options) => (
+      options.map((option) => ({ value: option.value, text: option.textContent || '' }))
+    ));
+    assert.equal(remoteOptions.some((option) => option.value === 'remote-session-healthy-1'), true);
+    assert.equal(remoteOptions.some((option) => option.value === 'remote-session-working-1'), false);
+
+    await page.selectOption('#remoteWorkerAssignmentSelect', 'remote-session-healthy-1');
+    await page.getByRole('button', { name: 'Assign task' }).click();
+    await waitForRequestCount(mockServer, 1);
+
+    const request = mockServer.state.startRequests[0];
+    assert.equal(request.workflowId, 'search-explore');
+    assert.equal(request.executionTarget, 'remote');
+    assert.equal(request.remoteTargetSessionId, 'remote-session-healthy-1');
+    assert.ok(request.args.includes('--query'));
+    await page.waitForFunction(() => document.querySelector('#workerControlStartButton')?.textContent === 'Assign task');
+    await expectTextIncludes(page, '#workerConfigStatus', 'Assigned Search Explorer task');
+  } finally {
+    await browser.close();
+    await mockServer.close();
+  }
+});
+
+test('resolver mode can assign work to a healthy remote endpoint', async () => {
+  const mockServer = createMockMarketplaceMonitorServer();
+  const baseUrl = await mockServer.start();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+
+  try {
+    await page.goto(`${baseUrl}/?token=test-token#/workers`);
+    await page.locator('#workerControlWorkflowSelect').waitFor({ timeout: 10_000 });
+    await page.selectOption('#workerControlTypeSelect', 'resolver');
+    await page.locator('#workerExecutionTargetSelect').waitFor({ timeout: 5_000 });
+    await page.selectOption('#workerExecutionTargetSelect', 'remote');
+    await page.selectOption('#remoteWorkerAssignmentSelect', 'remote-session-healthy-1');
+
+    await page.getByRole('button', { name: 'Assign task' }).click();
+    await waitForRequestCount(mockServer, 1);
+
+    const request = mockServer.state.startRequests[0];
+    assert.equal(request.workflowId, 'backlog-resolve');
+    assert.equal(request.executionTarget, 'remote');
+    assert.equal(request.remoteTargetSessionId, 'remote-session-healthy-1');
+    assert.ok(request.args.includes('--drain'));
+  } finally {
+    await browser.close();
+    await mockServer.close();
+  }
+});
+
 test('homepage collector submits per-keyword target settings', async () => {
   const mockServer = createMockMarketplaceMonitorServer();
   const baseUrl = await mockServer.start();
@@ -110,6 +187,7 @@ test('homepage collector submits per-keyword target settings', async () => {
     await page.goto(`${baseUrl}/?token=test-token#/workers`);
     await page.locator('#workerControlWorkflowSelect').waitFor({ timeout: 10_000 });
     await page.selectOption('#workerControlWorkflowSelect', 'home-collect');
+    await page.selectOption('#workerExecutionTargetSelect', 'local');
     await page.selectOption('#workflowField-collectionMode', 'keywords');
 
     await page.locator('[data-keyword-target-name="keyword"]').first().fill('leica m6');
@@ -129,6 +207,8 @@ test('homepage collector submits per-keyword target settings', async () => {
 
     const request = mockServer.state.startRequests[0];
     assert.equal(request.workflowId, 'home-collect');
+    assert.equal(request.executionTarget, 'local');
+    assert.equal(request.remoteTargetSessionId, '');
     const targetArgIndex = request.args.indexOf('--keyword-targets');
     assert.notEqual(targetArgIndex, -1);
     const targets = JSON.parse(request.args[targetArgIndex + 1]);

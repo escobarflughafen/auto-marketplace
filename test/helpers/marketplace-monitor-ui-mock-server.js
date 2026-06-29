@@ -82,6 +82,28 @@ function mockWorkflowConfig() {
         ],
       },
       {
+        id: 'backlog-resolve',
+        label: 'Resolve Pending Backlog',
+        script: 'marketplace:home:process',
+        workerType: 'resolver',
+        strategy: 'filtered',
+        defaultArgs: ['--headless', '--drain', '--limit', '50'],
+        fields: [
+          {
+            id: 'browserMode',
+            label: 'Browser mode',
+            kind: 'choice',
+            defaultValue: 'headless',
+            options: [
+              { value: 'headless', label: 'Headless', args: ['--headless'] },
+              { value: 'headed', label: 'Headed', args: ['--headed'] },
+            ],
+          },
+          { id: 'drain', label: 'Drain eligible backlog then exit', kind: 'boolean', flag: '--drain', defaultValue: true },
+          { id: 'limit', label: 'Max items for this run', kind: 'number', flag: '--limit', defaultValue: 50, min: 0 },
+        ],
+      },
+      {
         id: 'home-collect',
         label: 'Homepage Collector',
         script: 'marketplace:home:collect',
@@ -148,6 +170,34 @@ function createMockMarketplaceMonitorServer() {
   };
   const workflowConfig = mockWorkflowConfig();
   const listings = mockListings();
+  const remoteWorkers = [
+    {
+      sessionId: 'remote-session-healthy-1',
+      workerId: 'healthy-endpoint-1',
+      workerType: 'backlog_indexer',
+      strategy: 'resolved_metadata',
+      displayState: 'standby',
+      runtimeState: 'idle',
+      livenessState: 'online',
+      pendingEventCount: 0,
+      queuedCommandCount: 0,
+      activeClaimCount: 0,
+      capabilities: { apiVersion: 'v2', commands: true, localOutbox: true, taskEnvelope: true },
+    },
+    {
+      sessionId: 'remote-session-working-1',
+      workerId: 'working-endpoint-1',
+      workerType: 'collector',
+      strategy: 'feed',
+      displayState: 'working',
+      runtimeState: 'working',
+      livenessState: 'online',
+      pendingEventCount: 0,
+      queuedCommandCount: 0,
+      activeClaimCount: 1,
+      capabilities: { apiVersion: 'v2', commands: true, localOutbox: true, taskEnvelope: true },
+    },
+  ];
 
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || '127.0.0.1'}`);
@@ -221,7 +271,7 @@ function createMockMarketplaceMonitorServer() {
     }
     if (requestUrl.pathname === '/api/workflows') {
       state.workflowRequests += 1;
-      sendJson(response, 200, { ...workflowConfig, processes: [] });
+      sendJson(response, 200, { ...workflowConfig, processes: [], remoteWorkers });
       return;
     }
     if (requestUrl.pathname === '/api/workflows/start' && request.method === 'POST') {
