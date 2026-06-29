@@ -46,6 +46,26 @@ psql "$MARKETPLACE_DATABASE_URL" -f "$MIGRATION_DIR/003_verify.sql"
 
 Every row in `003_verify.sql` must return `status = 'ok'` before the PostgreSQL store is considered a valid shadow copy.
 
+
+## Production Shadow Migration Script
+
+After the repo is synced to the production host, the reviewed script can perform the shadow migration end to end:
+
+```bash
+cd /srv/auto-browser/app
+ops/postgres-prod-shadow-migration.sh --execute
+```
+
+The script:
+
+1. Creates `.postgres-migration.env` with a generated local PostgreSQL password if it does not exist.
+2. Starts `marketplace-postgres` from `docker-compose.postgres.yml` without changing the running app container.
+3. Exports the current production SQLite DB into `artifacts/postgres-migration/<migration-name>`.
+4. Loads schema and data into PostgreSQL.
+5. Writes row-count verification output to `verify-output.txt`.
+
+Use `--skip-load` to start PostgreSQL and export artifacts without loading, or `--skip-export --migration-name <name>` to retry loading an existing export.
+
 ## Cutover Gates
 
 1. PostgreSQL service exists on separate storage with backups configured.

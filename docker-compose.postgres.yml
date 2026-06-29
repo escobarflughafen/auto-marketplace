@@ -1,0 +1,22 @@
+services:
+  marketplace-postgres:
+    image: postgres:16
+    container_name: marketplace-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${MARKETPLACE_POSTGRES_DB:-marketplace}
+      POSTGRES_USER: ${MARKETPLACE_POSTGRES_USER:-marketplace}
+      POSTGRES_PASSWORD: ${MARKETPLACE_POSTGRES_PASSWORD:?MARKETPLACE_POSTGRES_PASSWORD is required}
+    ports:
+      - "${MARKETPLACE_POSTGRES_BIND:-127.0.0.1}:${MARKETPLACE_POSTGRES_PORT:-25432}:5432"
+    volumes:
+      - marketplace-postgres-data:/var/lib/postgresql/data
+      - ./artifacts/postgres-migration:/migration:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  marketplace-postgres-data:
