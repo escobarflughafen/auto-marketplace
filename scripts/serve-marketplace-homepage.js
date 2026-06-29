@@ -92,6 +92,7 @@ const {
   appendWorkerCommand,
 } = require('./marketplace-worker-command-channel');
 const {
+  normalizeTaskEnvelope,
   validateRemoteEventEnvelope,
   validateArtifactManifest,
 } = require('./remote-worker-contracts');
@@ -2330,7 +2331,10 @@ function workflowArgSpec(workflow, options = {}) {
     valueValidators.set(flag, validator);
   };
 
-  for (const field of fieldsForWorkflow(workflow)) {
+  const workflowFields = fieldsForWorkflow(workflow);
+  const hasCredentialProfileField = workflowFields.some((field) => field.id === CREDENTIAL_PROFILE_FIELD.id);
+
+  for (const field of workflowFields) {
     if (field.kind === 'boolean') {
       addBooleanFlag(field.flag);
       continue;
@@ -2372,6 +2376,13 @@ function workflowArgSpec(workflow, options = {}) {
       continue;
     }
     addValueFlag(field.flag, (value) => assertSafeWorkflowArgValue(field.flag, value));
+  }
+
+  if (hasCredentialProfileField) {
+    addValueFlag('--credentials-profile', (value) => {
+      assertSafeWorkflowArgValue('--credentials-profile', value);
+      normalizeCredentialProfileId(value);
+    });
   }
 
   if (workflow.id === 'search-explore' || workflow.id === 'ebay-search-collect' || workflow.id === 'goofish-search-explore' || workflow.id === 'remote-goofish-search-explore') {
@@ -4443,17 +4454,96 @@ function createRemoteWorkerCommand(db, command = {}) {
 }
 
 
-function remoteCollectorTaskSpec(workflowId, workflow = {}) {
-  if (workflowId === 'remote-home-collect') {
-    return { workerType: 'collector', strategy: 'feed' };
+function remoteTaskSpecForWorkflow(workflowId, workflow = {}) {
+  const id = String(workflowId || '').trim();
+  if (id === 'home-collect' || id === 'remote-home-collect') {
+    return {
+      taskType: 'collect_search_results',
+      taskSource: 'marketplace-workflow',
+      entityType: 'collection_run',
+      workerType: 'collector',
+      strategy: 'feed',
+      source: 'facebook',
+    };
   }
-  if (workflowId === 'remote-search-explore') {
-    return { workerType: 'collector', strategy: 'explorer' };
+  if (id === 'search-explore' || id === 'remote-search-explore') {
+    return {
+      taskType: 'collect_search_results',
+      taskSource: 'marketplace-workflow',
+      entityType: 'collection_run',
+      workerType: 'collector',
+      strategy: 'explorer',
+      source: 'facebook',
+    };
   }
-  if (workflowId === 'remote-goofish-search-explore') {
-    return { workerType: 'collector', strategy: 'goofish_search' };
+  if (id === 'goofish-search-explore' || id === 'remote-goofish-search-explore') {
+    return {
+      taskType: 'collect_search_results',
+      taskSource: 'marketplace-workflow',
+      entityType: 'collection_run',
+      workerType: 'collector',
+      strategy: 'goofish_search',
+      source: 'goofish',
+    };
+  }
+  if (id === 'backlog-resolve' || id === 'backlog-worker') {
+    return {
+      taskType: 'resolve_backlog_listing',
+      taskSource: 'marketplace-workflow',
+      entityType: 'resolve_queue',
+      workerType: 'resolver',
+      strategy: workflow.strategy || (id === 'backlog-worker' ? 'queue' : 'filtered'),
+      source: 'facebook',
+    };
   }
   return null;
+}
+
+function remoteWorkerSupportsTaskProtocol(worker = {}) {
+  const capabilities = worker.capabilities && typeof worker.capabilities === 'object' ? worker.capabilities : {};
+  return capabilities.commands === true
+    && (capabilities.apiVersion === 'v2' || capabilities.taskEnvelope === true || capabilities.localOutbox === true);
+}
+
+function isAssignableRemoteWorker(worker = {}) {
+  return worker.displayState === 'standby' && remoteWorkerSupportsTaskProtocol(worker);
+}
+
+function remoteWorkerUnavailableReason(worker = {}) {
+  if (!worker.sessionId) return 'missing_session';
+  if (worker.displayState !== 'standby') return `not_standby:${worker.displayState || 'unknown'}`;
+  if (!remoteWorkerSupportsTaskProtocol(worker)) return 'missing_task_protocol';
+  return '';
+}
+
+function buildRemoteTaskEnvelope(workflowId, workflow, spec, safeArgs) {
+  const now = new Date().toISOString();
+  return normalizeTaskEnvelope({
+    exchangeType: 'task',
+    schemaVersion: 'remote-worker-task@1',
+    taskId: `task-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`,
+    taskSource: spec.taskSource || 'marketplace-workflow',
+    taskType: spec.taskType,
+    workerType: spec.workerType,
+    strategy: spec.strategy || '',
+    dedupeKey: `${workflowId}:${crypto.createHash('sha256').update(safeJson(safeArgs)).digest('hex')}`,
+    entityType: spec.entityType || 'workflow_run',
+    entityId: workflowId,
+    lease: {
+      requestedSeconds: 900,
+    },
+    payload: {
+      workflowId,
+      workflowLabel: workflow.label || workflowId,
+      source: spec.source || workflow.source || '',
+      workerType: spec.workerType,
+      strategy: spec.strategy || '',
+      adapterArgs: safeArgs,
+      requestedBy: 'web-ui',
+      requestedAt: now,
+    },
+    createdAt: now,
+  });
 }
 
 function chooseRemoteWorkerForTask(db, options = {}) {
@@ -4473,20 +4563,18 @@ function chooseRemoteWorkerForTask(db, options = {}) {
       error.code = 'remote_worker_session_not_found';
       throw error;
     }
-    if (['offline', 'stale', 'ended'].includes(selected.displayState)) {
-      const error = new Error(`Remote worker is not online: ${selected.workerId || selected.sessionId}`);
+    const unavailableReason = remoteWorkerUnavailableReason(selected);
+    if (unavailableReason) {
+      const error = new Error(`Remote worker is not assignable: ${selected.workerId || selected.sessionId} (${unavailableReason})`);
       error.statusCode = 409;
-      error.code = 'remote_worker_not_online';
+      error.code = 'remote_worker_not_assignable';
       throw error;
     }
     return selected;
   }
   const candidates = workers
-    .filter((worker) => !['offline', 'stale', 'ended'].includes(worker.displayState))
+    .filter((worker) => isAssignableRemoteWorker(worker))
     .sort((left, right) => {
-      const leftRank = left.displayState === 'standby' ? 0 : left.displayState === 'queued' ? 1 : 2;
-      const rightRank = right.displayState === 'standby' ? 0 : right.displayState === 'queued' ? 1 : 2;
-      if (leftRank !== rightRank) return leftRank - rightRank;
       if ((left.pendingEventCount || 0) !== (right.pendingEventCount || 0)) {
         return (left.pendingEventCount || 0) - (right.pendingEventCount || 0);
       }
@@ -4508,7 +4596,7 @@ function createRemoteWorkflowTaskCommand(db, workflowId, args = [], body = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const spec = remoteCollectorTaskSpec(workflowId, workflow);
+  const spec = remoteTaskSpecForWorkflow(workflowId, workflow);
   if (!spec) {
     const error = new Error('Remote worker services are started by a sysadmin on the worker host. This workflow does not define an assignable remote task yet.');
     error.statusCode = 403;
@@ -4517,23 +4605,24 @@ function createRemoteWorkflowTaskCommand(db, workflowId, args = [], body = {}) {
   }
   const safeArgs = validateWorkflowStartArgs(workflowId, args);
   const worker = chooseRemoteWorkerForTask(db, body);
+  const task = buildRemoteTaskEnvelope(workflowId, workflow, spec, safeArgs);
   const commandId = createRemoteWorkerCommand(db, {
     sessionId: worker.sessionId,
-    commandType: 'run_collector_once',
+    workerId: worker.workerId,
+    commandType: 'execute_task',
     payload: {
+      task,
       workflowId,
       workflowLabel: workflow.label || workflowId,
-      source: workflow.source || '',
-      workerType: spec.workerType,
-      strategy: spec.strategy,
-      adapterArgs: safeArgs,
       requestedBy: 'web-ui',
     },
     priority: 20,
   });
   return {
     commandId,
-    commandType: 'run_collector_once',
+    commandType: 'execute_task',
+    taskType: task.taskType,
+    task,
     workflowId,
     strategy: spec.strategy,
     worker,
@@ -6403,7 +6492,9 @@ function createServer(options) {
         const sectionStartedAt = process.hrtime.bigint();
         const body = await readRequestJson(request);
         const workflow = WORKFLOWS[body.workflowId];
-        if (workflow && isRemoteWorkerProvisioningWorkflow(workflow)) {
+        const executionTarget = String(body.executionTarget || body.target || '').trim().toLowerCase();
+        const wantsRemoteExecution = ['remote', 'remote_worker', 'remote-worker'].includes(executionTarget);
+        if (workflow && (isRemoteWorkerProvisioningWorkflow(workflow) || wantsRemoteExecution)) {
           const remoteTask = createRemoteWorkflowTaskCommand(db, body.workflowId, body.args || [], body);
           logSlowSection('api_workflows_start', sectionStartedAt, { workflowId: body.workflowId || '', remoteTask: true });
           writeJson(response, 202, { remoteTask });

@@ -10,6 +10,9 @@ const {
   listListingMedia,
 } = require('./marketplace-homepage-db');
 const {
+  normalizeTaskEnvelope,
+} = require('./remote-worker-contracts');
+const {
   openRemoteWorkerLocalStore,
   getState,
   setState,
@@ -19,6 +22,11 @@ const {
   markOutboxEventsFailed,
   countPendingOutboxEvents,
   appendLocalCommand,
+  getLocalCommand,
+  markLocalCommandAckPending,
+  listPendingCommandAcks,
+  markLocalCommandAcked,
+  markLocalCommandAckFailed,
   appendArtifactManifest,
   listPendingArtifactManifests,
   markArtifactsAcked,
@@ -43,6 +51,8 @@ Options:
                             Stop claiming above this local spool size. Default: 1073741824
   --heartbeat-interval-ms N  Continuous mode heartbeat interval. Default: 30000
   --poll-interval-ms N       Continuous mode poll interval. Default: 5000
+  --events-stdout            Print emitted event/artifact debug records as NDJSON.
+  --events-file PATH         Append emitted event/artifact debug records as NDJSON.
   --json                     Print JSON summary.
 `);
 }
@@ -72,6 +82,8 @@ function parseArgs(argv) {
     maxPendingArtifactBytes: 1024 * 1024 * 1024,
     heartbeatIntervalMs: 30000,
     pollIntervalMs: 5000,
+    eventsStdout: false,
+    eventsFile: '',
     json: false,
     adapterArgs: [],
   };
@@ -135,6 +147,13 @@ function parseArgs(argv) {
         options.pollIntervalMs = Number.parseInt(readArg(argv, index, arg), 10);
         index += 1;
         break;
+      case '--events-stdout':
+        options.eventsStdout = true;
+        break;
+      case '--events-file':
+        options.eventsFile = readArg(argv, index, arg);
+        index += 1;
+        break;
       case '--once':
         options.once = true;
         break;
@@ -175,6 +194,61 @@ function parseArgs(argv) {
   return options;
 }
 
+function appendNdjsonLine(filePath, record) {
+  if (!filePath) return;
+  fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+  fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`);
+}
+
+function writeDebugEmission(options, record) {
+  if (!options.eventsStdout && !options.eventsFile) {
+    return;
+  }
+  const line = {
+    emittedAt: new Date().toISOString(),
+    workerId: options.workerId || '',
+    ...record,
+  };
+  if (options.eventsStdout) {
+    process.stdout.write(`${JSON.stringify(line)}\n`);
+  }
+  appendNdjsonLine(options.eventsFile, line);
+}
+
+function pushArtifactReference(refs, seen, ref = {}) {
+  const artifactPath = String(ref.artifactPath || ref.artifact_path || ref.path || '').trim();
+  const snapshotPath = String(ref.snapshotPath || ref.snapshot_path || '').trim();
+  const screenshotPath = String(ref.screenshotPath || ref.screenshot_path || '').trim();
+  const sourceUrl = String(ref.sourceUrl || ref.source_url || '').trim();
+  const key = [artifactPath, snapshotPath, screenshotPath, sourceUrl].filter(Boolean).join('|');
+  if (!key || seen.has(key)) return;
+  seen.add(key);
+  refs.push({
+    artifactPath,
+    snapshotPath,
+    screenshotPath,
+    sourceUrl,
+    mediaRole: String(ref.mediaRole || ref.media_role || ref.role || '').trim(),
+    mediaType: String(ref.mediaType || ref.media_type || '').trim(),
+    contentType: String(ref.contentType || ref.content_type || '').trim(),
+    position: Number.isFinite(Number(ref.position)) ? Number(ref.position) : null,
+  });
+}
+
+function artifactReferencesFromEvent(event = {}) {
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const refs = [];
+  const seen = new Set();
+  pushArtifactReference(refs, seen, payload);
+  for (const item of Array.isArray(payload.photos) ? payload.photos : []) {
+    if (item && typeof item === 'object') pushArtifactReference(refs, seen, item);
+  }
+  for (const item of Array.isArray(payload.media) ? payload.media : []) {
+    if (item && typeof item === 'object') pushArtifactReference(refs, seen, item);
+  }
+  return refs;
+}
+
 function loadWorkerToken(options) {
   if (options.workerToken) return options.workerToken;
   if (options.tokenFile) {
@@ -185,6 +259,18 @@ function loadWorkerToken(options) {
 
 function isoFromUnix(value) {
   return Number.isFinite(value) ? new Date(value * 1000).toISOString() : '';
+}
+
+function isTransientRemoteError(error) {
+  const status = Number(error?.status || error?.response?.status || 0);
+  if (status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+  const code = String(error?.code || error?.cause?.code || '').toUpperCase();
+  if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) {
+    return true;
+  }
+  return ['AbortError', 'TimeoutError', 'TypeError'].includes(String(error?.name || ''));
 }
 
 function buildEventId(workerId, sequence, eventType, entity = '') {
@@ -411,6 +497,7 @@ class RemoteWorkerRuntime {
         commands: true,
         claims: true,
         artifactManifests: true,
+        taskEnvelope: true,
       },
       lastCheckpoint: {
         lastAckedSequence: getState(this.db, 'checkpoint', { lastAckedSequence: 0 })?.lastAckedSequence || 0,
@@ -450,6 +537,19 @@ class RemoteWorkerRuntime {
       sequence,
       eventAt: event.eventAt || new Date().toISOString(),
     });
+    writeDebugEmission(this.options, {
+      kind: 'event_emitted',
+      event: record,
+    });
+    for (const artifact of artifactReferencesFromEvent(record)) {
+      writeDebugEmission(this.options, {
+        kind: 'artifact_observed',
+        eventId: record.eventId,
+        eventType: record.eventType,
+        listingId: record.listingId || '',
+        artifact,
+      });
+    }
     setState(this.db, 'checkpoint', {
       ...getState(this.db, 'checkpoint', {}),
       lastLocalSequence: record.sequence,
@@ -488,7 +588,7 @@ class RemoteWorkerRuntime {
   }
 
   appendArtifactManifest(manifest) {
-    return appendArtifactManifest(this.db, {
+    const record = appendArtifactManifest(this.db, {
       ...manifest,
       workerId: manifest.workerId || this.options.workerId,
       sessionId: manifest.sessionId || this.sessionId,
@@ -498,6 +598,11 @@ class RemoteWorkerRuntime {
         ...(manifest.storage || {}),
       },
     });
+    writeDebugEmission(this.options, {
+      kind: 'artifact_emitted',
+      artifact: record,
+    });
+    return record;
   }
 
   async uploadPendingArtifacts() {
@@ -525,10 +630,67 @@ class RemoteWorkerRuntime {
     }
   }
 
+  async syncPendingUploads(options = {}) {
+    const drainAll = options.drainAll === true;
+    const summary = { eventBatches: 0, artifactBatches: 0 };
+    do {
+      const before = countPendingOutboxEvents(this.db);
+      if (before === 0) break;
+      await this.uploadPendingEvents();
+      summary.eventBatches += 1;
+      if (!drainAll) break;
+    } while (countPendingOutboxEvents(this.db) > 0);
+    do {
+      const before = countPendingArtifacts(this.db).count;
+      if (before === 0) break;
+      await this.uploadPendingArtifacts();
+      summary.artifactBatches += 1;
+      if (!drainAll) break;
+    } while (countPendingArtifacts(this.db).count > 0);
+    return summary;
+  }
+
+  async ackCommandDurably(command, ack) {
+    appendLocalCommand(this.db, command);
+    markLocalCommandAckPending(this.db, command.commandId, ack);
+    try {
+      await this.api.ackCommand(this.sessionId, command.commandId, {
+        status: ack.status,
+        ...(ack.error ? { error: ack.error } : {}),
+        payload: ack.payload || {},
+      });
+      markLocalCommandAcked(this.db, command.commandId);
+      return { acked: true };
+    } catch (error) {
+      markLocalCommandAckFailed(this.db, command.commandId, error);
+      throw error;
+    }
+  }
+
+  async syncPendingCommandAcks() {
+    const pending = listPendingCommandAcks(this.db, { limit: 25 });
+    for (const ack of pending) {
+      try {
+        await this.api.ackCommand(this.sessionId, ack.commandId, {
+          status: ack.status,
+          ...(ack.error ? { error: ack.error } : {}),
+          payload: ack.payload || {},
+        });
+        markLocalCommandAcked(this.db, ack.commandId);
+      } catch (error) {
+        markLocalCommandAckFailed(this.db, ack.commandId, error);
+        throw error;
+      }
+    }
+    return { acked: pending.length };
+  }
+
   async pollCommands() {
     const result = await this.api.pollCommands(this.sessionId, { limit: 25 });
     const commands = result.commands || [];
+    const executable = [];
     for (const command of commands) {
+      const existing = getLocalCommand(this.db, command.commandId);
       appendLocalCommand(this.db, command);
       if (command.commandType === 'drain') {
         this.drainRequested = true;
@@ -536,16 +698,19 @@ class RemoteWorkerRuntime {
       if (command.commandType === 'shutdown') {
         this.shutdownRequested = true;
       }
-      if (command.commandType !== 'run_collector_once') {
-        await this.api.ackCommand(this.sessionId, command.commandId, {
-          status: 'acked',
-          payload: {
-            accepted: true,
-          },
-        });
+      if (existing?.completedAt || existing?.ackedAt) {
+        continue;
       }
+      if (!['run_collector_once', 'execute_task'].includes(command.commandType)) {
+        await this.ackCommandDurably(command, {
+          status: 'acked',
+          payload: { accepted: true },
+        }).catch(() => null);
+        continue;
+      }
+      executable.push(command);
     }
-    return commands;
+    return executable;
   }
 
   async claimWork() {
@@ -605,7 +770,7 @@ class RemoteWorkerRuntime {
       workerType: overrides.workerType || 'collector',
       strategy,
     });
-    await this.uploadPendingEvents();
+    await this.uploadPendingEvents().catch(() => null);
     if (result.code !== 0) {
       const message = result.stderr.trim().split('\n').slice(-1)[0] || `collector adapter exited with code ${result.code}`;
       const error = new Error(message);
@@ -753,22 +918,21 @@ class RemoteWorkerRuntime {
     const strategy = String(payload.strategy || '').trim();
     const adapterArgs = Array.isArray(payload.adapterArgs) ? payload.adapterArgs : [];
     if (!['feed', 'explorer', 'goofish_search'].includes(strategy)) {
-      await this.api.ackCommand(this.sessionId, command.commandId, {
+      await this.ackCommandDurably(command, {
         status: 'failed',
         error: `Unsupported collector strategy: ${strategy || '(empty)'}`,
-      });
+      }).catch(() => null);
       return { failed: true, commandId: command.commandId };
     }
+    await this.sendHeartbeat('working').catch(() => null);
     try {
-      await this.sendHeartbeat('working');
       const result = await this.executeCollectorAdapterRun({
         strategy,
         adapterArgs,
         adapterRunId: `${this.options.workerId}:command:${command.commandId}`,
       });
-      await this.uploadPendingEvents();
-      await this.uploadPendingArtifacts();
-      await this.api.ackCommand(this.sessionId, command.commandId, {
+      await this.syncPendingUploads({ drainAll: true }).catch(() => null);
+      await this.ackCommandDurably(command, {
         status: 'completed',
         payload: {
           accepted: true,
@@ -777,11 +941,11 @@ class RemoteWorkerRuntime {
           adapterRunId: result.adapterRunId,
           replay: result.replay,
         },
-      });
+      }).catch(() => null);
       return result;
     } catch (error) {
-      await this.uploadPendingEvents().catch(() => null);
-      await this.api.ackCommand(this.sessionId, command.commandId, {
+      await this.syncPendingUploads({ drainAll: true }).catch(() => null);
+      await this.ackCommandDurably(command, {
         status: 'failed',
         error: error.message || String(error),
         payload: {
@@ -791,9 +955,52 @@ class RemoteWorkerRuntime {
           signal: error.signal || '',
           replay: error.replay || null,
         },
-      });
+      }).catch(() => null);
       return { failed: true, commandId: command.commandId, error: error.message || String(error) };
     }
+  }
+
+  async executeTaskCommand(command) {
+    let task;
+    try {
+      const payload = command.payload && typeof command.payload === 'object' ? command.payload : {};
+      task = normalizeTaskEnvelope(payload.task || payload.taskEnvelope || payload);
+    } catch (error) {
+      await this.ackCommandDurably(command, {
+        status: 'failed',
+        error: `Invalid task envelope: ${error.message || String(error)}`,
+      }).catch(() => null);
+      return { failed: true, commandId: command.commandId, error: error.message || String(error) };
+    }
+
+    if (task.taskType === 'collect_search_results') {
+      return this.executeCollectorCommand({
+        ...command,
+        payload: {
+          workflowId: task.payload.workflowId || '',
+          strategy: task.strategy || task.payload.strategy || '',
+          adapterArgs: Array.isArray(task.payload.adapterArgs) ? task.payload.adapterArgs : [],
+          taskId: task.taskId,
+          taskType: task.taskType,
+        },
+      });
+    }
+
+    await this.ackCommandDurably(command, {
+      status: 'failed',
+      error: `Unsupported task type: ${task.taskType}`,
+      payload: {
+        taskId: task.taskId,
+        taskType: task.taskType,
+      },
+    }).catch(() => null);
+    return {
+      failed: true,
+      commandId: command.commandId,
+      taskId: task.taskId,
+      taskType: task.taskType,
+      error: `Unsupported task type: ${task.taskType}`,
+    };
   }
 
   async executeClaim(claim) {
@@ -805,7 +1012,7 @@ class RemoteWorkerRuntime {
       return { processedCount: 0, failed: true };
     }
     const result = this.executeBacklogIndexerClaim(claim);
-    await this.uploadPendingEvents();
+    await this.syncPendingUploads({ drainAll: true });
     await this.api.completeLease(this.sessionId, claim.leaseId, {
       status: 'completed',
       result,
@@ -816,15 +1023,19 @@ class RemoteWorkerRuntime {
   async runOnce() {
     await this.registerSession();
     await this.sendHeartbeat('starting');
-    await this.uploadPendingEvents();
-    await this.uploadPendingArtifacts();
+    await this.syncPendingUploads({ drainAll: true });
+    await this.syncPendingCommandAcks();
     const commands = await this.pollCommands();
-    const collectorCommands = commands.filter((command) => command.commandType === 'run_collector_once');
+    const executableCommands = commands.filter((command) => ['run_collector_once', 'execute_task'].includes(command.commandType));
     const commandResults = [];
-    for (const command of collectorCommands) {
-      commandResults.push(await this.executeCollectorCommand(command));
+    for (const command of executableCommands) {
+      if (command.commandType === 'execute_task') {
+        commandResults.push(await this.executeTaskCommand(command));
+      } else {
+        commandResults.push(await this.executeCollectorCommand(command));
+      }
     }
-    if (collectorCommands.length > 0) {
+    if (executableCommands.length > 0) {
       await this.sendHeartbeat(this.shutdownRequested ? 'stopping' : 'idle');
       return {
         sessionId: this.sessionId,
@@ -868,9 +1079,24 @@ class RemoteWorkerRuntime {
   }
 
   async runContinuous() {
-    await this.registerSession();
+    let transientFailures = 0;
     while (!this.shutdownRequested) {
-      await this.runOnce();
+      try {
+        await this.runOnce();
+        transientFailures = 0;
+        setState(this.db, 'connection', { state: 'online', updatedAt: new Date().toISOString() });
+      } catch (error) {
+        if (!isTransientRemoteError(error)) {
+          throw error;
+        }
+        transientFailures += 1;
+        setState(this.db, 'connection', {
+          state: 'offline',
+          updatedAt: new Date().toISOString(),
+          transientFailures,
+          lastError: error.message || String(error),
+        });
+      }
       if (this.options.once) break;
       await new Promise((resolve) => setTimeout(resolve, this.options.pollIntervalMs));
     }
@@ -914,5 +1140,6 @@ module.exports = {
   collectorDbNameForStrategy,
   collectorScriptForStrategy,
   isCollectorRuntime,
+  isTransientRemoteError,
   run,
 };

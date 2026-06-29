@@ -878,6 +878,90 @@ test('remote worker host API issues backlog indexer claims and protects stale le
 });
 
 
+test('remote workflow start assigns resolver task envelope to selected endpoint worker', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const workerToken = 'assign-resolver-token';
+  const { db: seedDb } = openMarketplaceHomepageDatabase(dbPath);
+  closeMarketplaceHomepageDatabase(seedDb);
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+  let sessionId = '';
+
+  try {
+    const registered = await requestJson(baseUrl, '/api/v2/remote-workers/sessions', {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'generic-resolver-endpoint-1',
+        workerType: 'collector',
+        strategy: 'feed',
+        workerVersion: 'resolver-assign-test-version',
+        sourceId: 'resolver-assign-test',
+        capabilities: {
+          apiVersion: 'v2',
+          commands: true,
+          localOutbox: true,
+          taskEnvelope: true,
+        },
+      },
+    });
+    assert.equal(registered.status, 201);
+    sessionId = registered.body.sessionId;
+
+    const heartbeat = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
+      method: 'POST',
+      token: workerToken,
+      body: {
+        workerId: 'generic-resolver-endpoint-1',
+        runtimeState: 'idle',
+        lastLocalSequence: 0,
+        lastAckedSequence: 0,
+        pendingEventCount: 0,
+      },
+    });
+    assert.equal(heartbeat.status, 200);
+
+    const assigned = await requestJson(baseUrl, '/api/workflows/start', {
+      method: 'POST',
+      token: 'admin-token',
+      body: {
+        workflowId: 'backlog-resolve',
+        executionTarget: 'remote',
+        remoteTargetSessionId: sessionId,
+        args: ['--headless', '--drain', '--limit', '5'],
+      },
+    });
+    assert.equal(assigned.status, 202);
+    assert.equal(assigned.body.remoteTask.commandType, 'execute_task');
+    assert.equal(assigned.body.remoteTask.taskType, 'resolve_backlog_listing');
+    assert.equal(assigned.body.remoteTask.worker.sessionId, sessionId);
+    assert.equal(assigned.body.remoteTask.worker.workerType, 'collector');
+
+    const commands = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/commands`, {
+      token: workerToken,
+    });
+    assert.equal(commands.status, 200);
+    assert.equal(commands.body.commands.length, 1);
+    const task = commands.body.commands[0].payload.task;
+    assert.equal(commands.body.commands[0].commandType, 'execute_task');
+    assert.equal(task.taskType, 'resolve_backlog_listing');
+    assert.equal(task.payload.workflowId, 'backlog-resolve');
+    assert.equal(task.workerType, 'resolver');
+    assert.equal(task.strategy, 'filtered');
+    assert.deepEqual(task.payload.adapterArgs, ['--headless', '--drain', '--limit', '5']);
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('remote worker UI API exposes health and queues control commands', async () => {
   const { tempDir, dbPath } = createTempDbPath();
   const workerToken = 'ui-worker-token';
@@ -1028,14 +1112,17 @@ test('remote workflow start assigns collector task to selected generic worker', 
       method: 'POST',
       token: 'admin-token',
       body: {
-        workflowId: 'remote-search-explore',
+        workflowId: 'search-explore',
+        executionTarget: 'remote',
         remoteTargetSessionId: sessionId,
         args: ['--query', 'pentax 67', '--collect-all', '--max-runtime-seconds', '10'],
       },
     });
     assert.equal(assigned.status, 202);
-    assert.equal(assigned.body.remoteTask.commandType, 'run_collector_once');
+    assert.equal(assigned.body.remoteTask.commandType, 'execute_task');
+    assert.equal(assigned.body.remoteTask.taskType, 'collect_search_results');
     assert.equal(assigned.body.remoteTask.worker.sessionId, sessionId);
+    assert.equal(assigned.body.remoteTask.worker.workerType, 'backlog_indexer');
     assert.equal(assigned.body.remoteTask.strategy, 'explorer');
 
     const commands = await requestJson(baseUrl, `/api/v2/remote-workers/sessions/${encodeURIComponent(sessionId)}/commands`, {
@@ -1043,11 +1130,13 @@ test('remote workflow start assigns collector task to selected generic worker', 
     });
     assert.equal(commands.status, 200);
     assert.equal(commands.body.commands.length, 1);
-    assert.equal(commands.body.commands[0].commandType, 'run_collector_once');
-    assert.equal(commands.body.commands[0].payload.workflowId, 'remote-search-explore');
-    assert.equal(commands.body.commands[0].payload.workerType, 'collector');
-    assert.equal(commands.body.commands[0].payload.strategy, 'explorer');
-    assert.deepEqual(commands.body.commands[0].payload.adapterArgs, ['--query', 'pentax 67', '--collect-all', '--max-runtime-seconds', '10']);
+    assert.equal(commands.body.commands[0].commandType, 'execute_task');
+    assert.equal(commands.body.commands[0].payload.task.taskType, 'collect_search_results');
+    assert.equal(commands.body.commands[0].payload.task.workflowId, undefined);
+    assert.equal(commands.body.commands[0].payload.task.payload.workflowId, 'search-explore');
+    assert.equal(commands.body.commands[0].payload.task.workerType, 'collector');
+    assert.equal(commands.body.commands[0].payload.task.strategy, 'explorer');
+    assert.deepEqual(commands.body.commands[0].payload.task.payload.adapterArgs, ['--query', 'pentax 67', '--collect-all', '--max-runtime-seconds', '10']);
   } finally {
     await closeServer(server);
     fs.rmSync(tempDir, { recursive: true, force: true });

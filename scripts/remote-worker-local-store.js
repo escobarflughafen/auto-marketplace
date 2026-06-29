@@ -68,11 +68,19 @@ function ensureRemoteWorkerLocalSchema(db) {
       last_error TEXT NOT NULL DEFAULT ''
     );
   `);
+  ensureColumn(db, 'worker_commands', 'ack_status', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'worker_commands', 'ack_payload_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, 'worker_commands', 'last_error', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'worker_commands', 'ack_error', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'worker_commands', 'completed_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'worker_artifact_spool', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'worker_artifact_spool', 'last_error', "TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_worker_artifact_spool_pending
     ON worker_artifact_spool (sync_status, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_worker_commands_pending_ack
+    ON worker_commands (acked_at, completed_at);
   `);
 }
 
@@ -242,6 +250,78 @@ function appendLocalCommand(db, command) {
   );
 }
 
+function getLocalCommand(db, commandId) {
+  const row = db.prepare('SELECT * FROM worker_commands WHERE command_id = ?').get(String(commandId));
+  if (!row) return null;
+  return {
+    commandId: row.command_id,
+    commandType: row.command_type,
+    payload: parseJson(row.payload_json, {}),
+    status: row.status,
+    ackStatus: row.ack_status || '',
+    ackPayload: parseJson(row.ack_payload_json, {}),
+    lastError: row.last_error || '',
+    ackError: row.ack_error || '',
+    receivedAt: row.received_at || '',
+    completedAt: row.completed_at || '',
+    ackedAt: row.acked_at || '',
+  };
+}
+
+function markLocalCommandAckPending(db, commandId, ack) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE worker_commands
+    SET
+      status = ?,
+      ack_status = ?,
+      ack_payload_json = ?,
+      last_error = ?,
+      completed_at = CASE WHEN completed_at = '' THEN ? ELSE completed_at END
+    WHERE command_id = ?
+  `).run(
+    String(ack.status || 'completed'),
+    String(ack.status || 'completed'),
+    serializeJson(ack.payload || {}),
+    String(ack.error || ''),
+    now,
+    String(commandId),
+  );
+}
+
+function listPendingCommandAcks(db, options = {}) {
+  const limit = Math.max(1, Math.min(Number.parseInt(options.limit, 10) || 25, 100));
+  return db.prepare(`
+    SELECT *
+    FROM worker_commands
+    WHERE completed_at != '' AND acked_at = '' AND ack_status != ''
+    ORDER BY completed_at ASC, command_id ASC
+    LIMIT ?
+  `).all(limit).map((row) => ({
+    commandId: row.command_id,
+    commandType: row.command_type,
+    status: row.ack_status,
+    payload: parseJson(row.ack_payload_json, {}),
+    error: row.last_error || '',
+  }));
+}
+
+function markLocalCommandAcked(db, commandId) {
+  db.prepare(`
+    UPDATE worker_commands
+    SET acked_at = ?, ack_error = ''
+    WHERE command_id = ?
+  `).run(new Date().toISOString(), String(commandId));
+}
+
+function markLocalCommandAckFailed(db, commandId, error) {
+  db.prepare(`
+    UPDATE worker_commands
+    SET ack_error = ?
+    WHERE command_id = ?
+  `).run(String(error?.message || error || '').trim(), String(commandId));
+}
+
 function appendArtifactManifest(db, manifest) {
   const now = new Date().toISOString();
   const artifactId = String(manifest.artifactId || '').trim();
@@ -351,6 +431,11 @@ module.exports = {
   markOutboxEventsFailed,
   countPendingOutboxEvents,
   appendLocalCommand,
+  getLocalCommand,
+  markLocalCommandAckPending,
+  listPendingCommandAcks,
+  markLocalCommandAcked,
+  markLocalCommandAckFailed,
   appendArtifactManifest,
   listPendingArtifactManifests,
   markArtifactsAcked,
