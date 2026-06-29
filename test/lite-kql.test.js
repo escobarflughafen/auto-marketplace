@@ -4,6 +4,11 @@ const assert = require('node:assert/strict');
 const { parseLiteKql } = require('../scripts/lite-kql-parser');
 const { planLiteKql } = require('../scripts/lite-kql-planner');
 const { buildLiteCountQuery, buildLiteListingsQuery } = require('../scripts/lite-kql-sqlite');
+const {
+  buildLiteListingsQuery: buildPostgresLiteListingsQuery,
+  buildLiteCountQuery: buildPostgresLiteCountQuery,
+  buildLiteListingsStatsQueries: buildPostgresLiteListingsStatsQueries,
+} = require('../scripts/lite-kql-postgres');
 const { completeLiteKql } = require('../scripts/lite-kql-authoring');
 
 test('parseLiteKql reads source, where, sort, and take stages', () => {
@@ -74,4 +79,48 @@ test('completeLiteKql supports trade history source fields and values', () => {
 
   const valueCompletion = completeLiteKql({ query: 'history | where status == ', cursor: 'history | where status == '.length });
   assert.ok(valueCompletion.suggestions.some((item) => item.label === 'sold'));
+});
+
+
+test('buildPostgresLiteListingsQuery compiles PostgreSQL placeholders and price extraction', () => {
+  const query = buildPostgresLiteListingsQuery({
+    query: 'listings | where (title contains "pentax 67" or keyword in ("nikon", "leica")) and price >= 2000 | sort by price desc | take 25',
+    offset: '10',
+  });
+
+  assert.match(query.sql, /FROM homepage_listings/);
+  assert.match(query.sql, /regexp_match\(detail_price/);
+  assert.match(query.sql, /ESCAPE E'\\\\'/);
+  assert.match(query.sql, /LIMIT \$6 OFFSET \$7/);
+  assert.doesNotMatch(query.sql, /LIMIT \? OFFSET \?/);
+  assert.equal(query.limit, 25);
+  assert.deepEqual(query.params, [2000, '%pentax 67%', '%pentax 67%', 'nikon', 'leica', 25, 10]);
+});
+
+test('buildPostgresLiteCountQuery compiles count query with dollar parameters', () => {
+  const query = buildPostgresLiteCountQuery({
+    query: 'listings | where status == "pending" and title contains "leica" | count',
+  });
+
+  assert.match(query.sql, /SELECT COUNT\(\*\) AS total/);
+  assert.match(query.sql, /detail_status = \$1/);
+  assert.match(query.sql, /card_title LIKE \$2/);
+  assert.match(query.sql, /detail_title LIKE \$3/);
+  assert.doesNotMatch(query.sql, /LIKE \?/);
+  assert.deepEqual(query.params, ['pending', '%leica%', '%leica%']);
+});
+
+test('buildPostgresLiteListingsStatsQueries compiles histogram with PostgreSQL floor casts', () => {
+  const stats = buildPostgresLiteListingsStatsQueries({
+    query: 'listings | where title contains "pentax" and price >= 2000',
+    excludeListingIds: ['queued-a'],
+  });
+  const histogram = stats.priceHistogram({ min: 2000, max: 5000, binCount: 6 });
+
+  assert.match(stats.priceSummary.sql, /regexp_match\(detail_price/);
+  assert.match(stats.priceSummary.sql, /COUNT\(\*\) AS \"totalRows\"/);
+  assert.match(histogram.sql, /FLOOR\(\(numeric_price - \$7\) \/ \$8\)::BIGINT/);
+  assert.doesNotMatch(histogram.sql, /CAST\(/);
+  assert.doesNotMatch(histogram.sql, /LIMIT \?/);
+  assert.deepEqual(histogram.params, [2000, '%pentax%', '%pentax%', 'queued-a', 5000, 5, 2000, 500]);
 });
