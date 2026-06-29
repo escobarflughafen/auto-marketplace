@@ -315,6 +315,220 @@ test('claimRemoteWorkerWork touches unsupported sessions without claiming', asyn
   assert.deepEqual(update.params, ['2026-01-03T00:00:00.000Z', 'session-1']);
 });
 
+
+test('ingestRemoteWorkerEvents stores workflow events and updates checkpoint', async () => {
+  const pool = createFakePool((sql) => {
+    if (/FROM remote_worker_sessions/.test(sql)) return [sessionRow];
+    if (/FROM remote_worker_event_ingest\s+WHERE event_id/.test(sql)) return [];
+    if (/MAX\(sequence\)/.test(sql)) return [{ lastAcceptedSequence: '7' }];
+    return [];
+  });
+  const store = createRemoteWorkerPostgresStore({ pool, nowIso: () => '2026-01-03T00:00:00.000Z' });
+
+  const result = await store.ingestRemoteWorkerEvents('session-1', {
+    workerId: 'worker-1',
+    batchId: 'batch-1',
+    events: [{
+      eventId: 'event-1',
+      sequence: 7,
+      eventScope: 'workflow',
+      eventType: 'worker_heartbeat',
+      eventAt: '2026-01-03T00:00:01.000Z',
+      status: 'ok',
+      payload: { workerType: 'backlog_indexer', strategy: 'resolved_metadata', step: 'poll' },
+    }],
+  });
+
+  assert.equal(result.status, 'accepted');
+  assert.deepEqual(result.accepted, [{ eventId: 'event-1', sequence: 7 }]);
+  assert.equal(result.checkpoint.lastAcceptedSequence, 7);
+  const ingestInsert = pool.calls.find((call) => /INSERT INTO remote_worker_event_ingest/.test(call.sql));
+  assert.ok(ingestInsert);
+  assert.equal(ingestInsert.params[0], 'event-1');
+  assert.equal(ingestInsert.params[5], 'batch-1');
+  assert.equal(ingestInsert.params[7], 'workflow');
+  assert.equal(ingestInsert.params[15], 'reduced');
+  const workflowInsert = pool.calls.find((call) => /INSERT INTO workflow_events/.test(call.sql));
+  assert.ok(workflowInsert);
+  assert.deepEqual(workflowInsert.params.slice(0, 5), ['event-1', 'session-1', 'worker_heartbeat', '2026-01-03T00:00:01.000Z', 'ok']);
+  const sessionUpdate = pool.calls.find((call) => /last_acked_sequence/.test(call.sql));
+  assert.ok(sessionUpdate);
+  assert.deepEqual(sessionUpdate.params, [7, '2026-01-03T00:00:00.000Z', 'session-1']);
+});
+
+test('ingestRemoteWorkerEvents handles duplicates without rewriting projections', async () => {
+  const pool = createFakePool((sql) => {
+    if (/FROM remote_worker_sessions/.test(sql)) return [sessionRow];
+    if (/FROM remote_worker_event_ingest\s+WHERE event_id/.test(sql)) return [{ event_id: 'event-dup', sequence: 3 }];
+    if (/MAX\(sequence\)/.test(sql)) return [{ lastAcceptedSequence: '3' }];
+    return [];
+  });
+  const store = createRemoteWorkerPostgresStore({ pool, nowIso: () => '2026-01-03T00:00:00.000Z' });
+
+  const result = await store.ingestRemoteWorkerEvents('session-1', {
+    workerId: 'worker-1',
+    events: [{
+      eventId: 'event-dup',
+      sequence: 3,
+      eventScope: 'workflow',
+      eventType: 'worker_heartbeat',
+      payload: { workerType: 'backlog_indexer', strategy: 'resolved_metadata' },
+    }],
+  });
+
+  assert.deepEqual(result.accepted, []);
+  assert.deepEqual(result.duplicates, [{ eventId: 'event-dup', sequence: 3 }]);
+  assert.equal(pool.calls.some((call) => /INSERT INTO workflow_events/.test(call.sql)), false);
+});
+
+test('ingestRemoteWorkerEvents projects listing metadata updates for backlog indexer', async () => {
+  const pool = createFakePool((sql) => {
+    if (/FROM remote_worker_sessions/.test(sql)) return [sessionRow];
+    if (/FROM remote_worker_event_ingest\s+WHERE event_id/.test(sql)) return [];
+    if (/MAX\(sequence\)/.test(sql)) return [{ lastAcceptedSequence: '11' }];
+    return [];
+  });
+  const store = createRemoteWorkerPostgresStore({ pool, nowIso: () => '2026-01-03T00:00:00.000Z' });
+
+  const result = await store.ingestRemoteWorkerEvents('session-1', {
+    workerId: 'worker-1',
+    events: [{
+      eventId: 'event-listing',
+      sequence: 11,
+      eventScope: 'listing',
+      eventType: 'backlog_listing_metadata_indexed',
+      eventAt: '2026-01-03T00:01:00.000Z',
+      listingId: 'listing-1',
+      status: 'ok',
+      payload: {
+        detailListedAgo: '2 hours ago',
+        listedAtEarliestUnix: 1760000000,
+        listedAtLatestUnix: 1760003600,
+        listedAtAnchorUnix: 1760007200,
+        language: 'en',
+        unit: 'hour',
+        value: 2,
+        confidence: 'high',
+        indexerVersion: 'resolved-metadata-v1',
+      },
+    }],
+  });
+
+  assert.equal(result.accepted.length, 1);
+  const listingInsert = pool.calls.find((call) => /INSERT INTO listing_events/.test(call.sql));
+  assert.ok(listingInsert);
+  assert.deepEqual(listingInsert.params.slice(0, 6), ['event-listing', 'session-1', 'listing-1', 'backlog_listing_metadata_indexed', '2026-01-03T00:01:00.000Z', 'worker-1']);
+  const metadataUpdate = pool.calls.find((call) => /UPDATE homepage_listings/.test(call.sql));
+  assert.ok(metadataUpdate);
+  assert.deepEqual(metadataUpdate.params, [
+    '2 hours ago',
+    1760000000,
+    1760003600,
+    1760007200,
+    'en',
+    'hour',
+    2,
+    'high',
+    'remote:worker-1:resolved-metadata-v1',
+    '2026-01-03T00:01:00.000Z',
+    'listing-1',
+  ]);
+});
+
+test('listRemoteWorkerIngestEvents maps PostgreSQL rows to API envelopes', async () => {
+  const pool = createFakePool((sql) => {
+    if (/FROM remote_worker_event_ingest/.test(sql)) return [{
+      event_id: 'event-1',
+      session_id: 'session-1',
+      worker_id: 'worker-1',
+      worker_type: 'backlog_indexer',
+      strategy: 'resolved_metadata',
+      sequence: '2',
+      event_scope: 'workflow',
+      event_type: 'worker_heartbeat',
+      event_at: '2026-01-03T00:00:00.000Z',
+      listing_id: '',
+      status: 'ok',
+      payload_json: '{"step":"poll"}',
+      reduce_status: 'reduced',
+      reduce_error: '',
+    }];
+    return [];
+  });
+  const store = createRemoteWorkerPostgresStore({ pool });
+  const rows = await store.listRemoteWorkerIngestEvents('session-1');
+
+  assert.deepEqual(rows, [{
+    eventId: 'event-1',
+    sessionId: 'session-1',
+    workerId: 'worker-1',
+    workerType: 'backlog_indexer',
+    strategy: 'resolved_metadata',
+    sequence: 2,
+    eventScope: 'workflow',
+    eventType: 'worker_heartbeat',
+    eventAt: '2026-01-03T00:00:00.000Z',
+    listingId: '',
+    status: 'ok',
+    payload: { step: 'poll' },
+    reduceStatus: 'reduced',
+    reduceError: '',
+  }]);
+});
+
+test('ingestRemoteWorkerArtifacts accepts manifests and handles duplicates', async () => {
+  const digest = 'a'.repeat(64);
+  const pool = createFakePool((sql) => {
+    if (/FROM remote_worker_sessions/.test(sql)) return [sessionRow];
+    if (/FROM remote_worker_artifacts/.test(sql)) return [];
+    return [];
+  });
+  const store = createRemoteWorkerPostgresStore({ pool, nowIso: () => '2026-01-03T00:00:00.000Z' });
+
+  const result = await store.ingestRemoteWorkerArtifacts('session-1', {
+    workerId: 'worker-1',
+    artifactId: 'artifact-1',
+    artifactType: 'image',
+    mediaRole: 'screenshot',
+    contentType: 'image/jpeg',
+    sha256: digest,
+    sizeBytes: 123,
+    width: 800,
+    height: 600,
+    localPath: '/tmp/a.jpg',
+    sourceUrl: 'https://example.test/a.jpg',
+    metadata: { page: 1 },
+  });
+
+  assert.equal(result.status, 'accepted');
+  assert.deepEqual(result.accepted, [{ artifactId: 'artifact-1', sha256: digest, uploadStatus: 'manifest_accepted' }]);
+  const insert = pool.calls.find((call) => /INSERT INTO remote_worker_artifacts/.test(call.sql));
+  assert.ok(insert);
+  assert.equal(insert.params[0], 'artifact-1');
+  assert.equal(insert.params[8], digest);
+  assert.equal(insert.params[9], 123);
+  assert.equal(insert.params[16], '{"page":1}');
+  assert.ok(pool.calls.some((call) => /UPDATE remote_worker_sessions/.test(call.sql)));
+
+  const duplicatePool = createFakePool((sql) => {
+    if (/FROM remote_worker_sessions/.test(sql)) return [sessionRow];
+    if (/FROM remote_worker_artifacts/.test(sql)) return [{ artifact_id: 'artifact-1', sha256: digest, size_bytes: 123 }];
+    return [];
+  });
+  const duplicateStore = createRemoteWorkerPostgresStore({ pool: duplicatePool, nowIso: () => '2026-01-03T00:00:00.000Z' });
+  const duplicate = await duplicateStore.ingestRemoteWorkerArtifacts('session-1', {
+    workerId: 'worker-1',
+    artifactId: 'artifact-1',
+    artifactType: 'image',
+    mediaRole: 'screenshot',
+    contentType: 'image/jpeg',
+    sha256: digest,
+    sizeBytes: 123,
+  });
+  assert.deepEqual(duplicate.duplicates, [{ artifactId: 'artifact-1', sha256: digest }]);
+  assert.equal(duplicatePool.calls.some((call) => /INSERT INTO remote_worker_artifacts/.test(call.sql)), false);
+});
+
 test('renewRemoteWorkerLease and completeRemoteWorkerLease update PostgreSQL lease state', async () => {
   const leaseRow = {
     claim_id: 'claim-1',
