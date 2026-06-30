@@ -33,6 +33,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'getListingEvent',
   'getListingEvents',
   'getLatestListingEvent',
+  'upsertListingMediaForListing',
+  'listListingMedia',
   'listWorkerListingEvents',
   'getWorkerListingEventStats',
   'listWorkerAuditEvents',
