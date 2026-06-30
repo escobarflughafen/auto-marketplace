@@ -31,6 +31,10 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'listWorkflowRuns',
   'listWorkerListingEvents',
   'getWorkerListingEventStats',
+  'appendWorkflowEvent',
+  'getWorkflowEvent',
+  'listWorkflowEvents',
+  'listWorkerWorkflowEvents',
 ]);
 
 const READ_NAME_PATTERNS = [
