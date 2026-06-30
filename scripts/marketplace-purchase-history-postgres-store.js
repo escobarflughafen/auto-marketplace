@@ -1,3 +1,5 @@
+const { canonicalizeListingUrl } = require('./marketplace-homepage-listings-postgres-store');
+
 function serializeJson(value) { return JSON.stringify(value ?? {}, null, 2); }
 
 function parseJsonObject(value) {
@@ -48,6 +50,38 @@ function normalizePurchaseHistoryRow(row) {
     data: parseJsonObject(row.data_json),
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function normalizePurchaseHistoryListingRelationship(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (normalized === 'same_listing' || normalized === 'transaction' || normalized === 'exact') return 'same_listing';
+  return 'same_model';
+}
+
+function normalizePurchaseHistoryListingLinkRow(row) {
+  if (!row) return null;
+  return {
+    document_id: row.document_id,
+    record_id: row.record_id,
+    listing_id: row.listing_id,
+    relationship_type: normalizePurchaseHistoryListingRelationship(row.relationship_type),
+    href: canonicalizeListingUrl(row.href || row.listing_href || ''),
+    note: row.note || '',
+    linked_at: row.linked_at,
+    updated_at: row.updated_at,
+    listing: {
+      href: canonicalizeListingUrl(row.listing_href || row.href || ''),
+      source: row.source || '',
+      source_keyword: row.source_keyword || '',
+      card_title: row.card_title || '',
+      detail_title: row.detail_title || '',
+      detail_price: row.detail_price || '',
+      detail_status: row.detail_status || '',
+      detail_completed_at: row.detail_completed_at || '',
+      screenshot_path: row.screenshot_path || '',
+      snapshot_path: row.snapshot_path || '',
+    },
   };
 }
 
@@ -262,6 +296,71 @@ function createMarketplacePurchaseHistoryPostgresStore(options = {}) {
       return rows.map(normalizePurchaseHistoryRow);
     },
 
+    async listPurchaseHistoryListingLinks(options = {}) {
+      const documentId = String(options.documentId || options.document_id || '').trim();
+      const recordId = String(options.recordId || options.record_id || '').trim();
+      const listingId = String(options.listingId || options.listing_id || '').trim();
+      const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 10000;
+      const filters = [];
+      const params = [];
+      if (documentId) { params.push(documentId); filters.push(`links.document_id = $${params.length}`); }
+      if (recordId) { params.push(recordId); filters.push(`links.record_id = $${params.length}`); }
+      if (listingId) { params.push(listingId); filters.push(`links.listing_id = $${params.length}`); }
+      params.push(limit);
+      const rows = await queryRows(pool, `
+        SELECT
+          links.*,
+          listings.href AS listing_href,
+          listings.source,
+          listings.source_keyword,
+          listings.card_title,
+          listings.detail_title,
+          listings.detail_price,
+          listings.detail_status,
+          listings.detail_completed_at,
+          listings.screenshot_path,
+          listings.snapshot_path
+        FROM purchase_history_listing_links links
+        LEFT JOIN homepage_listings listings
+          ON listings.listing_id = links.listing_id
+        ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+        ORDER BY links.linked_at DESC, links.listing_id ASC
+        LIMIT $${params.length}
+      `, params);
+      return rows.map(normalizePurchaseHistoryListingLinkRow);
+    },
+
+    async upsertPurchaseHistoryListingLink(link = {}, options = {}) {
+      const documentId = String(link.documentId || link.document_id || '').trim();
+      const recordId = String(link.recordId || link.record_id || '').trim();
+      const listingId = String(link.listingId || link.listing_id || '').trim();
+      const href = canonicalizeListingUrl(link.href || '');
+      const relationshipType = normalizePurchaseHistoryListingRelationship(link.relationshipType || link.relationship_type);
+      if (!documentId || !recordId || !listingId) throw new Error('purchase history listing link requires documentId, recordId, and listingId');
+      const row = await this.getPurchaseHistoryRow(documentId, recordId);
+      if (!row) throw new Error(`Unknown purchase history record: ${recordId}`);
+      const listing = await queryOne(pool, 'SELECT * FROM homepage_listings WHERE listing_id = $1', [listingId]);
+      if (!listing) throw new Error(`Unknown listing: ${listingId}`);
+      const now = options.linkedAt || options.linked_at || nowIso();
+      await pool.query(`
+        INSERT INTO purchase_history_listing_links (document_id, record_id, listing_id, relationship_type, href, note, linked_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT(document_id, record_id, listing_id, relationship_type) DO UPDATE SET
+          href = excluded.href,
+          note = excluded.note,
+          updated_at = excluded.updated_at
+      `, [documentId, recordId, listingId, relationshipType, href || listing.href || '', String(link.note || '').trim(), now, now]);
+      await this.appendPurchaseHistoryEvent({
+        documentId,
+        recordId,
+        eventType: 'listing_linked',
+        eventAt: now,
+        createdAt: now,
+        eventId: `${documentId}:${recordId}:listing_linked:${relationshipType}:${listingId}:${now}`,
+        data: { listing_id: listingId, href: href || listing.href || '', relationship_type: relationshipType, title: row.title },
+      });
+      return (await this.listPurchaseHistoryListingLinks({ documentId, recordId, listingId })).find((item) => item.relationship_type === relationshipType) || null;
+    },
     async listPurchaseHistoryEvents(options = {}) {
       const documentId = String(options.documentId || options.document_id || '').trim();
       const recordId = String(options.recordId || options.record_id || '').trim();
@@ -289,6 +388,8 @@ module.exports = {
   normalizeDocumentId,
   normalizePurchaseHistoryDocumentRow,
   normalizePurchaseHistoryRow,
+  normalizePurchaseHistoryListingRelationship,
+  normalizePurchaseHistoryListingLinkRow,
   normalizePurchaseHistoryEventRow,
   purchaseHistoryRowProjection,
   normalizeInventoryStatus,

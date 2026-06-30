@@ -53,6 +53,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'getPurchaseHistoryRow',
   'upsertPurchaseHistoryRows',
   'listPurchaseHistoryRows',
+  'upsertPurchaseHistoryListingLink',
+  'listPurchaseHistoryListingLinks',
   'appendPurchaseHistoryEvent',
   'listPurchaseHistoryEvents',
   'listListingMedia',

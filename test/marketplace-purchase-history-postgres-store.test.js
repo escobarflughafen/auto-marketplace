@@ -6,6 +6,8 @@ const {
   uniquePurchaseHistoryDocumentId,
   normalizeDocumentId,
   normalizePurchaseHistoryDocumentRow,
+  normalizePurchaseHistoryListingRelationship,
+  normalizePurchaseHistoryListingLinkRow,
   purchaseHistoryLifecycleEvents,
 } = require('../scripts/marketplace-purchase-history-postgres-store');
 
@@ -30,6 +32,9 @@ test('normalizes purchase history ids, documents, and lifecycle events', () => {
   assert.equal(normalizeDocumentId('Primary & Imported CSV!'), 'primary-and-imported-csv');
   assert.deepEqual(normalizePurchaseHistoryDocumentRow({ document_id: 'doc-1', name: 'Doc', row_count: '2' }).row_count, 2);
   assert.deepEqual(purchaseHistoryLifecycleEvents({ purchase_at: '2026-05-01', listed_at: '2026-05-03', sold_at: '2026-05-05' }).map((event) => event.eventType), ['inventory_added', 'listed', 'sold']);
+  assert.equal(normalizePurchaseHistoryListingRelationship('exact'), 'same_listing');
+  assert.equal(normalizePurchaseHistoryListingRelationship('same model'), 'same_model');
+  assert.equal(normalizePurchaseHistoryListingLinkRow({ document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', relationship_type: 'transaction', href: 'https://www.facebook.com/marketplace/item/123/?x=1', listing_href: 'https://www.facebook.com/marketplace/item/123/?x=1' }).href, 'https://www.facebook.com/marketplace/item/123/');
 });
 
 test('generates suffixed PostgreSQL purchase history document ids', async () => {
@@ -96,6 +101,34 @@ test('upsertPurchaseHistoryRows writes rows and lifecycle events in a transactio
   assert.equal(result.updated, 0);
   assert.equal(result.total, 1);
   assert.deepEqual(pool.calls.map((call) => call.sql).filter((sql) => sql === 'BEGIN' || sql === 'COMMIT'), ['BEGIN', 'COMMIT']);
+});
+
+test('upserts and lists PostgreSQL purchase history listing links', async () => {
+  const pool = createFakePool((sql, params) => {
+    if (/SELECT \* FROM purchase_history_rows/.test(sql)) return [{ document_id: 'doc-1', record_id: 'trade-001', title: 'Nikon FM2', data_json: '{}', created_at: 'c', updated_at: 'u' }];
+    if (/SELECT \* FROM homepage_listings WHERE listing_id = \$1/.test(sql)) return [{ listing_id: 'listing-1', href: 'https://www.facebook.com/marketplace/item/123/' }];
+    if (/INSERT INTO purchase_history_listing_links/.test(sql)) {
+      assert.deepEqual(params, ['doc-1', 'trade-001', 'listing-1', 'same_listing', 'https://www.facebook.com/marketplace/item/123/', 'manual link', '2026-05-07T00:00:00.000Z', '2026-05-07T00:00:00.000Z']);
+      return { rows: [], rowCount: 1 };
+    }
+    if (/INSERT INTO purchase_history_events/.test(sql)) {
+      assert.equal(params[0], 'doc-1:trade-001:listing_linked:same_listing:listing-1:2026-05-07T00:00:00.000Z');
+      assert.equal(params[3], 'listing_linked');
+      assert.equal(JSON.parse(params[5]).relationship_type, 'same_listing');
+      return { rows: [], rowCount: 1 };
+    }
+    if (/FROM purchase_history_listing_links links/.test(sql)) {
+      assert.deepEqual(params, ['doc-1', 'trade-001', 'listing-1', 10000]);
+      assert.match(sql, /links\.document_id = \$1/);
+      assert.match(sql, /LIMIT \$4/);
+      return [{ document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', relationship_type: 'transaction', href: 'https://www.facebook.com/marketplace/item/123/', note: 'manual link', linked_at: 'linked', updated_at: 'updated', listing_href: 'https://www.facebook.com/marketplace/item/123/', source: 'facebook', card_title: 'Nikon FM2' }];
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplacePurchaseHistoryPostgresStore({ pool });
+  const link = await store.upsertPurchaseHistoryListingLink({ documentId: 'doc-1', recordId: 'trade-001', listingId: 'listing-1', relationshipType: 'exact', note: 'manual link' }, { linkedAt: '2026-05-07T00:00:00.000Z' });
+  assert.equal(link.relationship_type, 'same_listing');
+  assert.equal(link.listing.card_title, 'Nikon FM2');
 });
 
 test('lists rows, appends events, filters events, deletes documents, and closes pool', async () => {
