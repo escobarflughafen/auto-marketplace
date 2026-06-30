@@ -1,3 +1,5 @@
+const { createMarketplaceWorkflowEventsPostgresStore } = require('./marketplace-workflow-events-postgres-store');
+
 const COLLECTOR_OBSERVED_EVENT_TYPE = 'listing_observed';
 const COLLECTOR_DONE_STATUSES = ['new', 'existing_updated', 'updated', 'match_queued', 'queued'];
 const COLLECTOR_SKIPPED_STATUSES = ['existing_same', 'duplicate', 'filtered', 'ignored', 'already_seen'];
@@ -94,6 +96,23 @@ function listingEventSemanticBuckets(eventType, status) {
     }
   }
   return buckets;
+}
+
+function isWorkflowReviewEvent(event = {}) {
+  return /failed|interrupted/i.test(event.event_type || '')
+    || ['error', 'failed', 'interrupted'].includes(event.status || '')
+    || Boolean(event.error);
+}
+
+function sortEventsDesc(events = []) {
+  return [...events].sort((left, right) => String(right.event_at || '').localeCompare(String(left.event_at || '')));
+}
+
+function workflowReviewSql(alias = 'workflow_events') {
+  return `(${alias}.event_type LIKE '%failed%'
+    OR ${alias}.event_type LIKE '%interrupted%'
+    OR ${alias}.status IN ('error', 'failed', 'interrupted')
+    OR COALESCE(${alias}.error, '') != '')`;
 }
 
 function collectorOutcomeStatsFromRows(rows = []) {
@@ -241,8 +260,110 @@ function listingEventSelectSql() {
   `;
 }
 
+function emptyAuditStats(workerId, source = 'cache_miss') {
+  return {
+    total: 0,
+    listingTotal: 0,
+    workflow: 0,
+    workflowReview: 0,
+    done: 0,
+    skipped: 0,
+    error: 0,
+    started: 0,
+    collector: {
+      observed: 0,
+      appended: 0,
+      updated: 0,
+      unchanged: 0,
+      rejected: 0,
+      errors: 0,
+    },
+    workerIds: [String(workerId || '').trim()].filter(Boolean),
+    eventTypes: [],
+    statusTypes: [],
+    latestEvent: null,
+    latestPreviewEvent: null,
+    source,
+  };
+}
+
+function buildAuditStatsFromCacheRows(workerId, rows = []) {
+  if (rows.length === 0) return null;
+
+  const listingStats = {
+    total: 0,
+    done: 0,
+    skipped: 0,
+    error: 0,
+    started: 0,
+    collector: collectorOutcomeStatsFromRows(rows),
+    workerIds: [String(workerId || '').trim()].filter(Boolean),
+    eventTypes: [],
+    statusTypes: [],
+    latestEvent: null,
+    latestPreviewEvent: null,
+  };
+  const listingEventTypeCounts = new Map();
+  const eventTypesByKey = new Map();
+  let workflowCount = 0;
+  let workflowReview = 0;
+
+  for (const row of rows) {
+    const count = integerValue(row.count, 0);
+    if (row.event_scope === 'listing') {
+      listingStats.total += count;
+      listingEventTypeCounts.set(row.event_type, (listingEventTypeCounts.get(row.event_type) || 0) + count);
+      listingStats.statusTypes.push({
+        eventType: row.event_type,
+        eventScope: 'listing',
+        status: row.status || '',
+        count,
+      });
+      for (const bucket of listingEventSemanticBuckets(row.event_type, row.status || '')) {
+        if (bucket === 'done') listingStats.done += count;
+        if (bucket === 'skipped') listingStats.skipped += count;
+        if (bucket === 'error') listingStats.error += count;
+        if (bucket === 'started') listingStats.started += count;
+      }
+    } else if (row.event_scope === 'workflow') {
+      workflowCount += count;
+      if (isWorkflowReviewEvent(row)) workflowReview += count;
+      const key = `workflow:${row.event_type}`;
+      eventTypesByKey.set(key, {
+        eventType: row.event_type,
+        eventScope: 'workflow',
+        count: (eventTypesByKey.get(key)?.count || 0) + count,
+      });
+    }
+  }
+
+  listingStats.eventTypes = [...listingEventTypeCounts.entries()].map(([eventType, count]) => ({
+    eventType,
+    eventScope: 'listing',
+    count,
+  }));
+  for (const item of listingStats.eventTypes) {
+    eventTypesByKey.set(`listing:${item.eventType}`, item);
+  }
+
+  return {
+    ...listingStats,
+    listingTotal: listingStats.total,
+    workflow: workflowCount,
+    workflowReview,
+    error: listingStats.error + workflowReview,
+    total: listingStats.total + workflowCount,
+    eventTypes: [...eventTypesByKey.values()]
+      .sort((left, right) => right.count - left.count || String(left.eventType).localeCompare(String(right.eventType))),
+    latestEvent: null,
+    latestPreviewEvent: null,
+    source: 'cache',
+  };
+}
+
 function createMarketplaceWorkerEventsPostgresStore(options = {}) {
   const pool = createPoolFromOptions(options);
+  const workflowEventStore = options.workflowEventStore || createMarketplaceWorkflowEventsPostgresStore({ pool });
 
   return {
     dialect: 'postgres',
@@ -271,6 +392,55 @@ function createMarketplaceWorkerEventsPostgresStore(options = {}) {
         LIMIT ${limitPlaceholder}
       `, params);
       return rows.map(normalizeListingEventRow);
+    },
+
+    async listWorkerAuditEvents(workerId, options = {}) {
+      const limit = boundedLimit(options.limit, 50);
+      const category = normalizeKeyword(options.category || 'all').toLowerCase();
+
+      if (category === 'workflow' || category === 'lifecycle') {
+        return workflowEventStore.listWorkerWorkflowEvents(workerId, { ...options, limit });
+      }
+
+      if (category === 'listing') {
+        return this.listWorkerListingEvents(workerId, {
+          ...options,
+          category: 'all',
+          limit,
+        });
+      }
+
+      if (category !== 'all') {
+        if (['error', 'errors', 'review'].includes(category)) {
+          const [listingEvents, workflowEvents] = await Promise.all([
+            this.listWorkerListingEvents(workerId, {
+              ...options,
+              category: 'error',
+              limit,
+            }),
+            workflowEventStore.listWorkerWorkflowEvents(workerId, { ...options, limit }),
+          ]);
+          return sortEventsDesc([
+            ...listingEvents,
+            ...workflowEvents.filter(isWorkflowReviewEvent),
+          ]).slice(0, limit);
+        }
+        return this.listWorkerListingEvents(workerId, {
+          ...options,
+          category,
+          limit,
+        });
+      }
+
+      const [listingEvents, workflowEvents] = await Promise.all([
+        this.listWorkerListingEvents(workerId, {
+          ...options,
+          category: 'all',
+          limit,
+        }),
+        workflowEventStore.listWorkerWorkflowEvents(workerId, { ...options, limit }),
+      ]);
+      return sortEventsDesc([...listingEvents, ...workflowEvents]).slice(0, limit);
     },
 
     async getWorkerListingEventStats(workerId, options = {}) {
@@ -347,6 +517,64 @@ function createMarketplaceWorkerEventsPostgresStore(options = {}) {
       };
     },
 
+    async getWorkerAuditEventStats(workerId, options = {}) {
+      if ((options.preferCache || options.cacheOnly) && !options.includeLatestEvents && !options.workerIds) {
+        const cacheRows = await queryRows(pool, `
+          SELECT event_scope, event_type, status, count
+          FROM worker_event_stats_cache
+          WHERE worker_id = $1
+        `, [String(workerId || '').trim()]);
+        const cached = buildAuditStatsFromCacheRows(workerId, cacheRows);
+        if (cached) return cached;
+        if (options.cacheOnly) return emptyAuditStats(workerId, 'cache_miss');
+      }
+
+      const listingStats = await this.getWorkerListingEventStats(workerId, options);
+      const workflowRows = await queryRows(pool, `
+        SELECT event_type, COUNT(*)::BIGINT AS count
+        FROM workflow_events
+        WHERE workflow_run_id = $1
+        GROUP BY event_type
+      `, [String(workerId)]);
+      const workflowCount = workflowRows.reduce((sum, row) => sum + integerValue(row.count, 0), 0);
+      const workflowReviewRow = await queryOne(pool, `
+        SELECT COUNT(*)::BIGINT AS count
+        FROM workflow_events
+        WHERE workflow_run_id = $1
+          AND ${workflowReviewSql('workflow_events')}
+      `, [String(workerId)]);
+      const workflowReview = integerValue(workflowReviewRow?.count, 0);
+      const latestWorkflow = (await workflowEventStore.listWorkerWorkflowEvents(workerId, { limit: 1 }))[0] || null;
+      const latestCandidates = [listingStats.latestEvent, latestWorkflow].filter(Boolean);
+      const latestEvent = sortEventsDesc(latestCandidates)[0] || null;
+      const eventTypesByKey = new Map();
+      for (const item of listingStats.eventTypes || []) {
+        eventTypesByKey.set(`${item.eventScope}:${item.eventType}`, item);
+      }
+      for (const row of workflowRows) {
+        const key = `workflow:${row.event_type}`;
+        const current = eventTypesByKey.get(key);
+        eventTypesByKey.set(key, {
+          eventType: row.event_type,
+          eventScope: 'workflow',
+          count: (current?.count || 0) + integerValue(row.count, 0),
+        });
+      }
+
+      return {
+        ...listingStats,
+        listingTotal: listingStats.total,
+        workflow: workflowCount,
+        workflowReview,
+        error: listingStats.error + workflowReview,
+        total: listingStats.total + workflowCount,
+        eventTypes: [...eventTypesByKey.values()]
+          .sort((left, right) => right.count - left.count || String(left.eventType).localeCompare(String(right.eventType))),
+        latestEvent,
+        latestPreviewEvent: listingStats.latestPreviewEvent,
+      };
+    },
+
     async close() {
       if (typeof pool.end === 'function') await pool.end();
     },
@@ -358,5 +586,7 @@ module.exports = {
   normalizeListingEventRow,
   listingEventSemanticBuckets,
   collectorOutcomeStatsFromRows,
+  isWorkflowReviewEvent,
+  buildAuditStatsFromCacheRows,
   boundedLimit,
 };

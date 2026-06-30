@@ -205,3 +205,142 @@ test('boundedLimit matches worker event API bounds', () => {
   assert.equal(boundedLimit(0, 50), 1);
   assert.equal(boundedLimit(500, 50), 200);
 });
+
+test('listWorkerAuditEvents composes listing and workflow events by category', async () => {
+  const workflowEvent = {
+    event_scope: 'workflow',
+    event_id: 'workflow-newer',
+    workflow_run_id: 'run-1',
+    listing_id: '',
+    event_type: 'browser_context_ready',
+    event_at: '2026-05-08T00:00:12.000Z',
+    worker_id: 'run-1',
+    source_url: '',
+    attempt: 0,
+    status: 'running',
+    content: {},
+    content_hash: '',
+    screenshot_path: '',
+    snapshot_path: '',
+    error: '',
+    listing: {},
+  };
+  const failedWorkflowEvent = {
+    ...workflowEvent,
+    event_id: 'workflow-failed',
+    event_type: 'browser_context_failed',
+    event_at: '2026-05-08T00:00:11.000Z',
+    status: 'failed',
+    error: 'boom',
+  };
+  const workflowEventStore = {
+    calls: [],
+    async listWorkerWorkflowEvents(workerId, options = {}) {
+      this.calls.push({ workerId, options });
+      return options.category === 'workflow-only'
+        ? [workflowEvent]
+        : [workflowEvent, failedWorkflowEvent];
+    },
+  };
+  const pool = createFakePool(() => [listingEventRow]);
+  const store = createMarketplaceWorkerEventsPostgresStore({ pool, workflowEventStore });
+
+  const all = await store.listWorkerAuditEvents('run-1', { limit: 3 });
+  assert.deepEqual(all.map((event) => event.event_id), ['workflow-newer', 'workflow-failed', 'event-1']);
+
+  const listingOnly = await store.listWorkerAuditEvents('run-1', { category: 'listing' });
+  assert.deepEqual(listingOnly.map((event) => event.event_scope), ['listing']);
+
+  const workflowOnly = await store.listWorkerAuditEvents('run-1', { category: 'workflow', categoryMarker: 'workflow-only' });
+  assert.deepEqual(workflowOnly.map((event) => event.event_scope), ['workflow', 'workflow']);
+
+  const review = await store.listWorkerAuditEvents('run-1', { category: 'review' });
+  assert.deepEqual(review.map((event) => event.event_id), ['workflow-failed', 'event-1']);
+});
+
+test('getWorkerAuditEventStats reads cache when requested', async () => {
+  const pool = createFakePool((sql) => {
+    if (/FROM worker_event_stats_cache/.test(sql)) {
+      return [
+        { event_scope: 'listing', event_type: 'listing_observed', status: 'new', count: '2' },
+        { event_scope: 'workflow', event_type: 'browser_context_failed', status: 'failed', count: '3' },
+      ];
+    }
+    throw new Error(
+      'cache-only audit stats should not read live tables',
+    );
+  });
+  const store = createMarketplaceWorkerEventsPostgresStore({
+    pool,
+    workflowEventStore: { async listWorkerWorkflowEvents() { return []; } },
+  });
+
+  const stats = await store.getWorkerAuditEventStats('run-1', { preferCache: true });
+  assert.equal(stats.source, 'cache');
+  assert.equal(stats.listingTotal, 2);
+  assert.equal(stats.workflow, 3);
+  assert.equal(stats.workflowReview, 3);
+  assert.equal(stats.error, 3);
+  assert.equal(stats.total, 5);
+  assert.deepEqual(stats.eventTypes.map((item) => item.eventScope), ['workflow', 'listing']);
+
+  const missing = await createMarketplaceWorkerEventsPostgresStore({
+    pool: createFakePool(() => []),
+    workflowEventStore: { async listWorkerWorkflowEvents() { return []; } },
+  }).getWorkerAuditEventStats('missing-run', { cacheOnly: true });
+  assert.equal(missing.source, 'cache_miss');
+  assert.equal(missing.total, 0);
+});
+
+test('getWorkerAuditEventStats merges live listing and workflow stats', async () => {
+  const latestWorkflow = {
+    event_scope: 'workflow',
+    event_id: 'workflow-latest',
+    workflow_run_id: 'run-1',
+    event_type: 'browser_context_failed',
+    event_at: '2026-05-08T00:00:20.000Z',
+    worker_id: 'run-1',
+    status: 'failed',
+    error: 'boom',
+    content: {},
+    listing: {},
+  };
+  const workflowEventStore = {
+    async listWorkerWorkflowEvents() {
+      return [latestWorkflow];
+    },
+  };
+  const pool = createFakePool((sql) => {
+    if (/SELECT event_type, status, COUNT/.test(sql)) {
+      return [
+        { event_type: 'listing_observed', status: 'new', count: '2' },
+        { event_type: 'detail_capture_failed', status: 'failed', count: '1' },
+      ];
+    }
+    if (/SELECT event_type, COUNT/.test(sql)) {
+      return [
+        { event_type: 'browser_context_ready', count: '4' },
+        { event_type: 'browser_context_failed', count: '1' },
+      ];
+    }
+    if (/SELECT COUNT\(\*\)::BIGINT AS count/.test(sql)) return [{ count: '1' }];
+    if (sql.includes('COALESCE(e.screenshot_path')) return [{ ...listingEventRow, event_id: 'preview-event' }];
+    if (/ORDER BY e\.event_at DESC\s+LIMIT 1/.test(sql)) return [{ ...listingEventRow, event_id: 'listing-latest' }];
+    return [];
+  });
+  const store = createMarketplaceWorkerEventsPostgresStore({ pool, workflowEventStore });
+  const stats = await store.getWorkerAuditEventStats('run-1');
+
+  assert.equal(stats.listingTotal, 3);
+  assert.equal(stats.workflow, 5);
+  assert.equal(stats.workflowReview, 1);
+  assert.equal(stats.total, 8);
+  assert.equal(stats.error, 2);
+  assert.equal(stats.latestEvent.event_id, 'workflow-latest');
+  assert.equal(stats.latestPreviewEvent.event_id, 'preview-event');
+  assert.deepEqual(stats.eventTypes.find((item) => item.eventType === 'browser_context_ready'), {
+    eventType: 'browser_context_ready',
+    eventScope: 'workflow',
+    count: 4,
+  });
+});

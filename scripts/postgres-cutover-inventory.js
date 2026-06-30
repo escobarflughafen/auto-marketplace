@@ -31,6 +31,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'listWorkflowRuns',
   'listWorkerListingEvents',
   'getWorkerListingEventStats',
+  'listWorkerAuditEvents',
+  'getWorkerAuditEventStats',
   'appendWorkflowEvent',
   'getWorkflowEvent',
   'listWorkflowEvents',
