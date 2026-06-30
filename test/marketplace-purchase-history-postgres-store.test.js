@@ -8,6 +8,7 @@ const {
   normalizePurchaseHistoryDocumentRow,
   normalizePurchaseHistoryListingRelationship,
   normalizePurchaseHistoryListingLinkRow,
+  normalizePurchaseHistoryMatchQueueRow,
   purchaseHistoryLifecycleEvents,
 } = require('../scripts/marketplace-purchase-history-postgres-store');
 
@@ -35,6 +36,7 @@ test('normalizes purchase history ids, documents, and lifecycle events', () => {
   assert.equal(normalizePurchaseHistoryListingRelationship('exact'), 'same_listing');
   assert.equal(normalizePurchaseHistoryListingRelationship('same model'), 'same_model');
   assert.equal(normalizePurchaseHistoryListingLinkRow({ document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', relationship_type: 'transaction', href: 'https://www.facebook.com/marketplace/item/123/?x=1', listing_href: 'https://www.facebook.com/marketplace/item/123/?x=1' }).href, 'https://www.facebook.com/marketplace/item/123/');
+  assert.deepEqual(normalizePurchaseHistoryMatchQueueRow({ document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', status: 'queued', listing_price_cad: '100', purchase_price_cad: '90', threshold_price_cad: '97.2', matched_terms_json: '[\"nikon\"]', history_data_json: '{\"record_id\":\"trade-001\"}' }).matched_terms, ['nikon']);
 });
 
 test('generates suffixed PostgreSQL purchase history document ids', async () => {
@@ -129,6 +131,57 @@ test('upserts and lists PostgreSQL purchase history listing links', async () => 
   const link = await store.upsertPurchaseHistoryListingLink({ documentId: 'doc-1', recordId: 'trade-001', listingId: 'listing-1', relationshipType: 'exact', note: 'manual link' }, { linkedAt: '2026-05-07T00:00:00.000Z' });
   assert.equal(link.relationship_type, 'same_listing');
   assert.equal(link.listing.card_title, 'Nikon FM2');
+});
+
+test('lists, counts, randomizes, and updates PostgreSQL purchase history match queue', async () => {
+  const queueRow = {
+    document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', status: 'queued',
+    listing_price_cad: '100', purchase_price_cad: '90', threshold_price_cad: '97.2', matched_terms_json: '[\"nikon\",\"fm2\"]',
+    listing_seen_at: 'seen', source: 'facebook', source_keyword: 'camera', first_matched_at: 'first', updated_at: 'updated', queued_at: 'queued', note: '',
+    detail_title: 'Nikon FM2', history_data_json: '{}',
+  };
+  const pool = createFakePool((sql, params) => {
+    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return [];
+    if (/FROM purchase_history_match_queue q/.test(sql) && /ORDER BY q\.updated_at DESC/.test(sql)) {
+      assert.deepEqual(params, ['queued', 'listing-1', 5, 2]);
+      assert.match(sql, /q\.status = \$1/);
+      assert.match(sql, /q\.listing_id = \$2/);
+      assert.match(sql, /LIMIT \$3 OFFSET \$4/);
+      return [queueRow];
+    }
+    if (/FROM purchase_history_match_queue q/.test(sql) && /ORDER BY RANDOM()/.test(sql)) {
+      assert.deepEqual(params, ['queued', 'saved', 2]);
+      assert.match(sql, /q\.status IN \(\$1, \$2\)/);
+      assert.match(sql, /LIMIT \$3/);
+      return [{ ...queueRow, listing_id: 'listing-2' }];
+    }
+    if (/SELECT COUNT\(\*\)::BIGINT AS total/.test(sql)) {
+      assert.deepEqual(params, ['doc-1']);
+      assert.match(sql, /q\.document_id = \$1/);
+      return [{ total: '7' }];
+    }
+    if (/UPDATE purchase_history_match_queue/.test(sql)) {
+      assert.deepEqual(params, ['saved', '2026-05-08T00:00:00.000Z', 'keeper', 'keeper', 'doc-1', 'trade-001', 'listing-1']);
+      return { rows: [], rowCount: 1 };
+    }
+    if (/INSERT INTO purchase_history_match_events/.test(sql)) {
+      assert.equal(params[1], 'doc-1');
+      assert.equal(params[4], 'recommendation_saved');
+      assert.equal(params[6], 'tester');
+      assert.equal(JSON.parse(params[8]).status, 'saved');
+      return { rows: [], rowCount: 1 };
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplacePurchaseHistoryPostgresStore({ pool });
+  const rows = await store.listPurchaseHistoryMatchQueue({ listingId: 'listing-1', limit: 5, offset: 2 });
+  const randomRows = await store.listRandomPurchaseHistoryMatches({ statuses: ['queued', 'saved'], resolvedOnly: true, limit: 2 });
+  const total = await store.countPurchaseHistoryMatchQueue({ status: 'all', documentId: 'doc-1' });
+  const updated = await store.updatePurchaseHistoryMatchQueueStatus({ documentId: 'doc-1', recordId: 'trade-001', listingId: 'listing-1', status: 'saved' }, { updatedAt: '2026-05-08T00:00:00.000Z', reason: 'keeper', actor: 'tester' });
+  assert.equal(rows[0].listing_price_cad, 100);
+  assert.equal(randomRows[0].listing_id, 'listing-2');
+  assert.equal(total, 7);
+  assert.equal(updated.changes, 1);
 });
 
 test('lists rows, appends events, filters events, deletes documents, and closes pool', async () => {

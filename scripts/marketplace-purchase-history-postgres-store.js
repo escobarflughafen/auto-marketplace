@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { canonicalizeListingUrl } = require('./marketplace-homepage-listings-postgres-store');
 
 function serializeJson(value) { return JSON.stringify(value ?? {}, null, 2); }
@@ -9,6 +10,16 @@ function parseJsonObject(value) {
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch { return {}; }
 }
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function normalizeKeyword(value) { return String(value || '').replace(/\s+/g, ' ').trim(); }
 
 function integerValue(value, fallback = 0) {
   const parsed = Number.parseInt(value, 10);
@@ -98,6 +109,58 @@ function normalizePurchaseHistoryEventRow(row) {
   };
 }
 
+function numberValue(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizePurchaseHistoryMatchQueueRow(row) {
+  if (!row) return null;
+  return {
+    document_id: row.document_id,
+    record_id: row.record_id,
+    listing_id: row.listing_id,
+    status: row.status,
+    listing_price_cad: numberValue(row.listing_price_cad),
+    purchase_price_cad: numberValue(row.purchase_price_cad),
+    threshold_price_cad: numberValue(row.threshold_price_cad),
+    matched_terms: parseJsonArray(row.matched_terms_json),
+    listing_seen_at: row.listing_seen_at || '',
+    source: row.source || '',
+    source_keyword: row.source_keyword || '',
+    first_matched_at: row.first_matched_at,
+    updated_at: row.updated_at,
+    queued_at: row.queued_at,
+    note: row.note || '',
+    title: row.detail_title || row.card_title || row.history_title || row.listing_id,
+    href: row.href || '',
+    card_title: row.card_title || '',
+    card_text: row.card_text || '',
+    detail_title: row.detail_title || '',
+    detail_price: row.detail_price || '',
+    detail_location: row.detail_location || '',
+    detail_condition: row.detail_condition || '',
+    detail_seller_name: row.detail_seller_name || '',
+    detail_last_error: row.detail_last_error || '',
+    first_seen_at: row.first_seen_at || '',
+    last_seen_at: row.last_seen_at || '',
+    detail_completed_at: row.detail_completed_at || '',
+    screenshot_path: row.screenshot_path || '',
+    snapshot_path: row.snapshot_path || '',
+    detail_status: row.detail_status || '',
+    history_title: row.history_title || '',
+    history_category: row.history_category || '',
+    history_subcategory: row.history_subcategory || '',
+    history_brand: row.history_brand || '',
+    history_model: row.history_model || '',
+    history_mount: row.history_mount || '',
+    history_purchase_at: row.history_purchase_at || '',
+    history_sold_at: row.history_sold_at || '',
+    history_outcome: row.history_outcome || '',
+    history_data: parseJsonObject(row.history_data_json),
+  };
+}
+
 function purchaseHistoryRowProjection(row) {
   const data = row && typeof row === 'object' ? row : {};
   const recordId = String(data.record_id || data.recordId || '').trim();
@@ -169,6 +232,83 @@ async function withTransaction(pool, callback) {
   try { await client.query('BEGIN'); const result = await callback(client); await client.query('COMMIT'); return result; }
   catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { if (client !== pool && typeof client.release === 'function') client.release(); }
+}
+
+function queueSelectSql(whereSql, suffixSql = '') {
+  return `
+    SELECT
+      q.*,
+      h.title AS history_title,
+      h.category AS history_category,
+      h.subcategory AS history_subcategory,
+      h.brand AS history_brand,
+      h.model AS history_model,
+      h.mount AS history_mount,
+      h.purchase_at AS history_purchase_at,
+      h.sold_at AS history_sold_at,
+      h.outcome AS history_outcome,
+      h.data_json AS history_data_json,
+      l.href,
+      l.card_title,
+      l.card_text,
+      l.detail_title,
+      l.detail_price,
+      l.detail_location,
+      l.detail_condition,
+      l.detail_seller_name,
+      l.detail_last_error,
+      l.first_seen_at,
+      l.last_seen_at,
+      l.detail_completed_at,
+      l.screenshot_path,
+      l.snapshot_path,
+      l.detail_status
+    FROM purchase_history_match_queue q
+    LEFT JOIN purchase_history_rows h
+      ON h.document_id = q.document_id AND h.record_id = q.record_id
+    LEFT JOIN homepage_listings l
+      ON l.listing_id = q.listing_id
+    ${whereSql}
+    ${suffixSql}
+  `;
+}
+
+function pushQueueFilters(options = {}, params = []) {
+  const filters = [];
+  const status = String(options.status || 'queued').trim();
+  if (status && status !== 'all') { params.push(status); filters.push(`q.status = $${params.length}`); }
+  if (options.listingId || options.listing_id) { params.push(String(options.listingId || options.listing_id).trim()); filters.push(`q.listing_id = $${params.length}`); }
+  if (options.documentId || options.document_id) { params.push(String(options.documentId || options.document_id).trim()); filters.push(`q.document_id = $${params.length}`); }
+  if (options.recordId || options.record_id) { params.push(String(options.recordId || options.record_id).trim()); filters.push(`q.record_id = $${params.length}`); }
+  if (options.resolvedOnly || options.resolved_only) filters.push("(l.detail_status = 'done' OR l.detail_completed_at IS NOT NULL OR NULLIF(l.snapshot_path, '') IS NOT NULL)");
+  return filters;
+}
+
+function buildPurchaseHistoryMatchEventId(eventAt, documentId, recordId, listingId, eventType) {
+  const entropy = crypto.randomBytes(8).toString('hex');
+  return [
+    String(eventAt || new Date().toISOString()).replace(/[^0-9A-Za-z]/g, ''),
+    String(documentId || 'document'),
+    String(recordId || 'record'),
+    String(listingId || 'listing'),
+    String(eventType || 'event'),
+    entropy,
+  ].join('-');
+}
+
+async function appendPurchaseHistoryMatchEvent(client, event = {}) {
+  const eventAt = event.eventAt || event.event_at || new Date().toISOString();
+  const documentId = String(event.documentId || event.document_id || '').trim();
+  const recordId = String(event.recordId || event.record_id || '').trim();
+  const listingId = String(event.listingId || event.listing_id || '').trim();
+  const eventType = normalizeKeyword(event.eventType || event.event_type || 'recommendation_event');
+  if (!documentId || !recordId || !listingId) throw new Error('recommendation event requires documentId, recordId, and listingId');
+  const eventId = String(event.eventId || event.event_id || buildPurchaseHistoryMatchEventId(eventAt, documentId, recordId, listingId, eventType));
+  await client.query(`
+    INSERT INTO purchase_history_match_events (event_id, document_id, record_id, listing_id, event_type, event_at, actor, reason, content_json)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+  `, [eventId, documentId, recordId, listingId, eventType, eventAt, String(event.actor || 'viewer').trim(), String(event.reason || '').trim(), serializeJson(event.content || {})]);
+  return eventId;
 }
 
 function createMarketplacePurchaseHistoryPostgresStore(options = {}) {
@@ -361,6 +501,71 @@ function createMarketplacePurchaseHistoryPostgresStore(options = {}) {
       });
       return (await this.listPurchaseHistoryListingLinks({ documentId, recordId, listingId })).find((item) => item.relationship_type === relationshipType) || null;
     },
+    async listPurchaseHistoryMatchQueue(options = {}) {
+      const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 200;
+      const offset = Number.isFinite(options.offset) ? Math.max(0, options.offset) : 0;
+      const params = [];
+      const filters = pushQueueFilters(options, params);
+      params.push(limit);
+      const limitPlaceholder = `$${params.length}`;
+      params.push(offset);
+      const offsetPlaceholder = `$${params.length}`;
+      const rows = await queryRows(pool, queueSelectSql(filters.length ? `WHERE ${filters.join(' AND ')}` : '', `ORDER BY q.updated_at DESC LIMIT ${limitPlaceholder} OFFSET ${offsetPlaceholder}`), params);
+      return rows.map(normalizePurchaseHistoryMatchQueueRow);
+    },
+
+    async listRandomPurchaseHistoryMatches(options = {}) {
+      const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10)) : 8;
+      const statuses = Array.isArray(options.statuses) && options.statuses.length ? options.statuses.map((status) => String(status || '').trim()).filter(Boolean) : ['queued'];
+      const filters = [];
+      const params = [];
+      if (statuses.length) {
+        const placeholders = statuses.map((status) => { params.push(status); return `$${params.length}`; });
+        filters.push(`q.status IN (${placeholders.join(', ')})`);
+      }
+      if (options.resolvedOnly || options.resolved_only) filters.push("(l.detail_status = 'done' OR l.detail_completed_at IS NOT NULL OR NULLIF(l.snapshot_path, '') IS NOT NULL)");
+      params.push(limit);
+      const rows = await queryRows(pool, queueSelectSql(filters.length ? `WHERE ${filters.join(' AND ')}` : '', `ORDER BY RANDOM() LIMIT $${params.length}`), params);
+      return rows.map(normalizePurchaseHistoryMatchQueueRow);
+    },
+
+    async countPurchaseHistoryMatchQueue(options = {}) {
+      const params = [];
+      const filters = pushQueueFilters(options, params);
+      const row = await queryOne(pool, `
+        SELECT COUNT(*)::BIGINT AS total
+        FROM purchase_history_match_queue q
+        ${options.resolvedOnly || options.resolved_only ? 'LEFT JOIN homepage_listings l ON l.listing_id = q.listing_id' : ''}
+        ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+      `, params);
+      return integerValue(row && row.total, 0);
+    },
+
+    async updatePurchaseHistoryMatchQueueStatus(match = {}, options = {}) {
+      const documentId = String(match.documentId || match.document_id || '').trim();
+      const recordId = String(match.recordId || match.record_id || '').trim();
+      const listingId = String(match.listingId || match.listing_id || '').trim();
+      const status = normalizeKeyword(match.status || '').toLowerCase();
+      if (!documentId || !recordId || !listingId) throw new Error('recommendation action requires documentId, recordId, and listingId');
+      if (!['saved', 'dismissed', 'queued'].includes(status)) throw new Error(`Unsupported recommendation status: ${status}`);
+      const now = options.updatedAt || options.updated_at || new Date().toISOString();
+      const reason = String(options.reason || '').trim();
+      const eventType = status === 'saved' ? 'recommendation_saved' : status === 'dismissed' ? 'recommendation_dismissed' : 'recommendation_requeued';
+      return withTransaction(pool, async (client) => {
+        const result = await client.query(`
+          UPDATE purchase_history_match_queue
+          SET status = $1,
+              updated_at = $2,
+              note = CASE WHEN $3 = '' THEN note ELSE $4 END
+          WHERE document_id = $5
+            AND record_id = $6
+            AND listing_id = $7
+        `, [status, now, reason, reason, documentId, recordId, listingId]);
+        if ((result.rowCount || 0) === 0) throw new Error(`Unknown recommendation: ${listingId}`);
+        await appendPurchaseHistoryMatchEvent(client, { documentId, recordId, listingId, eventType, eventAt: now, actor: options.actor || 'viewer', reason, content: { status, reason, customReason: options.customReason || '' } });
+        return { changes: result.rowCount || 0 };
+      });
+    },
     async listPurchaseHistoryEvents(options = {}) {
       const documentId = String(options.documentId || options.document_id || '').trim();
       const recordId = String(options.recordId || options.record_id || '').trim();
@@ -391,6 +596,7 @@ module.exports = {
   normalizePurchaseHistoryListingRelationship,
   normalizePurchaseHistoryListingLinkRow,
   normalizePurchaseHistoryEventRow,
+  normalizePurchaseHistoryMatchQueueRow,
   purchaseHistoryRowProjection,
   normalizeInventoryStatus,
   purchaseHistoryLifecycleEvents,
