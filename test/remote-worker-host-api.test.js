@@ -88,10 +88,14 @@ test('parseArgs supports explicit PostgreSQL remote worker store flags', () => {
     '--read-only-token', 'readonly-token',
     '--remote-worker-store', 'postgres',
     '--remote-worker-postgres-url', 'postgres://marketplace@example.test/marketplace',
+    '--listing-read-store', 'postgres',
+    '--listing-read-postgres-url', 'postgres://marketplace-read@example.test/marketplace',
   ]);
 
   assert.equal(options.remoteWorkerStoreMode, 'postgres');
   assert.equal(options.remoteWorkerPostgresUrl, 'postgres://marketplace@example.test/marketplace');
+  assert.equal(options.listingReadStoreMode, 'postgres');
+  assert.equal(options.listingReadPostgresUrl, 'postgres://marketplace-read@example.test/marketplace');
 });
 
 test('remote worker v2 API can route session registration through PostgreSQL store', async () => {

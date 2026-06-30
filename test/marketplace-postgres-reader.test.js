@@ -50,6 +50,7 @@ test('createMarketplacePostgresReader executes listing and count queries through
 
   assert.equal(result.total, 42);
   assert.equal(result.rows[0].listing_id, 'listing-a');
+  assert.equal(result.rows[0].numeric_price, 1200);
   assert.equal(result.parsedQuery.dialect, 'postgres');
   assert.equal(pool.calls.length, 2);
   assert.match(pool.calls[0].sql, /LIMIT \$3 OFFSET \$4/);

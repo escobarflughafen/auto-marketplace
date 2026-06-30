@@ -130,6 +130,7 @@ function postgresTableCount(containerName, user, database, runner = spawnSync) {
 function appRuntimeFiles(containerName, runner = spawnSync) {
   if (!containerName) return { ok: false, files: {}, error: 'missing container name' };
   const files = [
+    '/app/scripts/serve-marketplace-homepage.js',
     '/app/scripts/remote-worker-postgres-store.js',
     '/app/scripts/marketplace-postgres-reader.js',
     '/app/scripts/marketplace-query-builders.js',
@@ -156,6 +157,9 @@ function appPostgresEnvStatus(containerName, runner = spawnSync) {
     'MARKETPLACE_REMOTE_WORKER_POSTGRES_URL',
     'MARKETPLACE_REMOTE_WORKER_STORE',
     'MARKETPLACE_REMOTE_WORKER_POSTGRES',
+    'MARKETPLACE_LISTING_READ_STORE',
+    'MARKETPLACE_LISTING_READ_POSTGRES',
+    'MARKETPLACE_LISTING_READ_POSTGRES_URL',
     'MARKETPLACE_DB_DIALECT',
   ];
   const script = "const keys=JSON.parse(process.argv[1]); console.log(JSON.stringify(Object.fromEntries(keys.map((key)=>[key,Boolean(process.env[key])]))));";
@@ -163,9 +167,10 @@ function appPostgresEnvStatus(containerName, runner = spawnSync) {
   if (!result.ok) return { ok: false, keys: {}, error: result.stderr || result.error || 'docker exec failed' };
   try {
     const keyStatus = JSON.parse(result.stdout || '{}');
-    const hasConnection = Boolean(keyStatus.MARKETPLACE_POSTGRES_URL || keyStatus.DATABASE_URL || keyStatus.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL);
+    const hasConnection = Boolean(keyStatus.MARKETPLACE_POSTGRES_URL || keyStatus.DATABASE_URL || keyStatus.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL || keyStatus.MARKETPLACE_LISTING_READ_POSTGRES_URL);
     const remoteWorkerPostgres = keyStatus.MARKETPLACE_REMOTE_WORKER_STORE || keyStatus.MARKETPLACE_REMOTE_WORKER_POSTGRES;
-    return { ok: hasConnection && remoteWorkerPostgres, keys: keyStatus };
+    const listingReadPostgres = keyStatus.MARKETPLACE_LISTING_READ_STORE || keyStatus.MARKETPLACE_LISTING_READ_POSTGRES;
+    return { ok: hasConnection && remoteWorkerPostgres && listingReadPostgres, keys: keyStatus };
   } catch (error) {
     return { ok: false, keys: {}, error: error.message };
   }
@@ -175,7 +180,7 @@ function appPostgresReachability(containerName, runner = spawnSync) {
   if (!containerName) return { ok: false, status: 'missing_container_name' };
   const script = [
     "const net = require('net');",
-    "const urlText = process.env.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL || process.env.MARKETPLACE_POSTGRES_URL || process.env.DATABASE_URL || '';",
+    "const urlText = process.env.MARKETPLACE_LISTING_READ_POSTGRES_URL || process.env.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL || process.env.MARKETPLACE_POSTGRES_URL || process.env.DATABASE_URL || '';",
     "if (!urlText) { console.log(JSON.stringify({ ok: false, status: 'missing_postgres_url' })); process.exit(0); }",
     "let parsed;",
     "try { parsed = new URL(urlText); } catch { console.log(JSON.stringify({ ok: false, status: 'invalid_postgres_url' })); process.exit(0); }",

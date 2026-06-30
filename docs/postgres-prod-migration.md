@@ -6,7 +6,7 @@ Goal: move the production marketplace database out of the in-process SQLite file
 
 The application is still SQLite-first. `scripts/marketplace-homepage-db.js` owns schema creation and exports synchronous `DatabaseSync` helpers that are used by collectors, resolvers, the monitor server, maintenance jobs, and tests. The production SQLite DB is mounted at `/app/artifacts/marketplace-homepage/marketplace-homepage.db` and is currently several GB.
 
-The runtime is only partially behind a PostgreSQL-capable read layer. The safe migration path is still: export SQLite schema/data, load it into PostgreSQL, verify counts and representative queries, run read-only PostgreSQL shadow checks, then explicitly cut traffic over after the write path is covered.
+The runtime is only partially behind PostgreSQL-capable adapters. Listing read APIs can be routed to PostgreSQL independently with `MARKETPLACE_LISTING_READ_STORE=postgres` plus either `MARKETPLACE_LISTING_READ_POSTGRES_URL`, `MARKETPLACE_POSTGRES_URL`, or `DATABASE_URL`. The safe migration path is still: export SQLite schema/data, load it into PostgreSQL, verify counts and representative queries, run read-only PostgreSQL shadow checks, then explicitly cut traffic over after the write path is covered.
 
 ## Artifact Export
 
@@ -56,7 +56,7 @@ The listing read query surface now has PostgreSQL compilers alongside the SQLite
 - `scripts/marketplace-query-builders.js` selects SQLite or PostgreSQL builders by dialect.
 - `scripts/marketplace-postgres-reader.js` provides an async read adapter for listing rows and result stats using a `pg`-compatible pool.
 
-This is intentionally read-only. It is suitable for shadow-read comparisons against the loaded PostgreSQL copy, but it does not cut over collectors, resolver writes, remote-worker command state, event ingestion, maintenance jobs, or purchase-history writes.
+This is intentionally read-only. The monitor server's `/api/listings` and `/api/listings/stats` endpoints can use this adapter when `MARKETPLACE_LISTING_READ_STORE=postgres` is set, while write-heavy APIs continue to use SQLite. It is suitable for shadow-read comparisons against the loaded PostgreSQL copy, but it does not cut over collectors, resolver writes, remote-worker command state, event ingestion, maintenance jobs, or purchase-history writes.
 
 The first runtime write surface with PostgreSQL-capable code is the remote worker store in `scripts/remote-worker-postgres-store.js`. It covers session registration, heartbeat projection, session lookup, command creation, command polling/ACK, raw event ingest, workflow/listing event projection, collector `listing_observed` projection into `homepage_listings`, `listing_media`, `listing_search_keywords`, and `search_title_bag`, backlog listed-time metadata projection, artifact manifest ingest, backlog-indexer candidate selection, claim creation, lease renewal, and lease completion through a `pg`-compatible pool. `/api/v2/remote-workers/*` can now route to this store with `--remote-worker-store postgres` or `MARKETPLACE_REMOTE_WORKER_STORE=postgres`, using `MARKETPLACE_REMOTE_WORKER_POSTGRES_URL` or `MARKETPLACE_POSTGRES_URL` for the connection string. It is still SQLite by default; the next cutover step is to load and verify PostgreSQL on the target host, enable this flag first in staging, and keep closing remaining non-worker SQLite write helpers from the cutover inventory.
 
@@ -84,7 +84,7 @@ npm run marketplace:postgres:status -- --json
 npm run marketplace:postgres:status -- --strict
 ```
 
-The status command checks local migration files, the PostgreSQL container, `pg_isready`, loaded public tables, `verify-output.txt`, `shadow-compare.json`, and the live app container's PostgreSQL runtime readiness. The app-runtime checks are intentionally redacted: they report whether required files and environment keys exist and whether the app can connect to its configured PostgreSQL URL, but they do not print database URLs or passwords. In `--strict` mode it exits nonzero until both the loaded database and app runtime are ready.
+The status command checks local migration files, the PostgreSQL container, `pg_isready`, loaded public tables, `verify-output.txt`, `shadow-compare.json`, and the live app container's PostgreSQL runtime readiness. The app-runtime checks are intentionally redacted: they report whether required files and environment keys exist, whether remote-worker and listing-read PostgreSQL modes are enabled, and whether the app can connect to its configured PostgreSQL URL, but they do not print database URLs or passwords. In `--strict` mode it exits nonzero until both the loaded database and app runtime are ready.
 
 ## Production Shadow Migration Script
 

@@ -15,6 +15,15 @@ function normalizeCountRows(rows) {
     .filter((item) => item[1] > 0);
 }
 
+function normalizeListingRow(row = {}) {
+  return {
+    ...row,
+    numeric_price: nullableNumber(row.numeric_price),
+    last_seen_rank: row.last_seen_rank === null || row.last_seen_rank === undefined ? null : Number.parseInt(row.last_seen_rank, 10),
+    detail_attempts: row.detail_attempts === null || row.detail_attempts === undefined ? null : Number.parseInt(row.detail_attempts, 10),
+  };
+}
+
 function buildPriceHistogramFromBuckets(bucketRows, histogramQuery, pricedCount) {
   const min = nullableNumber(histogramQuery.min);
   const max = nullableNumber(histogramQuery.max);
@@ -89,7 +98,7 @@ function createMarketplacePostgresReader(options = {}) {
         limit: listingsQuery.limit,
         offset: listingsQuery.offset,
         total: Number.parseInt(count?.total, 10) || 0,
-        rows,
+        rows: rows.map(normalizeListingRow),
       };
     },
     async readListingsResultStats(options = {}) {
@@ -130,6 +139,7 @@ function createMarketplacePostgresReader(options = {}) {
 
 module.exports = {
   createMarketplacePostgresReader,
+  normalizeListingRow,
   buildPriceHistogramFromBuckets,
   normalizeCountRows,
 };

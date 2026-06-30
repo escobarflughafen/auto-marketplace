@@ -220,3 +220,103 @@ test('listings API extracts localized card text prices for numeric filters', asy
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+
+test('listings APIs can read through an injected listing read store', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const calls = [];
+  let closed = false;
+  const listingReadStore = {
+    dialect: 'postgres',
+    async listListings(options = {}) {
+      calls.push({ method: 'listListings', options });
+      return {
+        query: options.query || '',
+        parsedQuery: { dialect: 'postgres', sort: 'recent', sortDirection: 'desc' },
+        sort: 'recent',
+        sortDirection: 'desc',
+        limit: 2,
+        offset: 1,
+        total: 7,
+        rows: [{
+          listing_id: 'pg-listing-1',
+          href: 'https://www.facebook.com/marketplace/item/pg-listing-1/',
+          card_title: 'Postgres listing',
+          card_text: 'CA$1200 | Postgres listing',
+          detail_status: 'pending',
+          numeric_price: '1200',
+          screenshot_path: '',
+          snapshot_path: '',
+        }],
+      };
+    },
+    async readListingsResultStats(options = {}) {
+      calls.push({ method: 'readListingsResultStats', options });
+      return {
+        pricedCount: 6,
+        unpricedCount: 1,
+        priceMin: 100,
+        priceMax: 1200,
+        priceAverage: 400,
+        priceMedian: 350,
+        priceHistogram: [{ min: 100, max: 1200, count: 6 }],
+        statusCounts: [['pending', 6]],
+        sourceCounts: [['search', 7]],
+      };
+    },
+    async close() {
+      closed = true;
+    },
+  };
+
+  const server = createServer({
+    dbPath,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    listingReadStore,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = `http://${address.address}:${address.port}`;
+
+  try {
+    const response = await getJson(
+      baseUrl,
+      '/api/listings?token=admin-token&q=status%3Apending&limit=2&offset=1&excludeListingId=skip-a',
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.body.total, 7);
+    assert.equal(response.body.rows[0].listing_id, 'pg-listing-1');
+    assert.equal(response.body.parsedQuery.dialect, 'postgres');
+    assert.deepEqual(calls[0], {
+      method: 'listListings',
+      options: {
+        query: 'status:pending',
+        limit: '2',
+        offset: '1',
+        sort: '',
+        sortDirection: '',
+        excludeListingIds: ['skip-a'],
+      },
+    });
+
+    const statsResponse = await getJson(
+      baseUrl,
+      '/api/listings/stats?token=admin-token&q=status%3Apending&excludeListingId=skip-a',
+    );
+    assert.equal(statsResponse.status, 200);
+    assert.equal(statsResponse.body.resultStats.pricedCount, 6);
+    assert.deepEqual(calls[1], {
+      method: 'readListingsResultStats',
+      options: {
+        query: 'status:pending',
+        excludeListingIds: ['skip-a'],
+      },
+    });
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  assert.equal(closed, true);
+});

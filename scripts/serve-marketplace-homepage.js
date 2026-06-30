@@ -105,6 +105,9 @@ const {
 const {
   createRemoteWorkerPostgresStore,
 } = require('./remote-worker-postgres-store');
+const {
+  createMarketplacePostgresReader,
+} = require('./marketplace-postgres-reader');
 
 const FRONTEND_DIR = path.join(process.cwd(), 'frontend', 'marketplace-monitor');
 const RESOLVE_BATCH_DIR = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'resolve-batches');
@@ -168,6 +171,8 @@ function parseArgs(argv) {
     workerToken: process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || process.env.MARKETPLACE_WORKER_TOKEN || '',
     remoteWorkerStoreMode: process.env.MARKETPLACE_REMOTE_WORKER_STORE || '',
     remoteWorkerPostgresUrl: process.env.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL || '',
+    listingReadStoreMode: process.env.MARKETPLACE_LISTING_READ_STORE || '',
+    listingReadPostgresUrl: process.env.MARKETPLACE_LISTING_READ_POSTGRES_URL || '',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -203,6 +208,17 @@ function parseArgs(argv) {
         break;
       case '--remote-worker-postgres-url':
         options.remoteWorkerPostgresUrl = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--listing-read-store':
+        options.listingReadStoreMode = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--listing-read-postgres':
+        options.listingReadStoreMode = 'postgres';
+        break;
+      case '--listing-read-postgres-url':
+        options.listingReadPostgresUrl = readFlagValue(argv, index, arg);
         index += 1;
         break;
       default:
@@ -3538,6 +3554,71 @@ function readListingsResultStats(db, options = {}) {
   };
 }
 
+function createSqliteListingReadStore(db) {
+  return {
+    dialect: 'sqlite',
+    async listListings(options = {}) {
+      const listingsQuery = buildListingsQuery(options);
+      const countQuery = buildCountQuery({
+        query: options.query || '',
+        excludeListingIds: options.excludeListingIds,
+      });
+      const rows = db.prepare(listingsQuery.sql).all(...listingsQuery.params);
+      const total = db.prepare(countQuery.sql).get(...countQuery.params).total;
+      return {
+        query: options.query || '',
+        parsedQuery: listingsQuery.parsedQuery,
+        sort: listingsQuery.parsedQuery.sort,
+        sortDirection: listingsQuery.parsedQuery.sortDirection,
+        limit: listingsQuery.limit,
+        offset: listingsQuery.offset,
+        total,
+        rows,
+      };
+    },
+    async readListingsResultStats(options = {}) {
+      return readListingsResultStats(db, options);
+    },
+  };
+}
+
+function normalizeListingReadStoreMode(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[_-]+/g, '_');
+  if (['postgres', 'postgresql', 'pg'].includes(normalized)) return 'postgres';
+  if (['', 'sqlite', 'sqlite3', 'local'].includes(normalized)) return 'sqlite';
+  throw new Error(`Unsupported listing read store mode: ${value}`);
+}
+
+function listingReadStoreModeForOptions(options = {}) {
+  if (options.listingReadStoreMode) {
+    return normalizeListingReadStoreMode(options.listingReadStoreMode);
+  }
+  if (process.env.MARKETPLACE_LISTING_READ_POSTGRES === '1') {
+    return 'postgres';
+  }
+  return normalizeListingReadStoreMode(process.env.MARKETPLACE_LISTING_READ_STORE || 'sqlite');
+}
+
+function createListingReadStore(options = {}, db) {
+  if (options.listingReadStore) {
+    return options.listingReadStore;
+  }
+  const mode = listingReadStoreModeForOptions(options);
+  if (mode === 'postgres') {
+    const readerOptions = {
+      ...(options.listingReadPostgresReaderOptions || {}),
+    };
+    if (options.listingReadPostgresPool) {
+      readerOptions.pool = options.listingReadPostgresPool;
+    }
+    if (options.listingReadPostgresUrl) {
+      readerOptions.connectionString = options.listingReadPostgresUrl;
+    }
+    return createMarketplacePostgresReader(readerOptions);
+  }
+  return createSqliteListingReadStore(db);
+}
+
 function writeAuthError(response, access) {
   if (!access.role) {
     writeJson(response, 401, { error: 'Missing or invalid API token' });
@@ -5395,6 +5476,7 @@ function createServer(options) {
   }
   const { db } = openMarketplaceHomepageDatabase(options.dbPath);
   const remoteWorkerStore = createRemoteWorkerApiStore(options, db);
+  const listingReadStore = createListingReadStore(options, db);
   const stopPurchaseHistoryMatchScanner = startPurchaseHistoryMatchScanner(db);
 
   const server = http.createServer(async (request, response) => {
@@ -5917,7 +5999,7 @@ function createServer(options) {
 
       try {
         const startedAt = process.hrtime.bigint();
-        const resultStats = readListingsResultStats(db, { query, excludeListingIds });
+        const resultStats = await listingReadStore.readListingsResultStats({ query, excludeListingIds });
         const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
         writeJson(response, 200, {
           query,
@@ -5947,27 +6029,25 @@ function createServer(options) {
 
       try {
         const startedAt = process.hrtime.bigint();
-        const listingsQuery = buildListingsQuery({ query, limit, offset, sort, sortDirection, excludeListingIds });
-        const countQuery = buildCountQuery({ query, excludeListingIds });
-        const rows = db.prepare(listingsQuery.sql).all(...listingsQuery.params).map(enrichRowPaths);
-        const total = db.prepare(countQuery.sql).get(...countQuery.params).total;
+        const listingResult = await listingReadStore.listListings({ query, limit, offset, sort, sortDirection, excludeListingIds });
+        const rows = (listingResult.rows || []).map(enrichRowPaths);
         const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
 
         writeJson(response, 200, {
           query,
-          parsedQuery: listingsQuery.parsedQuery,
-          sort: listingsQuery.parsedQuery.sort,
-          sortDirection: listingsQuery.parsedQuery.sortDirection,
-          limit: listingsQuery.limit,
-          offset: listingsQuery.offset,
-          total,
+          parsedQuery: listingResult.parsedQuery,
+          sort: listingResult.sort,
+          sortDirection: listingResult.sortDirection,
+          limit: listingResult.limit,
+          offset: listingResult.offset,
+          total: listingResult.total,
           rows,
           stats: {
             elapsedMs,
             returnedRows: rows.length,
-            totalRows: total,
-            limit: listingsQuery.limit,
-            offset: listingsQuery.offset,
+            totalRows: listingResult.total,
+            limit: listingResult.limit,
+            offset: listingResult.offset,
             resultStatsDeferred: true,
           },
         });
@@ -6641,6 +6721,7 @@ function createServer(options) {
   server.on('close', () => {
     stopPurchaseHistoryMatchScanner();
     Promise.resolve(remoteWorkerStore.close?.()).catch(() => {});
+    Promise.resolve(listingReadStore.close?.()).catch(() => {});
     closeMarketplaceHomepageDatabase(db);
   });
 
@@ -6681,5 +6762,9 @@ module.exports = {
   updateWorkflowRunWithLifecycleEvent,
   isBrowserWorkerType,
   isExclusiveBrowserWorkerType,
+  normalizeListingReadStoreMode,
+  listingReadStoreModeForOptions,
+  createSqliteListingReadStore,
+  createListingReadStore,
   createServer,
 };
