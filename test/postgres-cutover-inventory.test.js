@@ -57,27 +57,25 @@ module.exports = {
   appendListingEvent,
   runTransaction,
   openMarketplaceHomepageDatabase,
+  deleteUncoveredThing,
 };
 `);
   const inventory = buildInventory({ dbModule });
 
   assert.equal(inventory.ok, false);
-  assert.equal(inventory.counts.total, 8);
-  assert.equal(inventory.counts.covered, 6);
-  assert.equal(inventory.counts.gaps, 2);
-  assert.deepEqual(inventory.nextRequiredGaps, [
-    'runTransaction',
-    'openMarketplaceHomepageDatabase',
-  ]);
+  assert.equal(inventory.counts.total, 9);
+  assert.equal(inventory.counts.covered, 8);
+  assert.equal(inventory.counts.gaps, 1);
+  assert.deepEqual(inventory.nextRequiredGaps, ['deleteUncoveredThing']);
 });
 
-test('buildInventory against current DB module records existing cutover gaps', () => {
+test('buildInventory against current DB module records PostgreSQL cutover coverage', () => {
   const inventory = buildInventory({ dbModule: path.join(process.cwd(), 'scripts', 'marketplace-homepage-db.js') });
 
-  assert.equal(inventory.ok, false);
+  assert.equal(inventory.ok, true);
   assert.ok(inventory.counts.total > 50);
-  assert.ok(inventory.counts.gaps >= 3);
-  assert.ok(inventory.nextRequiredGaps.includes('openMarketplaceHomepageDatabase'));
-  assert.ok(!inventory.nextRequiredGaps.includes('upsertHomepageListing'));
-  assert.ok(!inventory.nextRequiredGaps.includes('appendListingEvent'));
+  assert.equal(inventory.counts.gaps, 0);
+  assert.deepEqual(inventory.nextRequiredGaps, []);
+  assert.ok(inventory.exports.find((row) => row.name === 'openMarketplaceHomepageDatabase')?.postgresCovered);
+  assert.ok(inventory.exports.find((row) => row.name === 'runTransaction')?.postgresCovered);
 });

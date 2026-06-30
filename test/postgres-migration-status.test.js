@@ -30,6 +30,7 @@ function createProject() {
   fs.writeFileSync(path.join(projectDir, 'ops', 'postgres-prod-shadow-migration.sh'), '#!/usr/bin/env bash\n');
   fs.writeFileSync(path.join(projectDir, 'scripts', 'export-marketplace-postgres-migration.js'), '');
   fs.writeFileSync(path.join(projectDir, 'scripts', 'compare-marketplace-postgres-shadow.js'), '');
+  fs.writeFileSync(path.join(projectDir, 'scripts', 'marketplace-postgres-runtime.js'), '');
   fs.writeFileSync(path.join(projectDir, 'scripts', 'marketplace-homepage-db.js'), "\nmodule.exports = {\n  DEFAULT_DB_PATH,\n  resolveDbPath,\n  normalizeKeyword,\n};\n");
   fs.writeFileSync(path.join(migrationDir, '001_schema.sql'), '-- schema');
   fs.writeFileSync(path.join(migrationDir, '002_load.sql'), '-- load');
@@ -148,7 +149,7 @@ test('buildStatusReport summarizes a ready shadow migration without leaking pass
 test('buildStatusReport reports failed readiness gates in strict-readable checks', () => {
   const { projectDir } = createProject();
   fs.writeFileSync(path.join(projectDir, 'artifacts', 'postgres-migration', 'prod-new', 'shadow-compare.json'), JSON.stringify({ ok: false, probeCount: 2, failed: 1 }));
-  fs.writeFileSync(path.join(projectDir, 'scripts', 'marketplace-homepage-db.js'), "\nmodule.exports = {\n  openMarketplaceHomepageDatabase,\n};\n");
+  fs.writeFileSync(path.join(projectDir, 'scripts', 'marketplace-homepage-db.js'), "\nmodule.exports = {\n  deleteUnmigratedRuntimeThing,\n};\n");
   const report = buildStatusReport({ projectDir }, createDockerRunner({ ready: false, tableCount: 0, appFiles: false, appEnv: false, appReachable: false }));
   const failed = report.checks.filter((item) => !item.ok).map((item) => item.name);
 

@@ -3,6 +3,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { listedAgoToUnixRange } = require('./marketplace-listed-time-normalizer');
+const {
+  closeMarketplacePostgresDatabase,
+  isMarketplacePostgresRuntime,
+  normalizeMarketplaceDbDialect,
+  openMarketplacePostgresDatabase,
+  runPostgresTransaction,
+} = require('./marketplace-postgres-runtime');
 
 const DEFAULT_DB_PATH = path.join(
   process.cwd(),
@@ -943,19 +950,33 @@ function ensureColumn(db, tableName, columnName, definitionSql) {
 }
 
 function openMarketplaceHomepageDatabase(dbPath = DEFAULT_DB_PATH) {
-  const resolvedPath = resolveDbPath(dbPath);
+  const options = dbPath && typeof dbPath === 'object' && !Array.isArray(dbPath)
+    ? dbPath
+    : { dbPath };
+  const dialectValue = options.dialect || options.dbDialect || process.env.MARKETPLACE_DB_DIALECT || '';
+  const dialect = normalizeMarketplaceDbDialect(dialectValue || 'sqlite');
+  if (dialect === 'postgres') {
+    const db = openMarketplacePostgresDatabase(options);
+    return { db, dbPath: db.dbPath, dialect: 'postgres' };
+  }
+
+  const resolvedPath = resolveDbPath(options.dbPath || DEFAULT_DB_PATH);
   fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
   const db = new DatabaseSync(resolvedPath);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA busy_timeout = 5000;');
   ensureSchema(db);
-  return { db, dbPath: resolvedPath };
+  return { db, dbPath: resolvedPath, dialect: 'sqlite' };
 }
 
 function closeMarketplaceHomepageDatabase(db) {
+  if (isMarketplacePostgresRuntime(db)) {
+    return closeMarketplacePostgresDatabase(db);
+  }
   if (db && typeof db.close === 'function') {
     db.close();
   }
+  return undefined;
 }
 
 function normalizeListingMediaItems(items = []) {
@@ -1971,6 +1992,9 @@ function getHomepageListingCounts(db) {
 }
 
 function runTransaction(db, callback) {
+  if (isMarketplacePostgresRuntime(db)) {
+    return runPostgresTransaction(db, callback);
+  }
   db.exec('BEGIN IMMEDIATE');
   try {
     const result = callback();

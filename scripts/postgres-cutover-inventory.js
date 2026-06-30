@@ -10,6 +10,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'extractListingId',
   'canonicalizeListingUrl',
   'normalizeKeyword',
+  'openMarketplaceHomepageDatabase',
+  'closeMarketplaceHomepageDatabase',
   'hashContent',
   'listWorkerParameterProfiles',
   'getWorkerParameterProfile',
@@ -91,6 +93,7 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'listWorkerWorkflowEvents',
   'listEventRegistry',
   'countEventRegistry',
+  'runTransaction',
 ]);
 
 const READ_NAME_PATTERNS = [
