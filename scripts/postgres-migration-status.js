@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { buildInventory } = require('./postgres-cutover-inventory');
 
 function usage() {
   process.stdout.write(`Usage:\n  node scripts/postgres-migration-status.js [options]\n\nOptions:\n  --project-dir DIR          Project dir. Default: current directory.\n  --env-file FILE            PostgreSQL env file. Default: .postgres-migration.env\n  --migration-name NAME      Artifact directory under artifacts/postgres-migration. Default: latest.\n  --postgres-container NAME  PostgreSQL container override.\n  --app-container NAME       App container to audit. Default: auto-browser.\n  --json                     Print JSON report.\n  --strict                   Exit nonzero unless all readiness checks pass.\n  -h, --help                 Show this help.\n`);
@@ -261,6 +262,16 @@ function buildStatusReport(options = {}, runner = spawnSync) {
   const appReachability = appPostgresReachability(appContainer, runner);
   const requiredArtifactFiles = ['001_schema.sql', '002_load.sql', '003_verify.sql'];
   const artifactFiles = Object.fromEntries(requiredArtifactFiles.map((file) => [file, Boolean(migrationDir && fs.existsSync(path.join(migrationDir, file)))]));
+  const cutoverInventory = (() => {
+    const dbModule = path.join(projectDir, 'scripts', 'marketplace-homepage-db.js');
+    try {
+      if (!fs.existsSync(dbModule)) return { ok: false, error: 'missing_db_module', counts: null, nextRequiredGaps: [] };
+      const report = buildInventory({ dbModule });
+      return { ok: report.ok, counts: report.counts, nextRequiredGaps: report.nextRequiredGaps };
+    } catch (error) {
+      return { ok: false, error: error.message, counts: null, nextRequiredGaps: [] };
+    }
+  })();
 
   const checks = [
     check('project_dir', fs.existsSync(projectDir), { path: projectDir }),
@@ -277,6 +288,7 @@ function buildStatusReport(options = {}, runner = spawnSync) {
     check('app_postgres_runtime_files', appFiles.ok, appFiles),
     check('app_postgres_env', appEnv.ok, appEnv),
     check('app_postgres_reachable', appReachability.ok, appReachability),
+    check('postgres_cutover_inventory', cutoverInventory.ok, cutoverInventory),
     check('migration_dir', Boolean(migrationDir && fs.existsSync(migrationDir)), { migrationName, path: migrationDir }),
     check('manifest', Boolean(manifest && !manifest.error), { path: manifestPath, tableCount: manifest?.tables?.length ?? null }),
     check('artifact_files', Object.values(artifactFiles).every(Boolean), { files: artifactFiles }),
@@ -308,6 +320,7 @@ function buildStatusReport(options = {}, runner = spawnSync) {
       postgresReachable: appReachability.ok,
       postgresReachabilityStatus: appReachability.status || '',
     },
+    cutoverInventory,
     migration: {
       name: migrationName,
       dir: migrationDir,
