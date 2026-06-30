@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   createMarketplaceConfigPostgresStore,
+  normalizeWorkerParameterProfileRow,
   normalizeSummaryQueryCardRow,
   normalizeSavedQueryRow,
 } = require('../scripts/marketplace-config-postgres-store');
@@ -10,6 +11,7 @@ const {
 function createFakePool(initialState = {}) {
   const calls = [];
   const state = {
+    workerProfiles: new Map((initialState.workerProfiles || []).map((row) => [row.profile_id, { ...row }])),
     summaryCards: new Map((initialState.summaryCards || []).map((row) => [row.card_id, { ...row }])),
     savedQueries: new Map((initialState.savedQueries || []).map((row) => [row.query_id, { ...row }])),
   };
@@ -19,6 +21,40 @@ function createFakePool(initialState = {}) {
     ended: false,
     async query(sql, params = []) {
       calls.push({ sql, params });
+
+      if (/^\s*SELECT[\s\S]*FROM worker_parameter_profiles/.test(sql) && /WHERE profile_id = \$1/.test(sql)) {
+        return { rows: state.workerProfiles.has(params[0]) ? [{ ...state.workerProfiles.get(params[0]) }] : [] };
+      }
+      if (/^\s*SELECT[\s\S]*FROM worker_parameter_profiles/.test(sql)) {
+        const workflowId = /WHERE workflow_id = \$1/.test(sql) ? params[0] : '';
+        const rows = [...state.workerProfiles.values()]
+          .filter((row) => !workflowId || row.workflow_id === workflowId)
+          .sort((left, right) => (
+            String(right.updated_at).localeCompare(String(left.updated_at))
+            || String(left.label).localeCompare(String(right.label))
+          ));
+        return { rows: rows.map((row) => ({ ...row })) };
+      }
+      if (/INSERT INTO worker_parameter_profiles/.test(sql)) {
+        const [profileId, workflowId, workerType, label, paramsJson, argsJson, createdAt, updatedAt] = params;
+        const previous = state.workerProfiles.get(profileId) || {};
+        state.workerProfiles.set(profileId, {
+          ...previous,
+          profile_id: profileId,
+          workflow_id: workflowId,
+          worker_type: workerType,
+          label,
+          params_json: paramsJson,
+          args_json: argsJson,
+          created_at: previous.created_at || createdAt,
+          updated_at: updatedAt,
+        });
+        return { rows: [] };
+      }
+      if (/DELETE FROM worker_parameter_profiles/.test(sql)) {
+        state.workerProfiles.delete(params[0]);
+        return { rows: [] };
+      }
 
       if (/^\s*SELECT[\s\S]*FROM summary_query_cards/.test(sql) && /WHERE card_id = \$1/.test(sql)) {
         return { rows: state.summaryCards.has(params[0]) ? [{ ...state.summaryCards.get(params[0]) }] : [] };
@@ -100,6 +136,26 @@ function createFakePool(initialState = {}) {
 }
 
 test('normalizes PostgreSQL config rows to existing SQLite helper shapes', () => {
+  assert.deepEqual(normalizeWorkerParameterProfileRow({
+    profile_id: 'profile-1',
+    workflow_id: 'search-explore',
+    worker_type: 'search_explorer',
+    label: 'Fast Search',
+    params_json: '{"limit":3}',
+    args_json: '["--query","pentax"]',
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-02T00:00:00.000Z',
+  }), {
+    profile_id: 'profile-1',
+    workflow_id: 'search-explore',
+    worker_type: 'search_explorer',
+    label: 'Fast Search',
+    params: { limit: 3 },
+    args: ['--query', 'pentax'],
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-02T00:00:00.000Z',
+  });
+
   assert.deepEqual(normalizeSummaryQueryCardRow({
     card_id: 'card-1',
     label: 'Camera',
@@ -221,4 +277,65 @@ test('saved queries preserve overview flag and support patch/delete operations',
   assert.equal(await store.getSavedQuery('saved-high-value'), null);
   await store.close();
   assert.equal(pool.ended, true);
+});
+
+test('worker parameter profiles preserve JSON payloads and filter by workflow', async () => {
+  const pool = createFakePool({
+    workerProfiles: [{
+      profile_id: 'search-fast',
+      workflow_id: 'search-explore',
+      worker_type: 'search_explorer',
+      label: 'Fast Search',
+      params_json: '{"limit":3}',
+      args_json: '["--query","pentax"]',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-02T00:00:00.000Z',
+    }, {
+      profile_id: 'collector-default',
+      workflow_id: 'homepage-collector',
+      worker_type: 'homepage_collector',
+      label: 'Collector',
+      params_json: '{}',
+      args_json: '[]',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    }],
+  });
+  const store = createMarketplaceConfigPostgresStore({
+    pool,
+    nowIso: () => '2026-01-03T00:00:00.000Z',
+  });
+
+  const updated = await store.upsertWorkerParameterProfile({
+    profileId: 'search-fast',
+    workflowId: 'search-explore',
+    workerType: 'search_explorer',
+    label: 'Fast Search',
+    params: { limit: 5, remote: true },
+    args: ['--query', 'leica'],
+  });
+
+  assert.equal(updated.profile_id, 'search-fast');
+  assert.equal(updated.created_at, '2026-01-01T00:00:00.000Z');
+  assert.equal(updated.updated_at, '2026-01-03T00:00:00.000Z');
+  assert.deepEqual(updated.params, { limit: 5, remote: true });
+  assert.deepEqual(updated.args, ['--query', 'leica']);
+  const insert = pool.calls.find((call) => /INSERT INTO worker_parameter_profiles/.test(call.sql));
+  assert.ok(insert);
+  assert.deepEqual(insert.params, [
+    'search-fast',
+    'search-explore',
+    'search_explorer',
+    'Fast Search',
+    JSON.stringify({ limit: 5, remote: true }, null, 2),
+    JSON.stringify(['--query', 'leica'], null, 2),
+    '2026-01-01T00:00:00.000Z',
+    '2026-01-03T00:00:00.000Z',
+  ]);
+
+  const filtered = await store.listWorkerParameterProfiles({ workflowId: 'search-explore' });
+  assert.deepEqual(filtered.map((profile) => profile.profile_id), ['search-fast']);
+  const deleted = await store.deleteWorkerParameterProfile('search-fast');
+  assert.equal(deleted.profile_id, 'search-fast');
+  assert.equal(await store.getWorkerParameterProfile('search-fast'), null);
 });

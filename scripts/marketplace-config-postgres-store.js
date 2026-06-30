@@ -23,6 +23,36 @@ function normalizeSavedQueryId(value, fallback = '') {
   return normalizeIdentifier(value, 'saved-query', fallback);
 }
 
+function normalizeWorkerParameterProfileId(value, fallback = '') {
+  return normalizeIdentifier(value, 'worker-profile', fallback);
+}
+
+function serializeJsonObject(value) {
+  return JSON.stringify(value && typeof value === 'object' && !Array.isArray(value) ? value : {}, null, 2);
+}
+
+function serializeJsonArray(value) {
+  return JSON.stringify(Array.isArray(value) ? value : [], null, 2);
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function numericValue(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -39,6 +69,20 @@ function normalizeSummaryQueryCardRow(row) {
     label: row.label,
     query: row.query,
     position: numericValue(row.position, 0),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function normalizeWorkerParameterProfileRow(row) {
+  if (!row) return null;
+  return {
+    profile_id: row.profile_id,
+    workflow_id: row.workflow_id,
+    worker_type: row.worker_type || '',
+    label: row.label,
+    params: parseJsonObject(row.params_json),
+    args: parseJsonArray(row.args_json),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -106,6 +150,90 @@ function createMarketplaceConfigPostgresStore(options = {}) {
   return {
     dialect: 'postgres',
     pool,
+
+    async listWorkerParameterProfiles(options = {}) {
+      const workflowId = String(options.workflowId || options.workflow_id || '').trim();
+      const rows = workflowId
+        ? await queryRows(pool, `
+          SELECT *
+          FROM worker_parameter_profiles
+          WHERE workflow_id = $1
+          ORDER BY updated_at DESC, label ASC
+        `, [workflowId])
+        : await queryRows(pool, `
+          SELECT *
+          FROM worker_parameter_profiles
+          ORDER BY updated_at DESC, label ASC
+        `);
+      return rows.map(normalizeWorkerParameterProfileRow);
+    },
+
+    async getWorkerParameterProfile(profileId) {
+      const row = await queryOne(pool, `
+        SELECT *
+        FROM worker_parameter_profiles
+        WHERE profile_id = $1
+      `, [String(profileId || '').trim()]);
+      return normalizeWorkerParameterProfileRow(row);
+    },
+
+    async upsertWorkerParameterProfile(profile = {}) {
+      const now = profile.updatedAt || profile.updated_at || nowIso();
+      const workflowId = String(profile.workflowId || profile.workflow_id || '').trim();
+      if (!workflowId) throw new Error('upsertWorkerParameterProfile requires workflowId');
+      const label = normalizeKeyword(profile.label || profile.name || '');
+      if (!label) throw new Error('upsertWorkerParameterProfile requires label');
+      const profileId = normalizeWorkerParameterProfileId(
+        profile.profileId || profile.profile_id,
+        normalizeWorkerParameterProfileId(`${workflowId}-${label}`),
+      );
+      const previous = await this.getWorkerParameterProfile(profileId);
+      const params = profile.params && typeof profile.params === 'object' && !Array.isArray(profile.params)
+        ? profile.params
+        : {};
+      const args = Array.isArray(profile.args) ? profile.args : [];
+
+      await pool.query(`
+        INSERT INTO worker_parameter_profiles (
+          profile_id,
+          workflow_id,
+          worker_type,
+          label,
+          params_json,
+          args_json,
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT(profile_id) DO UPDATE SET
+          workflow_id = excluded.workflow_id,
+          worker_type = excluded.worker_type,
+          label = excluded.label,
+          params_json = excluded.params_json,
+          args_json = excluded.args_json,
+          updated_at = excluded.updated_at
+      `, [
+        profileId,
+        workflowId,
+        String(profile.workerType || profile.worker_type || '').trim(),
+        label,
+        serializeJsonObject(params),
+        serializeJsonArray(args),
+        previous?.created_at || profile.createdAt || profile.created_at || now,
+        now,
+      ]);
+      return this.getWorkerParameterProfile(profileId);
+    },
+
+    async deleteWorkerParameterProfile(profileId) {
+      const id = String(profileId || '').trim();
+      const previous = await this.getWorkerParameterProfile(id);
+      if (!previous) return null;
+      await pool.query(`
+        DELETE FROM worker_parameter_profiles
+        WHERE profile_id = $1
+      `, [id]);
+      return previous;
+    },
 
     async listSummaryQueryCards() {
       const rows = await queryRows(pool, `
@@ -262,6 +390,8 @@ function createMarketplaceConfigPostgresStore(options = {}) {
 
 module.exports = {
   createMarketplaceConfigPostgresStore,
+  normalizeWorkerParameterProfileId,
+  normalizeWorkerParameterProfileRow,
   normalizeSummaryQueryCardId,
   normalizeSavedQueryId,
   normalizeSummaryQueryCardRow,
