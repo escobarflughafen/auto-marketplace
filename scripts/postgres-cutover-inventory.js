@@ -59,6 +59,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'listRandomPurchaseHistoryMatches',
   'countPurchaseHistoryMatchQueue',
   'updatePurchaseHistoryMatchQueueStatus',
+  'scanPurchaseHistoryMatchesForListings',
+  'scanPurchaseHistoryListingMatches',
   'appendPurchaseHistoryEvent',
   'listPurchaseHistoryEvents',
   'appendResolveQueueEvent',

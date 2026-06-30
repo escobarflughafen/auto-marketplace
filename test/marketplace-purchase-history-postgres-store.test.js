@@ -9,6 +9,9 @@ const {
   normalizePurchaseHistoryListingRelationship,
   normalizePurchaseHistoryListingLinkRow,
   normalizePurchaseHistoryMatchQueueRow,
+  parseCadMoney,
+  normalizeMatchText,
+  matchPreparedPurchaseHistoryListing,
   purchaseHistoryLifecycleEvents,
 } = require('../scripts/marketplace-purchase-history-postgres-store');
 
@@ -37,6 +40,9 @@ test('normalizes purchase history ids, documents, and lifecycle events', () => {
   assert.equal(normalizePurchaseHistoryListingRelationship('same model'), 'same_model');
   assert.equal(normalizePurchaseHistoryListingLinkRow({ document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', relationship_type: 'transaction', href: 'https://www.facebook.com/marketplace/item/123/?x=1', listing_href: 'https://www.facebook.com/marketplace/item/123/?x=1' }).href, 'https://www.facebook.com/marketplace/item/123/');
   assert.deepEqual(normalizePurchaseHistoryMatchQueueRow({ document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', status: 'queued', listing_price_cad: '100', purchase_price_cad: '90', threshold_price_cad: '97.2', matched_terms_json: '[\"nikon\"]', history_data_json: '{\"record_id\":\"trade-001\"}' }).matched_terms, ['nikon']);
+  assert.equal(parseCadMoney('CA$ 1,250'), 1250);
+  assert.equal(normalizeMatchText('Nikon & FM2!!'), 'nikon and fm2');
+  assert.equal(matchPreparedPurchaseHistoryListing({ row: { document_id: 'doc-1', record_id: 'trade-001' }, purchasePrice: 100, terms: ['fm2'] }, { row: { listing_id: 'listing-1' }, listingPrice: 90, haystack: 'nikon fm2 camera' }).listingId, 'listing-1');
 });
 
 test('generates suffixed PostgreSQL purchase history document ids', async () => {
@@ -131,6 +137,68 @@ test('upserts and lists PostgreSQL purchase history listing links', async () => 
   const link = await store.upsertPurchaseHistoryListingLink({ documentId: 'doc-1', recordId: 'trade-001', listingId: 'listing-1', relationshipType: 'exact', note: 'manual link' }, { linkedAt: '2026-05-07T00:00:00.000Z' });
   assert.equal(link.relationship_type, 'same_listing');
   assert.equal(link.listing.card_title, 'Nikon FM2');
+});
+
+test('scans PostgreSQL purchase history matches and enqueues resolver work', async () => {
+  const resolveQueueStore = {
+    calls: [],
+    async addResolveQueueItems(listingIds, options) {
+      this.calls.push({ listingIds, options });
+      return { addedCount: listingIds.length };
+    },
+  };
+  const listingRow = { listing_id: 'listing-1', card_title: 'Nikon FM2 camera', card_text: '$90', detail_json: '{}', last_seen_at: 'seen', source: 'facebook', source_keyword: 'nikon' };
+  const historyRow = { document_id: 'doc-1', record_id: 'trade-001', canonical_key: '', title: 'Nikon FM2', model: 'fm2', data_json: '{\"purchase_price_cad\":\"100\"}', updated_at: 'updated' };
+  const pool = createFakePool((sql, params) => {
+    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return [];
+    if (/SELECT \* FROM homepage_listings WHERE listing_id IN/.test(sql)) {
+      assert.deepEqual(params, ['listing-1']);
+      assert.match(sql, /\$1/);
+      return [listingRow];
+    }
+    if (/FROM purchase_history_rows ORDER BY updated_at DESC/.test(sql)) {
+      assert.deepEqual(params, [5000]);
+      return [historyRow];
+    }
+    if (/SELECT \* FROM homepage_listings WHERE listing_id = \$1/.test(sql)) return [listingRow];
+    if (/INSERT INTO purchase_history_match_queue/.test(sql)) {
+      assert.equal(params[0], 'doc-1');
+      assert.equal(params[1], 'trade-001');
+      assert.equal(params[2], 'listing-1');
+      assert.equal(params[3], 90);
+      assert.equal(params[4], 100);
+      assert.deepEqual(JSON.parse(params[6]), ['fm2', 'nikon fm2']);
+      assert.equal(params[8], 'facebook');
+      return { rows: [], rowCount: 1 };
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplacePurchaseHistoryPostgresStore({ pool, resolveQueueStore, nowIso: () => '2026-05-09T00:00:00.000Z' });
+  const result = await store.scanPurchaseHistoryMatchesForListings(['listing-1', 'listing-1'], { actor: 'scanner' });
+  assert.deepEqual(result, { scanned: 1, matched: 1, queued: 1, listingIds: ['listing-1'] });
+  assert.deepEqual(resolveQueueStore.calls[0].listingIds, ['listing-1']);
+  assert.equal(resolveQueueStore.calls[0].options.actor, 'scanner');
+});
+
+test('scans PostgreSQL purchase history listing cursors', async () => {
+  const pool = createFakePool((sql, params) => {
+    if (/FROM purchase_history_match_scan_state/.test(sql)) return [{ state_key: params[0], cursor_at: '2026-05-01T00:00:00.000Z', cursor_id: '', updated_at: 'state' }];
+    if (/SELECT listing_id, last_seen_at/.test(sql)) {
+      assert.deepEqual(params, ['2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', '', 2]);
+      return [{ listing_id: 'listing-1', last_seen_at: '2026-05-02T00:00:00.000Z' }];
+    }
+    if (/SELECT listing_id, detail_completed_at/.test(sql)) return [];
+    if (/SELECT \* FROM homepage_listings WHERE listing_id IN/.test(sql)) return [];
+    if (/INSERT INTO purchase_history_match_scan_state/.test(sql)) {
+      assert.deepEqual(params, ['seen', '2026-05-02T00:00:00.000Z', 'listing-1', '2026-05-10T00:00:00.000Z']);
+      return { rows: [], rowCount: 1 };
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplacePurchaseHistoryPostgresStore({ pool });
+  const result = await store.scanPurchaseHistoryListingMatches({ limit: 2, enqueueResolve: false, now: '2026-05-10T00:00:00.000Z' });
+  assert.deepEqual(result.cursors.seen, { cursorAt: '2026-05-02T00:00:00.000Z', cursorId: 'listing-1' });
+  assert.equal(result.scanned, 0);
 });
 
 test('lists, counts, randomizes, and updates PostgreSQL purchase history match queue', async () => {

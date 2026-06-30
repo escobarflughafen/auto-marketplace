@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { canonicalizeListingUrl } = require('./marketplace-homepage-listings-postgres-store');
+const { createMarketplaceResolveQueuePostgresStore } = require('./marketplace-resolve-queue-postgres-store');
 
 function serializeJson(value) { return JSON.stringify(value ?? {}, null, 2); }
 
@@ -20,6 +21,18 @@ function parseJsonArray(value) {
 }
 
 function normalizeKeyword(value) { return String(value || '').replace(/\s+/g, ' ').trim(); }
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = String(value || '').trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
 
 function integerValue(value, fallback = 0) {
   const parsed = Number.parseInt(value, 10);
@@ -311,9 +324,150 @@ async function appendPurchaseHistoryMatchEvent(client, event = {}) {
   return eventId;
 }
 
+function parseCadMoney(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^free$/i.test(text)) return 0;
+  const match = text.match(/(?:CA\$|\$)?\s*([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)/i);
+  if (!match) return null;
+  const parsed = Number.parseFloat(match[1].replace(/[,\s]/g, ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeMatchText(value) {
+  return String(value || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function uniqueMatchTerms(values) {
+  const stopWords = new Set(['and', 'the', 'with', 'for', 'from', 'body', 'camera', 'lens', 'kit', 'used', 'new', 'mint', 'good', 'excellent', 'condition', 'black', 'silver', 'mount', 'adapter', 'adaptor', 'lenses', 'card', 'audio', 'dongle']);
+  const terms = [];
+  for (const value of values) {
+    const normalized = normalizeMatchText(value);
+    if (!normalized) continue;
+    if (normalized.length >= 4 && !stopWords.has(normalized) && !terms.includes(normalized)) terms.push(normalized);
+    for (const token of normalized.split(' ')) {
+      if ((token.length >= 4 || (token.length >= 3 && /[a-z]/.test(token) && /\d/.test(token))) && /[a-z]/.test(token) && !stopWords.has(token) && !terms.includes(token)) terms.push(token);
+    }
+  }
+  return terms.slice(0, 40);
+}
+
+function uniqueMatchPhrases(values) {
+  const phrases = [];
+  for (const value of values) {
+    const normalized = normalizeMatchText(value);
+    if (normalized.length >= 6 && normalized.includes(' ') && !phrases.includes(normalized)) phrases.push(normalized);
+  }
+  return phrases.slice(0, 20);
+}
+
+function purchaseHistoryMatchTerms(row) {
+  const data = parseJsonObject(row.data_json);
+  return [
+    ...uniqueMatchTerms([row.model, data.model, row.canonical_key]),
+    ...uniqueMatchPhrases([row.title, data.title, data.description, data.product_description, data.notes, data.variant]),
+  ];
+}
+
+function listingMatchHaystack(listing) {
+  const detail = parseJsonObject(listing.detail_json);
+  return normalizeMatchText([listing.card_title, listing.card_text, listing.detail_title, listing.detail_condition, listing.detail_seller_name, detail.title, detail.description, detail.text, detail.listingContent && detail.listingContent.title, detail.listingContent && detail.listingContent.description, detail.listingContent && detail.listingContent.text].filter(Boolean).join(' '));
+}
+
+function listingPriceCad(listing) {
+  return parseCadMoney(listing.detail_price) ?? parseCadMoney(listing.card_text) ?? parseCadMoney(listing.card_title) ?? parseCadMoney(listing.detail_json);
+}
+
+function purchaseHistoryPriceCad(row) {
+  const data = parseJsonObject(row.data_json);
+  return parseCadMoney(data.purchase_price_cad) ?? parseCadMoney(data.net_cost_cad) ?? parseCadMoney(data.price_cad);
+}
+
+function preparePurchaseHistoryMatchRow(historyRow) {
+  return { row: historyRow, purchasePrice: purchaseHistoryPriceCad(historyRow), terms: purchaseHistoryMatchTerms(historyRow) };
+}
+
+function prepareListingMatchRow(listing) {
+  return { row: listing, listingPrice: listingPriceCad(listing), haystack: listingMatchHaystack(listing) };
+}
+
+function matchPreparedPurchaseHistoryListing(history, listing, options = {}) {
+  const margin = Number.isFinite(options.margin) ? options.margin : 0.08;
+  if (listing.listingPrice === null || history.purchasePrice === null || history.purchasePrice <= 0 || !listing.haystack) return null;
+  const threshold = history.purchasePrice * (1 + margin);
+  if (listing.listingPrice > threshold) return null;
+  const matchedTerms = history.terms.filter((term) => listing.haystack.includes(term));
+  const hasPhraseMatch = matchedTerms.some((term) => term.includes(' '));
+  const hasCompactModelCode = matchedTerms.some((term) => /[a-z]/.test(term) && /\d/.test(term) && /^[a-z0-9]{3,8}$/.test(term) && !/^\d+mm$/.test(term));
+  if (!matchedTerms.length || (!hasPhraseMatch && matchedTerms.length < 2 && !hasCompactModelCode)) return null;
+  return { documentId: history.row.document_id, recordId: history.row.record_id, listingId: listing.row.listing_id, listingPriceCad: listing.listingPrice, purchasePriceCad: history.purchasePrice, thresholdPriceCad: threshold, matchedTerms: matchedTerms.slice(0, 12) };
+}
+
+async function listPurchaseHistoryRowsForMatching(pool, options = {}) {
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 10000)) : 5000;
+  return queryRows(pool, 'SELECT * FROM purchase_history_rows ORDER BY updated_at DESC LIMIT $1', [limit]);
+}
+
+async function upsertPurchaseHistoryMatchQueueItem(client, match, options = {}) {
+  const now = options.matchedAt || new Date().toISOString();
+  const listing = await queryOne(client, 'SELECT * FROM homepage_listings WHERE listing_id = $1', [match.listingId]) || {};
+  await client.query(`
+    INSERT INTO purchase_history_match_queue (document_id, record_id, listing_id, status, listing_price_cad, purchase_price_cad, threshold_price_cad, matched_terms_json, listing_seen_at, source, source_keyword, first_matched_at, updated_at, queued_at, note)
+    VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    ON CONFLICT(document_id, record_id, listing_id) DO UPDATE SET
+      status = CASE WHEN purchase_history_match_queue.status IN ('cleared', 'ignored', 'saved', 'dismissed') THEN purchase_history_match_queue.status ELSE 'queued' END,
+      listing_price_cad = excluded.listing_price_cad,
+      purchase_price_cad = excluded.purchase_price_cad,
+      threshold_price_cad = excluded.threshold_price_cad,
+      matched_terms_json = excluded.matched_terms_json,
+      listing_seen_at = excluded.listing_seen_at,
+      source = excluded.source,
+      source_keyword = excluded.source_keyword,
+      updated_at = excluded.updated_at,
+      note = excluded.note
+  `, [match.documentId, match.recordId, match.listingId, match.listingPriceCad, match.purchasePriceCad, match.thresholdPriceCad, serializeJson(match.matchedTerms || []), listing.last_seen_at || '', listing.source || '', listing.source_keyword || '', now, now, now, `price <= purchase + ${Math.round(((options.margin ?? 0.08) * 100))}%`]);
+}
+
+async function getPurchaseHistoryMatchScanState(pool, stateKey, options = {}) {
+  const key = String(stateKey || '').trim();
+  const existing = await queryOne(pool, 'SELECT * FROM purchase_history_match_scan_state WHERE state_key = $1', [key]);
+  if (existing) return existing;
+  const now = options.now || new Date().toISOString();
+  const lookbackMs = Number.isFinite(options.initialLookbackMs) ? Math.max(0, options.initialLookbackMs) : 24 * 60 * 60 * 1000;
+  const cursorAt = new Date(Date.parse(now) - lookbackMs).toISOString();
+  await pool.query('INSERT INTO purchase_history_match_scan_state (state_key, cursor_at, cursor_id, updated_at) VALUES ($1, $2, $3, $4)', [key, cursorAt, '', now]);
+  return { state_key: key, cursor_at: cursorAt, cursor_id: '', updated_at: now };
+}
+
+async function updatePurchaseHistoryMatchScanState(pool, stateKey, cursorAt, cursorId, options = {}) {
+  const now = options.now || new Date().toISOString();
+  await pool.query(`
+    INSERT INTO purchase_history_match_scan_state (state_key, cursor_at, cursor_id, updated_at)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT(state_key) DO UPDATE SET cursor_at = excluded.cursor_at, cursor_id = excluded.cursor_id, updated_at = excluded.updated_at
+  `, [String(stateKey || '').trim(), String(cursorAt || ''), String(cursorId || ''), now]);
+}
+
+async function listListingsForPurchaseHistoryMatchScan(pool, stateKey, columnName, options = {}) {
+  if (!['last_seen_at', 'detail_completed_at'].includes(columnName)) throw new Error(`Unsupported purchase history scan column: ${columnName}`);
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 250;
+  const state = await getPurchaseHistoryMatchScanState(pool, stateKey, options);
+  const rows = await queryRows(pool, `
+    SELECT listing_id, ${columnName}
+    FROM homepage_listings
+    WHERE COALESCE(${columnName}, '') != ''
+      AND (${columnName} > $1 OR (${columnName} = $2 AND listing_id > $3))
+    ORDER BY ${columnName} ASC, listing_id ASC
+    LIMIT $4
+  `, [state.cursor_at, state.cursor_at, state.cursor_id || '', limit]);
+  return { state, rows };
+}
+
 function createMarketplacePurchaseHistoryPostgresStore(options = {}) {
   const pool = createPoolFromOptions(options);
   const nowIso = typeof options.nowIso === 'function' ? options.nowIso : () => new Date().toISOString();
+  const resolveQueueStore = options.resolveQueueStore || createMarketplaceResolveQueuePostgresStore({ pool, nowIso });
 
   const store = {
     dialect: 'postgres',
@@ -566,6 +720,61 @@ function createMarketplacePurchaseHistoryPostgresStore(options = {}) {
         return { changes: result.rowCount || 0 };
       });
     },
+    async scanPurchaseHistoryMatchesForListings(listingIds = [], options = {}) {
+      const ids = uniqueStrings(listingIds);
+      if (!ids.length) return { scanned: 0, matched: 0, queued: 0, listingIds: [] };
+      const params = [];
+      const placeholders = ids.map((id) => { params.push(id); return `$${params.length}`; });
+      const listings = await queryRows(pool, `SELECT * FROM homepage_listings WHERE listing_id IN (${placeholders.join(', ')})`, params);
+      if (!listings.length) return { scanned: 0, matched: 0, queued: 0, listingIds: [] };
+      const historyRows = (await listPurchaseHistoryRowsForMatching(pool, { limit: options.historyLimit })).map(preparePurchaseHistoryMatchRow).filter((row) => row.purchasePrice !== null && row.purchasePrice > 0 && row.terms.length > 0);
+      const matchedListingIds = new Set();
+      let matched = 0;
+      const matchedAt = options.matchedAt || options.matched_at || nowIso();
+      const margin = Number.isFinite(options.margin) ? options.margin : 0.08;
+      await withTransaction(pool, async (client) => {
+        for (const listing of listings) {
+          const preparedListing = prepareListingMatchRow(listing);
+          if (preparedListing.listingPrice === null || !preparedListing.haystack) continue;
+          for (const historyRow of historyRows) {
+            const match = matchPreparedPurchaseHistoryListing(historyRow, preparedListing, { margin });
+            if (!match) continue;
+            await upsertPurchaseHistoryMatchQueueItem(client, match, { matchedAt, margin });
+            matched += 1;
+            matchedListingIds.add(listing.listing_id);
+          }
+        }
+      });
+      let queued = 0;
+      if (matchedListingIds.size > 0 && options.enqueueResolve !== false) {
+        const result = await resolveQueueStore.addResolveQueueItems([...matchedListingIds], { actor: options.actor || 'history-watch', queuedAt: matchedAt });
+        queued = result.addedCount || 0;
+      }
+      return { scanned: listings.length, matched, queued, listingIds: [...matchedListingIds] };
+    },
+
+    async scanPurchaseHistoryListingMatches(options = {}) {
+      const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 1000)) : 250;
+      const actor = options.actor || 'history-watch';
+      const scans = [['seen', 'last_seen_at'], ['detail', 'detail_completed_at']];
+      const result = { scanned: 0, matched: 0, queued: 0, listingIds: [], cursors: {} };
+      for (const [stateKey, columnName] of scans) {
+        const { rows } = await listListingsForPurchaseHistoryMatchScan(pool, stateKey, columnName, { ...options, limit });
+        const listingIds = rows.map((row) => row.listing_id);
+        const scanResult = await this.scanPurchaseHistoryMatchesForListings(listingIds, { ...options, actor });
+        result.scanned += scanResult.scanned;
+        result.matched += scanResult.matched;
+        result.queued += scanResult.queued;
+        result.listingIds.push(...scanResult.listingIds);
+        if (rows.length > 0) {
+          const last = rows[rows.length - 1];
+          await updatePurchaseHistoryMatchScanState(pool, stateKey, last[columnName], last.listing_id, options);
+          result.cursors[stateKey] = { cursorAt: last[columnName], cursorId: last.listing_id };
+        }
+      }
+      result.listingIds = uniqueStrings(result.listingIds);
+      return result;
+    },
     async listPurchaseHistoryEvents(options = {}) {
       const documentId = String(options.documentId || options.document_id || '').trim();
       const recordId = String(options.recordId || options.record_id || '').trim();
@@ -598,6 +807,11 @@ module.exports = {
   normalizePurchaseHistoryEventRow,
   normalizePurchaseHistoryMatchQueueRow,
   purchaseHistoryRowProjection,
+  parseCadMoney,
+  normalizeMatchText,
+  purchaseHistoryMatchTerms,
+  listingMatchHaystack,
+  matchPreparedPurchaseHistoryListing,
   normalizeInventoryStatus,
   purchaseHistoryLifecycleEvents,
   uniquePurchaseHistoryDocumentId,
