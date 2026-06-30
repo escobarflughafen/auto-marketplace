@@ -84,7 +84,7 @@ fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   umask 077
-  password="$(LC_ALL=C tr -dc 'A-Za-z0-9_+=' </dev/urandom | head -c 40)"
+  password="$(node -e "process.stdout.write(require('crypto').randomBytes(30).toString('base64url'))")"
   cat > "$ENV_FILE" <<EOF
 MARKETPLACE_POSTGRES_DB=marketplace
 MARKETPLACE_POSTGRES_USER=marketplace

@@ -89,7 +89,7 @@ test('buildPostgresLiteListingsQuery compiles PostgreSQL placeholders and price 
   });
 
   assert.match(query.sql, /FROM homepage_listings/);
-  assert.match(query.sql, /regexp_match\(detail_price/);
+  assert.ok(query.sql.includes("REPLACE(REPLACE(REPLACE(detail_price, 'CA$'"));
   assert.match(query.sql, /ESCAPE E'\\\\'/);
   assert.match(query.sql, /LIMIT \$6 OFFSET \$7/);
   assert.doesNotMatch(query.sql, /LIMIT \? OFFSET \?/);
@@ -104,9 +104,9 @@ test('buildPostgresLiteCountQuery compiles count query with dollar parameters', 
 
   assert.match(query.sql, /SELECT COUNT\(\*\) AS total/);
   assert.match(query.sql, /detail_status = \$1/);
-  assert.match(query.sql, /card_title LIKE \$2/);
-  assert.match(query.sql, /detail_title LIKE \$3/);
-  assert.doesNotMatch(query.sql, /LIKE \?/);
+  assert.match(query.sql, /card_title ILIKE \$2/);
+  assert.match(query.sql, /detail_title ILIKE \$3/);
+  assert.doesNotMatch(query.sql, /ILIKE \?/);
   assert.deepEqual(query.params, ['pending', '%leica%', '%leica%']);
 });
 
@@ -117,7 +117,7 @@ test('buildPostgresLiteListingsStatsQueries compiles histogram with PostgreSQL f
   });
   const histogram = stats.priceHistogram({ min: 2000, max: 5000, binCount: 6 });
 
-  assert.match(stats.priceSummary.sql, /regexp_match\(detail_price/);
+  assert.ok(stats.priceSummary.sql.includes("REPLACE(REPLACE(REPLACE(detail_price, 'CA$'"));
   assert.match(stats.priceSummary.sql, /COUNT\(\*\) AS \"totalRows\"/);
   assert.match(histogram.sql, /FLOOR\(\(numeric_price - \$7\) \/ \$8\)::BIGINT/);
   assert.doesNotMatch(histogram.sql, /CAST\(/);

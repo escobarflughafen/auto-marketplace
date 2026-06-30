@@ -2,13 +2,7 @@ const { resolveField } = require('./lite-kql-fields');
 const { parseLiteKql, looksLikeLiteKql } = require('./lite-kql-parser');
 const { planLiteKql, clampLimit } = require('./lite-kql-planner');
 const { LiteKqlError } = require('./lite-kql-sqlite');
-
-const POSTGRES_LISTING_PRICE_SQL = `
-  COALESCE(
-    NULLIF(REPLACE((regexp_match(detail_price, '(?:CA\\$|\\$)?\\s*([0-9][0-9,]*)'))[1], ',', ''), '')::BIGINT,
-    NULLIF(REPLACE((regexp_match(card_text, '(?:CA\\$|\\$)?\\s*([0-9][0-9,]*)'))[1], ',', ''), '')::BIGINT
-  )
-`;
+const { POSTGRES_LISTING_PRICE_SQL } = require('./postgres-price-sql');
 
 function escapeLikeValue(value) {
   return String(value || '')
@@ -45,7 +39,7 @@ function valueForField(field, value) {
 
 function textConditionForColumn(column, operator, value, placeholders) {
   const not = operator.startsWith('!') || operator === '!=';
-  const positive = not ? 'NOT LIKE' : 'LIKE';
+  const positive = not ? 'NOT ILIKE' : 'ILIKE';
   const escaped = escapeLikeValue(value);
   let pattern = escaped;
   if (operator.includes('contains') || operator.includes('has') || operator === '=~' || operator === '!~') {
@@ -98,7 +92,7 @@ function compileCondition(node, placeholders) {
     const params = [];
     const clauses = columns.map((column) => {
       params.push(value);
-      return `${column} LIKE ${placeholders.next()} ESCAPE E'\\\\'`;
+      return `${column} ILIKE ${placeholders.next()} ESCAPE E'\\\\'`;
     });
     return {
       sql: `(${clauses.join('\n        OR ')})`,

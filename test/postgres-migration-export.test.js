@@ -21,6 +21,7 @@ test('postgres migration exporter emits schema, copy data, and verification arti
         item_id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '',
         attempt INTEGER NOT NULL DEFAULT 0,
+        measured_height INTEGER,
         note TEXT,
         payload_json TEXT NOT NULL DEFAULT '{}'
       );
@@ -30,6 +31,7 @@ test('postgres migration exporter emits schema, copy data, and verification arti
       .run('item-1', 'Leica\tM6', 2, 'line one\nline two\\tail', JSON.stringify({ ok: true }));
     db.prepare('INSERT INTO sample_items (item_id, title, attempt, note, payload_json) VALUES (?, ?, ?, ?, ?)')
       .run('item-2', 'Nikon', 0, null, '{}');
+    db.exec("UPDATE sample_items SET measured_height = 218.5 WHERE item_id = 'item-1'");
   } finally {
     db.close();
   }
@@ -53,6 +55,7 @@ test('postgres migration exporter emits schema, copy data, and verification arti
   assert.match(schemaSql, /DROP TABLE IF EXISTS "sample_items" CASCADE/);
   assert.match(schemaSql, /"item_id" TEXT NOT NULL PRIMARY KEY/);
   assert.match(schemaSql, /"attempt" BIGINT NOT NULL DEFAULT 0/);
+  assert.match(schemaSql, /"measured_height" DOUBLE PRECISION/);
   assert.match(schemaSql, /CREATE UNIQUE INDEX IF NOT EXISTS "idx_sample_items_title"/);
 
   const loadSql = fs.readFileSync(path.join(outputDir, '002_load.sql'), 'utf8');
@@ -65,6 +68,7 @@ test('postgres migration exporter emits schema, copy data, and verification arti
   assert.match(data, /\t\\N\t/);
 
   const verifySql = fs.readFileSync(path.join(outputDir, '003_verify.sql'), 'utf8');
+  assert.ok(verifySql.includes('WITH expected(table_name, expected_count) AS (\nVALUES'));
   assert.match(verifySql, /expected_count/);
   assert.match(verifySql, /WHEN 'sample_items' THEN \(SELECT COUNT\(\*\) FROM "sample_items"\)/);
 

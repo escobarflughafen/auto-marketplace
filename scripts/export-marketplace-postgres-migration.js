@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
+const { once } = require('events');
 const { DatabaseSync } = require('node:sqlite');
 
 const DEFAULT_SQLITE_DB = path.join(process.cwd(), 'artifacts', 'marketplace-homepage', 'marketplace-homepage.db');
@@ -94,6 +95,28 @@ function mapSqliteType(type) {
   return 'TEXT';
 }
 
+function sqliteColumnHasRealValues(db, table, column) {
+  try {
+    return Boolean(db.prepare(`
+      SELECT 1 AS found
+      FROM ${quoteIdent(table)}
+      WHERE ${quoteIdent(column)} IS NOT NULL
+        AND typeof(${quoteIdent(column)}) = 'real'
+      LIMIT 1
+    `).get());
+  } catch {
+    return false;
+  }
+}
+
+function mapSqliteColumnType(db, table, column) {
+  const normalized = String(column.type || '').toUpperCase();
+  if (normalized.includes('INT') && sqliteColumnHasRealValues(db, table, column.name)) {
+    return 'DOUBLE PRECISION';
+  }
+  return mapSqliteType(column.type);
+}
+
 function normalizeDefault(defaultValue) {
   if (defaultValue === null || defaultValue === undefined || defaultValue === '') return '';
   const raw = String(defaultValue).trim();
@@ -150,7 +173,7 @@ function createTableSql(db, table, options = {}) {
     .sort((left, right) => Number(left.pk) - Number(right.pk));
   const inlineSinglePk = pkColumns.length === 1;
   const lines = columns.map((column) => {
-    const parts = [quoteIdent(column.name), mapSqliteType(column.type)];
+    const parts = [quoteIdent(column.name), mapSqliteColumnType(db, table, column)];
     if (Number(column.notnull) === 1 || (inlineSinglePk && pkColumns[0].name === column.name)) parts.push('NOT NULL');
     if (inlineSinglePk && pkColumns[0].name === column.name) parts.push('PRIMARY KEY');
     const defaultSql = normalizeDefault(column.dflt_value);
@@ -183,7 +206,21 @@ function copyTextValue(value) {
     .replace(/\r/g, '\\r');
 }
 
-function exportTableData(db, table, outputFile, batchSize) {
+async function writeCopyLine(stream, line) {
+  if (!stream.write(line)) {
+    await once(stream, 'drain');
+  }
+}
+
+async function finishWriteStream(stream) {
+  stream.end();
+  await Promise.race([
+    once(stream, 'finish'),
+    once(stream, 'error').then(([error]) => { throw error; }),
+  ]);
+}
+
+async function exportTableData(db, table, outputFile, batchSize) {
   const columns = tableInfo(db, table).map((column) => column.name);
   const total = db.prepare(`SELECT COUNT(*) AS count FROM ${quoteIdent(table)}`).get().count;
   fs.mkdirSync(path.dirname(outputFile), { recursive: true });
@@ -194,15 +231,12 @@ function exportTableData(db, table, outputFile, batchSize) {
     const rows = stmt.all(batchSize, written);
     if (!rows.length) break;
     for (const row of rows) {
-      stream.write(`${columns.map((column) => copyTextValue(row[column])).join('\t')}\n`);
+      await writeCopyLine(stream, `${columns.map((column) => copyTextValue(row[column])).join('\t')}\n`);
     }
     written += rows.length;
   }
-  stream.end();
-  return new Promise((resolve, reject) => {
-    stream.on('finish', () => resolve({ rowCount: total, writtenRows: written, columns }));
-    stream.on('error', reject);
-  });
+  await finishWriteStream(stream);
+  return { rowCount: total, writtenRows: written, columns };
 }
 
 function relativeUnixPath(fromDir, filePath) {
@@ -251,6 +285,7 @@ async function exportPostgresMigration(options) {
     const verifyLines = [
       '\\set ON_ERROR_STOP on',
       'WITH expected(table_name, expected_count) AS (',
+      'VALUES',
     ];
     const expectedRows = [];
 
@@ -259,14 +294,17 @@ async function exportPostgresMigration(options) {
       const tableManifest = {
         name: table,
         columns,
-        rowCount: db.prepare(`SELECT COUNT(*) AS count FROM ${quoteIdent(table)}`).get().count,
+        rowCount: 0,
         dataFile: options.schemaOnly ? '' : path.join(dataDir, `${table}.tsv`),
       };
       if (!options.schemaOnly) {
         const exported = await exportTableData(db, table, tableManifest.dataFile, options.batchSize);
+        tableManifest.rowCount = exported.rowCount;
         tableManifest.writtenRows = exported.writtenRows;
         const dataFileForPsql = path.join(':DATA_DIR', relativeUnixPath(dataDir, tableManifest.dataFile)).split(path.sep).join('/');
         loadLines.push(`\\copy ${quoteIdent(table)} (${columns.map((column) => quoteIdent(column)).join(', ')}) FROM '${dataFileForPsql}' WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')`);
+      } else {
+        tableManifest.rowCount = db.prepare(`SELECT COUNT(*) AS count FROM ${quoteIdent(table)}`).get().count;
       }
       expectedRows.push(`  (${sqlLiteral(table)}, ${tableManifest.rowCount})`);
       manifest.tables.push(tableManifest);

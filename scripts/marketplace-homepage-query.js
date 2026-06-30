@@ -669,7 +669,7 @@ function buildOrderBy(sort, sortDirection = '') {
   const direction = normalizeSortDirection(sortDirection);
   switch (sort) {
     case 'oldest':
-      return 'ORDER BY last_seen_at ASC, first_seen_at ASC';
+      return 'ORDER BY last_seen_at ASC, first_seen_at ASC, listing_id ASC';
     case 'rank':
       return `ORDER BY COALESCE(last_seen_rank, 999999) ${direction.toUpperCase()}, last_seen_at DESC`;
     case 'price':
@@ -698,7 +698,7 @@ function buildOrderBy(sort, sortDirection = '') {
       return `ORDER BY COALESCE(NULLIF(detail_completed_at, ''), '') ${direction.toUpperCase()}, last_seen_at DESC`;
     case 'recent':
     default:
-      return `ORDER BY last_seen_at ${direction.toUpperCase()}, first_seen_at ${direction.toUpperCase()}`;
+      return `ORDER BY last_seen_at ${direction.toUpperCase()}, first_seen_at ${direction.toUpperCase()}, listing_id ASC`;
   }
 }
 

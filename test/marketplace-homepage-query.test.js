@@ -180,7 +180,7 @@ test('PostgreSQL listing query compiles legacy filters with dollar placeholders'
   assert.equal(query.parsedQuery.dialect, 'postgres');
   assert.match(query.sql, /FROM homepage_listings/);
   assert.match(query.sql, /detail_status = \$11/);
-  assert.match(query.sql, /regexp_match\(detail_price/);
+  assert.ok(query.sql.includes("REPLACE(REPLACE(REPLACE(detail_price, 'CA$'"));
   assert.match(query.sql, /LIMIT \$13 OFFSET \$14/);
   assert.doesNotMatch(query.sql, /LIMIT \? OFFSET \?/);
   assert.equal(query.limit, 25);
@@ -197,7 +197,7 @@ test('PostgreSQL query helpers compile ids, count, stats, and histogram shapes',
   assert.match(ids.sql, /SELECT listing_id/);
   assert.match(ids.sql, /detail_status IN \('pending', 'error', 'processing'\)/);
   assert.match(ids.sql, /detail_status != \$1/);
-  assert.match(ids.sql, /card_title LIKE \$2/);
+  assert.match(ids.sql, /card_title ILIKE \$2/);
   assert.deepEqual(ids.params, ['done', '%nikon%', '%nikon%']);
 
   const count = buildPostgresCountQuery({
@@ -214,7 +214,7 @@ test('PostgreSQL query helpers compile ids, count, stats, and histogram shapes',
     excludeListingIds: ['queued-a'],
   });
   assert.match(stats.priceSummary.sql, /COUNT\(\*\) AS "totalRows"/);
-  assert.match(stats.priceSummary.sql, /regexp_match\(detail_price/);
+  assert.ok(stats.priceSummary.sql.includes("REPLACE(REPLACE(REPLACE(detail_price, 'CA$'"));
   assert.deepEqual(stats.priceSummary.params, ['%pentax%', '%pentax%', 2000, 'queued-a']);
 
   const histogram = stats.priceHistogram({ min: 2000, max: 5000, binCount: 6 });

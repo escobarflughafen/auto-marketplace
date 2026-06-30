@@ -8,6 +8,7 @@ const {
   buildLiteListingsStatsQueries,
 } = require('./lite-kql-postgres');
 const { parseQuery, clampLimit: clampSqliteLimit } = require('./marketplace-homepage-query');
+const { POSTGRES_LISTING_PRICE_SQL } = require('./postgres-price-sql');
 
 const TEXT_FIELDS = new Set([
   'listing_id',
@@ -49,13 +50,6 @@ const SORT_FIELDS = new Set([
   'recent',
   'oldest',
 ]);
-
-const POSTGRES_LISTING_PRICE_SQL = `
-  COALESCE(
-    NULLIF(REPLACE((regexp_match(detail_price, '(?:CA\\$|\\$)?\\s*([0-9][0-9,]*)'))[1], ',', ''), '')::BIGINT,
-    NULLIF(REPLACE((regexp_match(card_text, '(?:CA\\$|\\$)?\\s*([0-9][0-9,]*)'))[1], ',', ''), '')::BIGINT
-  )
-`;
 
 function createPlaceholderState() {
   let index = 0;
@@ -168,7 +162,7 @@ function buildFreeTextCondition(term, placeholders) {
     'detail_json',
   ].map((field) => {
     params.push(likeValue);
-    return `${field} LIKE ${placeholders.next()} ESCAPE E'\\\\'`;
+    return `${field} ILIKE ${placeholders.next()} ESCAPE E'\\\\'`;
   });
   return {
     sql: `(${clauses.join('\n      OR ')})`,
@@ -200,8 +194,8 @@ function buildTextCondition(field, operator, value, placeholders) {
     const second = placeholders.next();
     return {
       sql: not
-        ? `(card_title NOT LIKE ${first} ESCAPE E'\\\\' AND detail_title NOT LIKE ${second} ESCAPE E'\\\\')`
-        : `(card_title LIKE ${first} ESCAPE E'\\\\' OR detail_title LIKE ${second} ESCAPE E'\\\\')`,
+        ? `(card_title NOT ILIKE ${first} ESCAPE E'\\\\' AND detail_title NOT ILIKE ${second} ESCAPE E'\\\\')`
+        : `(card_title ILIKE ${first} ESCAPE E'\\\\' OR detail_title ILIKE ${second} ESCAPE E'\\\\')`,
       params: [pattern, pattern],
     };
   }
@@ -210,8 +204,8 @@ function buildTextCondition(field, operator, value, placeholders) {
     const second = placeholders.next();
     return {
       sql: not
-        ? `(card_text NOT LIKE ${first} ESCAPE E'\\\\' AND detail_json NOT LIKE ${second} ESCAPE E'\\\\')`
-        : `(card_text LIKE ${first} ESCAPE E'\\\\' OR detail_json LIKE ${second} ESCAPE E'\\\\')`,
+        ? `(card_text NOT ILIKE ${first} ESCAPE E'\\\\' AND detail_json NOT ILIKE ${second} ESCAPE E'\\\\')`
+        : `(card_text ILIKE ${first} ESCAPE E'\\\\' OR detail_json ILIKE ${second} ESCAPE E'\\\\')`,
       params: [pattern, pattern],
     };
   }
@@ -225,7 +219,7 @@ function buildTextCondition(field, operator, value, placeholders) {
   }
 
   return {
-    sql: `${field} ${not ? 'NOT LIKE' : 'LIKE'} ${placeholder} ESCAPE E'\\\\'`,
+    sql: `${field} ${not ? 'NOT ILIKE' : 'ILIKE'} ${placeholder} ESCAPE E'\\\\'`,
     params: [pattern],
   };
 }
@@ -305,7 +299,7 @@ function buildWhereClause(parsedQuery, placeholders) {
   for (const filter of parsedQuery.filters) {
     switch (filter.field) {
       case 'listing_id':
-        clauses.push(`listing_id LIKE ${placeholders.next()} ESCAPE E'\\\\'`);
+        clauses.push(`listing_id ILIKE ${placeholders.next()} ESCAPE E'\\\\'`);
         params.push(`%${escapeLikeValue(filter.value)}%`);
         break;
       case 'detail_status':
@@ -318,20 +312,20 @@ function buildWhereClause(parsedQuery, placeholders) {
       case 'detail_location':
       case 'source':
       case 'source_keyword':
-        clauses.push(`${filter.field} LIKE ${placeholders.next()} ESCAPE E'\\\\'`);
+        clauses.push(`${filter.field} ILIKE ${placeholders.next()} ESCAPE E'\\\\'`);
         params.push(`%${escapeLikeValue(filter.value)}%`);
         break;
       case 'title': {
         const first = placeholders.next();
         const second = placeholders.next();
-        clauses.push(`(card_title LIKE ${first} ESCAPE E'\\\\' OR detail_title LIKE ${second} ESCAPE E'\\\\')`);
+        clauses.push(`(card_title ILIKE ${first} ESCAPE E'\\\\' OR detail_title ILIKE ${second} ESCAPE E'\\\\')`);
         params.push(`%${escapeLikeValue(filter.value)}%`, `%${escapeLikeValue(filter.value)}%`);
         break;
       }
       case 'text': {
         const first = placeholders.next();
         const second = placeholders.next();
-        clauses.push(`(card_text LIKE ${first} ESCAPE E'\\\\' OR detail_json LIKE ${second} ESCAPE E'\\\\')`);
+        clauses.push(`(card_text ILIKE ${first} ESCAPE E'\\\\' OR detail_json ILIKE ${second} ESCAPE E'\\\\')`);
         params.push(`%${escapeLikeValue(filter.value)}%`, `%${escapeLikeValue(filter.value)}%`);
         break;
       }
@@ -379,7 +373,7 @@ function buildOrderBy(sort, sortDirection = '') {
   const direction = normalizeSortDirection(sortDirection).toUpperCase();
   switch (sort) {
     case 'oldest':
-      return 'ORDER BY last_seen_at ASC, first_seen_at ASC';
+      return 'ORDER BY last_seen_at ASC, first_seen_at ASC, listing_id ASC';
     case 'rank':
       return `ORDER BY COALESCE(last_seen_rank, 999999) ${direction}, last_seen_at DESC`;
     case 'price':
@@ -408,7 +402,7 @@ function buildOrderBy(sort, sortDirection = '') {
       return `ORDER BY COALESCE(NULLIF(detail_completed_at, ''), '') ${direction}, last_seen_at DESC`;
     case 'recent':
     default:
-      return `ORDER BY last_seen_at ${direction}, first_seen_at ${direction}`;
+      return `ORDER BY last_seen_at ${direction}, first_seen_at ${direction}, listing_id ASC`;
   }
 }
 
