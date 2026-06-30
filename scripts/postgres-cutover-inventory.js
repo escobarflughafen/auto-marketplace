@@ -11,6 +11,15 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'canonicalizeListingUrl',
   'normalizeKeyword',
   'hashContent',
+  'listSummaryQueryCards',
+  'getSummaryQueryCard',
+  'upsertSummaryQueryCard',
+  'deleteSummaryQueryCard',
+  'listSavedQueries',
+  'getSavedQuery',
+  'upsertSavedQuery',
+  'setSavedQueryOverview',
+  'deleteSavedQuery',
 ]);
 
 const READ_NAME_PATTERNS = [

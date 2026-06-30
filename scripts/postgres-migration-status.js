@@ -133,6 +133,7 @@ function appRuntimeFiles(containerName, runner = spawnSync) {
     '/app/scripts/serve-marketplace-homepage.js',
     '/app/scripts/remote-worker-postgres-store.js',
     '/app/scripts/marketplace-postgres-reader.js',
+    '/app/scripts/marketplace-config-postgres-store.js',
     '/app/scripts/marketplace-query-builders.js',
     '/app/scripts/postgres-price-sql.js',
     '/app/scripts/postgres-migration-status.js',
