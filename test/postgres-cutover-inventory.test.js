@@ -63,11 +63,10 @@ module.exports = {
 
   assert.equal(inventory.ok, false);
   assert.equal(inventory.counts.total, 8);
-  assert.equal(inventory.counts.covered, 2);
-  assert.equal(inventory.counts.gaps, 6);
+  assert.equal(inventory.counts.covered, 3);
+  assert.equal(inventory.counts.gaps, 5);
   assert.deepEqual(inventory.nextRequiredGaps, [
     'getHomepageListing',
-    'listWorkflowRuns',
     'upsertHomepageListing',
     'appendListingEvent',
     'runTransaction',

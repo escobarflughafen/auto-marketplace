@@ -24,6 +24,11 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'upsertSavedQuery',
   'setSavedQueryOverview',
   'deleteSavedQuery',
+  'insertWorkflowRun',
+  'updateWorkflowRun',
+  'getWorkflowRun',
+  'getWorkflowRunLive',
+  'listWorkflowRuns',
 ]);
 
 const READ_NAME_PATTERNS = [
