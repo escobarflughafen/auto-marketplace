@@ -1,4 +1,5 @@
 const { createMarketplaceListingMediaPostgresStore } = require('./marketplace-listing-media-postgres-store');
+const { createMarketplaceWorkerEventsPostgresStore } = require('./marketplace-worker-events-postgres-store');
 
 function normalizeKeyword(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -107,9 +108,233 @@ async function queryOne(pool, sql, params = []) {
   return rows[0] || null;
 }
 
+async function withTransaction(pool, callback) {
+  const client = typeof pool.connect === 'function' ? await pool.connect() : pool;
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    if (client !== pool && typeof client.release === 'function') client.release();
+  }
+}
+
+function placeholder(params, value) {
+  params.push(value);
+  return `$${params.length}`;
+}
+
+function placeholderList(params, values) {
+  return values.map((value) => placeholder(params, value)).join(', ');
+}
+
+function normalizeBacklogTimeField(value) {
+  const normalized = normalizeKeyword(value || 'last_seen').toLowerCase().replace(/-/g, '_');
+  switch (normalized) {
+    case '':
+    case 'last':
+    case 'last_seen':
+    case 'last_seen_at':
+      return 'last_seen_at';
+    case 'first':
+    case 'first_seen':
+    case 'first_seen_at':
+      return 'first_seen_at';
+    default:
+      throw new Error(`Unknown backlog time field: ${value}`);
+  }
+}
+
+function normalizeBacklogOrder(value) {
+  const normalized = normalizeKeyword(value || 'priority').toLowerCase().replace(/-/g, '_');
+  switch (normalized) {
+    case '':
+    case 'priority':
+    case 'default':
+      return 'priority';
+    case 'rank':
+    case 'ranked':
+      return 'rank';
+    case 'latest':
+    case 'newest':
+    case 'newest_seen':
+      return 'latest';
+    case 'earliest':
+    case 'oldest':
+    case 'oldest_seen':
+      return 'earliest';
+    default:
+      throw new Error(`Unknown backlog order: ${value}`);
+  }
+}
+
+function buildBacklogClaimOrderSql(order, timeColumn) {
+  const statusPriority = `
+        CASE detail_status
+          WHEN 'pending' THEN 0
+          WHEN 'error' THEN 1
+          ELSE 2
+        END`;
+
+  switch (order) {
+    case 'latest':
+      return `${statusPriority},
+        ${timeColumn} DESC,
+        COALESCE(last_seen_rank, 999999) ASC,
+        first_seen_at ASC`;
+    case 'earliest':
+      return `${statusPriority},
+        ${timeColumn} ASC,
+        COALESCE(last_seen_rank, 999999) ASC,
+        first_seen_at ASC`;
+    case 'rank':
+    case 'priority':
+    default:
+      return `${statusPriority},
+        COALESCE(last_seen_rank, 999999) ASC,
+        last_seen_at DESC,
+        first_seen_at ASC`;
+  }
+}
+
+function isoBefore(options = {}, seconds = 0) {
+  const base = options.now ? Date.parse(options.now) : Date.now();
+  return new Date(base - (seconds * 1000)).toISOString();
+}
+
+function buildBacklogCandidateQueryParts(options = {}) {
+  const staleAfterSeconds = Number.isFinite(options.staleAfterSeconds)
+    ? options.staleAfterSeconds
+    : 30 * 60;
+  const staleBefore = isoBefore(options, staleAfterSeconds);
+  const maxAttempts = Number.isFinite(options.maxAttempts)
+    ? Math.max(1, options.maxAttempts)
+    : null;
+  const retryDelaySeconds = Number.isFinite(options.retryDelaySeconds)
+    ? Math.max(0, options.retryDelaySeconds)
+    : 0;
+  const retryBefore = isoBefore(options, retryDelaySeconds);
+  const sourceFilter = normalizeKeyword(options.sourceFilter || '');
+  const keywordFilter = normalizeKeyword(options.keywordFilter || '').toLowerCase();
+  const statusFilter = normalizeKeyword(options.statusFilter || 'all').toLowerCase();
+  const backlogOrder = normalizeBacklogOrder(options.backlogOrder || options.order || options.orderBy);
+  const backlogTimeField = normalizeBacklogTimeField(options.seenTimeField || options.timeField || options.backlogTimeField);
+  const seenAfter = normalizeKeyword(options.seenAfter || options.after || '');
+  const seenBefore = normalizeKeyword(options.seenBefore || options.before || '');
+  const listingIds = Array.isArray(options.listingIds)
+    ? [...new Set(options.listingIds.map((id) => String(id || '').trim()).filter(Boolean))]
+    : [];
+  const listingIdTable = String(options.listingIdTable || '').trim();
+  if (listingIdTable && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(listingIdTable)) {
+    throw new Error(`Invalid listingIdTable: ${listingIdTable}`);
+  }
+  const params = [];
+  let extraWhereSql = '';
+  let statusWhereSql = '';
+
+  switch (statusFilter) {
+    case '':
+    case 'all':
+    case 'eligible':
+      statusWhereSql = `
+        (
+          detail_status IN ('pending', 'error')
+          OR (
+            detail_status = 'processing'
+            AND COALESCE(detail_started_at, '') != ''
+            AND detail_started_at <= ${placeholder(params, staleBefore)}
+          )
+        )
+      `;
+      break;
+    case 'pending':
+      statusWhereSql = "detail_status = 'pending'";
+      break;
+    case 'error':
+    case 'retryable-error':
+    case 'retryable_errors':
+      statusWhereSql = "detail_status = 'error'";
+      break;
+    case 'processing':
+    case 'stale-processing':
+    case 'stale_processing':
+      statusWhereSql = `
+        detail_status = 'processing'
+        AND COALESCE(detail_started_at, '') != ''
+        AND detail_started_at <= ${placeholder(params, staleBefore)}
+      `;
+      break;
+    case 'sold':
+      statusWhereSql = "detail_status = 'sold'";
+      break;
+    case 'pending_sale':
+    case 'pending-sale':
+      statusWhereSql = "detail_status = 'pending_sale'";
+      break;
+    case 'inactive':
+      statusWhereSql = "detail_status IN ('sold', 'pending_sale')";
+      break;
+    default:
+      throw new Error(`Unknown statusFilter: ${options.statusFilter}`);
+  }
+
+  if (maxAttempts !== null) {
+    extraWhereSql += ` AND detail_attempts < ${placeholder(params, maxAttempts)}`;
+  }
+  if (retryDelaySeconds > 0) {
+    extraWhereSql += `
+      AND (
+        detail_status != 'error'
+        OR COALESCE(detail_completed_at, detail_started_at, first_seen_at) <= ${placeholder(params, retryBefore)}
+      )
+    `;
+  }
+  if (sourceFilter) {
+    extraWhereSql += ` AND source = ${placeholder(params, sourceFilter)}`;
+  }
+  if (keywordFilter) {
+    extraWhereSql += ` AND lower(source_keyword) LIKE ${placeholder(params, `%${keywordFilter}%`)}`;
+  }
+  if (listingIds.length > 0) {
+    extraWhereSql += ` AND listing_id IN (${placeholderList(params, listingIds)})`;
+  }
+  if (listingIdTable) {
+    extraWhereSql += ` AND listing_id IN (SELECT listing_id FROM ${listingIdTable})`;
+  }
+  if (seenAfter) {
+    extraWhereSql += ` AND ${backlogTimeField} >= ${placeholder(params, seenAfter)}`;
+  }
+  if (seenBefore) {
+    extraWhereSql += ` AND ${backlogTimeField} <= ${placeholder(params, seenBefore)}`;
+  }
+
+  return {
+    statusWhereSql,
+    extraWhereSql,
+    params,
+    orderSql: buildBacklogClaimOrderSql(backlogOrder, backlogTimeField),
+    backlogOrder,
+    backlogTimeField,
+  };
+}
+
+async function getHomepageListingFromClient(client, listingId) {
+  const row = await queryOne(client, `
+    SELECT *
+    FROM homepage_listings
+    WHERE listing_id = $1
+  `, [String(listingId || '').trim()]);
+  return normalizeHomepageListingRow(row);
+}
+
 function createMarketplaceHomepageListingsPostgresStore(options = {}) {
   const pool = createPoolFromOptions(options);
   const mediaStore = options.mediaStore || createMarketplaceListingMediaPostgresStore({ pool });
+  const eventStore = options.eventStore || createMarketplaceWorkerEventsPostgresStore({ pool });
   const nowIso = typeof options.nowIso === 'function' ? options.nowIso : () => new Date().toISOString();
 
   return {
@@ -252,6 +477,211 @@ function createMarketplaceHomepageListingsPostgresStore(options = {}) {
       return normalizeHomepageListingRow(row);
     },
 
+    async listBacklogCandidates(options = {}) {
+      const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 200)) : 25;
+      const parts = buildBacklogCandidateQueryParts(options);
+      const params = [...parts.params];
+      const rows = await queryRows(pool, `
+        SELECT
+          listing_id,
+          href,
+          source,
+          source_keyword,
+          card_title,
+          detail_title,
+          detail_status,
+          detail_attempts,
+          first_seen_at,
+          last_seen_at,
+          last_seen_rank,
+          detail_started_at,
+          detail_completed_at
+        FROM homepage_listings
+        WHERE ${parts.statusWhereSql}
+          ${parts.extraWhereSql}
+        ORDER BY
+          ${parts.orderSql}
+        LIMIT ${placeholder(params, limit)}
+      `, params);
+      return rows.map(normalizeHomepageListingRow);
+    },
+
+    async claimNextPendingHomepageListing(options = {}) {
+      const now = options.claimedAt || options.claimed_at || nowIso();
+      const workerId = String(options.workerId || options.worker_id || `worker-${process.pid}`);
+      const parts = buildBacklogCandidateQueryParts(options);
+      const claimed = await withTransaction(pool, async (client) => {
+        const candidate = await queryOne(client, `
+          SELECT listing_id
+          FROM homepage_listings
+          WHERE ${parts.statusWhereSql}
+            ${parts.extraWhereSql}
+          ORDER BY
+            ${parts.orderSql}
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        `, parts.params);
+
+        if (!candidate) return null;
+
+        await client.query(`
+          UPDATE homepage_listings
+          SET
+            detail_status = 'processing',
+            detail_attempts = detail_attempts + 1,
+            detail_started_at = $1,
+            claimed_by = $2,
+            detail_last_error = ''
+          WHERE listing_id = $3
+        `, [now, workerId, candidate.listing_id]);
+
+        return getHomepageListingFromClient(client, candidate.listing_id);
+      });
+
+      if (claimed && typeof options.startEventBuilder === 'function' && eventStore && typeof eventStore.appendListingEvent === 'function') {
+        await eventStore.appendListingEvent(options.startEventBuilder(claimed));
+      }
+      return claimed;
+    },
+
+    async markHomepageListingFailed(listingId, error, options = {}) {
+      const completedAt = options.completedAt || options.completed_at || nowIso();
+      await pool.query(`
+        UPDATE homepage_listings
+        SET
+          detail_status = 'error',
+          detail_last_error = $1,
+          detail_completed_at = $2,
+          claimed_by = ''
+        WHERE listing_id = $3
+      `, [String(error || 'Unknown processing error').trim(), completedAt, String(listingId)]);
+      return this.getHomepageListing(listingId);
+    },
+
+    async releaseHomepageListingClaim(listingId, options = {}) {
+      const completedAt = options.completedAt || options.completed_at || nowIso();
+      const workerId = String(options.workerId || options.worker_id || '').trim();
+      const nextStatus = String(options.nextStatus || options.next_status || 'pending').trim();
+      const reason = String(options.reason || 'claim released').trim();
+      const decrementAttempts = options.decrementAttempts === true;
+      if (!['pending', 'error'].includes(nextStatus)) {
+        throw new Error(`Unsupported released listing status: ${nextStatus}`);
+      }
+      const result = await pool.query(`
+        UPDATE homepage_listings
+        SET
+          detail_status = $1,
+          detail_last_error = $2,
+          detail_completed_at = $3,
+          claimed_by = '',
+          detail_attempts = CASE
+            WHEN $4 THEN GREATEST(detail_attempts - 1, 0)
+            ELSE detail_attempts
+          END
+        WHERE listing_id = $5
+          AND detail_status = 'processing'
+          AND ($6 = '' OR claimed_by = $7)
+      `, [
+        nextStatus,
+        reason,
+        completedAt,
+        decrementAttempts,
+        String(listingId),
+        workerId,
+        workerId,
+      ]);
+      return {
+        changed: (result.rowCount || 0) > 0,
+        listing: await this.getHomepageListing(listingId),
+      };
+    },
+
+    async listStaleProcessingHomepageListings(options = {}) {
+      const staleAfterSeconds = Number.isFinite(options.staleAfterSeconds)
+        ? Math.max(1, options.staleAfterSeconds)
+        : 30 * 60;
+      const limit = Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(options.limit, 1000))
+        : 100;
+      const now = options.now || nowIso();
+      const staleBefore = new Date(Date.parse(now) - (staleAfterSeconds * 1000)).toISOString();
+      const rows = await queryRows(pool, `
+        SELECT
+          listing_id,
+          href,
+          card_title,
+          detail_title,
+          detail_status,
+          detail_attempts,
+          detail_started_at,
+          detail_completed_at,
+          detail_last_error,
+          claimed_by,
+          first_seen_at,
+          last_seen_at
+        FROM homepage_listings
+        WHERE detail_status = 'processing'
+          AND COALESCE(detail_started_at, '') != ''
+          AND detail_started_at <= $1
+        ORDER BY detail_started_at ASC, listing_id ASC
+        LIMIT $2
+      `, [staleBefore, limit]);
+      return rows.map(normalizeHomepageListingRow);
+    },
+
+    async recoverStaleProcessingHomepageListings(options = {}) {
+      const dryRun = options.dryRun !== false;
+      const nextStatus = String(options.nextStatus || options.next_status || 'pending').trim();
+      const recoveredAt = options.recoveredAt || options.recovered_at || options.now || nowIso();
+      const reason = String(options.reason || 'stale_processing_recovery').trim();
+      if (!['pending', 'error'].includes(nextStatus)) {
+        throw new Error(`Unsupported stale processing recovery status: ${nextStatus}`);
+      }
+      const rows = await this.listStaleProcessingHomepageListings(options);
+      const recovered = [];
+      if (!dryRun) {
+        for (const row of rows) {
+          if (eventStore && typeof eventStore.appendListingEvent === 'function') {
+            await eventStore.appendListingEvent({
+              workflowRunId: row.claimed_by || '',
+              listingId: row.listing_id,
+              eventType: 'detail_capture_interrupted',
+              eventAt: recoveredAt,
+              workerId: row.claimed_by || 'maintenance',
+              sourceUrl: row.href,
+              attempt: row.detail_attempts,
+              status: 'interrupted',
+              content: {
+                recovery: {
+                  reason,
+                  nextStatus,
+                  previousStatus: row.detail_status,
+                  detailStartedAt: row.detail_started_at,
+                  claimedBy: row.claimed_by || '',
+                },
+              },
+              error: reason,
+            });
+          }
+          const release = await this.releaseHomepageListingClaim(row.listing_id, {
+            nextStatus,
+            reason,
+            completedAt: recoveredAt,
+            decrementAttempts: true,
+          });
+          if (release.changed) recovered.push(release.listing);
+        }
+      }
+      return {
+        dryRun,
+        staleAfterSeconds: Number.isFinite(options.staleAfterSeconds) ? options.staleAfterSeconds : 30 * 60,
+        nextStatus,
+        reason,
+        scanned: rows.length,
+        recovered: dryRun ? 0 : recovered.length,
+        items: dryRun ? rows : recovered,
+      };
+    },
     async getHomepageListingCounts() {
       const rows = await queryRows(pool, `
         SELECT detail_status, COUNT(*)::BIGINT AS count

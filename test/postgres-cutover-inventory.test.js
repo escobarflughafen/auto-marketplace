@@ -76,7 +76,7 @@ test('buildInventory against current DB module records existing cutover gaps', (
 
   assert.equal(inventory.ok, false);
   assert.ok(inventory.counts.total > 50);
-  assert.ok(inventory.counts.gaps > 40);
+  assert.ok(inventory.counts.gaps > 35);
   assert.ok(inventory.nextRequiredGaps.includes('openMarketplaceHomepageDatabase'));
   assert.ok(!inventory.nextRequiredGaps.includes('upsertHomepageListing'));
   assert.ok(!inventory.nextRequiredGaps.includes('appendListingEvent'));
