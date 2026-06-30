@@ -281,6 +281,137 @@ test('claimNextPendingHomepageListing claims a row inside a PostgreSQL transacti
   assert.deepEqual(pool.calls.map((call) => call.sql.trim()).filter((sql) => ['BEGIN', 'COMMIT'].includes(sql)), ['BEGIN', 'COMMIT']);
 });
 
+test('markHomepageListingProcessed writes detail fields and normalizes listed time', async () => {
+  const pool = createFakePool((sql, params, callNumber) => {
+    if (/detail_status = 'done'/.test(sql)) {
+      assert.deepEqual(params, [
+        '2026-05-09T11:00:00.000Z',
+        'Processed title',
+        'CA$ 100',
+        'Vancouver',
+        'used',
+        '2 days ago',
+        'Seller',
+        JSON.stringify({
+          title: 'Processed title',
+          listingContent: {
+            title: 'Inner title',
+            price: 'CA$ 100',
+            location: 'Vancouver',
+            condition: 'used',
+            listedAgo: '2 days ago',
+            sellerName: 'Seller',
+          },
+          screenshotPath: '/tmp/100.png',
+          snapshotPath: '/tmp/100.md',
+        }, null, 2),
+        '/tmp/100.png',
+        '/tmp/100.md',
+        'processed-1',
+      ]);
+      return { rows: [], rowCount: 1 };
+    }
+    if (/SELECT listing_id, detail_listed_ago/.test(sql)) {
+      return [{
+        listing_id: 'processed-1',
+        detail_listed_ago: '2 days ago',
+        first_seen_at: '2026-05-09T10:40:45.000Z',
+        last_seen_at: '2026-05-09T10:40:45.000Z',
+      }];
+    }
+    if (/detail_listed_at_raw = \$1/.test(sql)) {
+      assert.equal(params[0], '2 days ago');
+      assert.equal(params[4], 'en');
+      assert.equal(params[5], 'day');
+      assert.equal(params[6], 2);
+      assert.equal(params[7], 'range');
+      assert.equal(params[10], 'processed-1');
+      return { rows: [], rowCount: 1 };
+    }
+    if (/SELECT \*/.test(sql)) {
+      return [listingRow({
+        listing_id: 'processed-1',
+        detail_status: 'done',
+        detail_title: 'Processed title',
+        detail_listed_at_unit: 'day',
+        detail_listed_at_value: '2',
+      })];
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplaceHomepageListingsPostgresStore({ pool });
+
+  const row = await store.markHomepageListingProcessed('processed-1', {
+    title: 'Processed title',
+    listingContent: {
+      title: 'Inner title',
+      price: 'CA$ 100',
+      location: 'Vancouver',
+      condition: 'used',
+      listedAgo: '2 days ago',
+      sellerName: 'Seller',
+    },
+    screenshotPath: '/tmp/100.png',
+    snapshotPath: '/tmp/100.md',
+  }, { completedAt: '2026-05-09T11:00:00.000Z' });
+
+  assert.equal(row.detail_status, 'done');
+  assert.equal(row.detail_listed_at_value, 2);
+});
+
+test('markHomepageListingInactive writes inactive detail fields and normalizes listed time', async () => {
+  const pool = createFakePool((sql, params) => {
+    if (/detail_status = \$1/.test(sql) && /snapshot_path = \$12/.test(sql)) {
+      assert.deepEqual(params.slice(0, 4), [
+        'pending_sale',
+        'pending signal',
+        '2026-05-09T12:00:00.000Z',
+        'Inactive title',
+      ]);
+      assert.equal(params[7], 'today');
+      assert.equal(params[12], 'inactive-1');
+      return { rows: [], rowCount: 1 };
+    }
+    if (/SELECT listing_id, detail_listed_ago/.test(sql)) {
+      return [{
+        listing_id: 'inactive-1',
+        detail_listed_ago: 'today',
+        first_seen_at: '2026-05-09T10:40:45.000Z',
+        last_seen_at: '2026-05-09T10:40:45.000Z',
+      }];
+    }
+    if (/detail_listed_at_raw = \$1/.test(sql)) {
+      assert.equal(params[0], 'today');
+      assert.equal(params[5], 'day');
+      assert.equal(params[6], 0);
+      assert.equal(params[10], 'inactive-1');
+      return { rows: [], rowCount: 1 };
+    }
+    if (/SELECT \*/.test(sql)) {
+      return [listingRow({
+        listing_id: 'inactive-1',
+        detail_status: 'pending_sale',
+        detail_last_error: 'pending signal',
+        detail_listed_at_unit: 'day',
+        detail_listed_at_value: '0',
+      })];
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplaceHomepageListingsPostgresStore({ pool });
+
+  const row = await store.markHomepageListingInactive('inactive-1', 'pending_sale', {
+    title: 'Inactive title',
+    listingContent: {
+      price: 'CA$ 200',
+      listedAgo: 'today',
+      availabilityReason: 'pending signal',
+    },
+  }, '', { completedAt: '2026-05-09T12:00:00.000Z' });
+
+  assert.equal(row.detail_status, 'pending_sale');
+  assert.equal(row.detail_listed_at_value, 0);
+});
 test('markHomepageListingFailed and releaseHomepageListingClaim update status rows', async () => {
   const pool = createFakePool((sql, params, callNumber) => {
     if (/detail_status = 'error'/.test(sql)) {

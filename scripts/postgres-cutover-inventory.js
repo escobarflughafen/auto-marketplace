@@ -44,6 +44,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'releaseHomepageListingClaim',
   'listStaleProcessingHomepageListings',
   'recoverStaleProcessingHomepageListings',
+  'markHomepageListingProcessed',
+  'markHomepageListingInactive',
   'listListingMedia',
   'listWorkerListingEvents',
   'getWorkerListingEventStats',

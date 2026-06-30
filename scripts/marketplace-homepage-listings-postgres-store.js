@@ -1,5 +1,6 @@
 const { createMarketplaceListingMediaPostgresStore } = require('./marketplace-listing-media-postgres-store');
 const { createMarketplaceWorkerEventsPostgresStore } = require('./marketplace-worker-events-postgres-store');
+const { listedAgoToUnixRange } = require('./marketplace-listed-time-normalizer');
 
 function normalizeKeyword(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -322,6 +323,66 @@ function buildBacklogCandidateQueryParts(options = {}) {
   };
 }
 
+function unixSecondsFromIso(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+async function writeListedTimeNormalization(pool, listingId, listedAgo, anchorIso, range) {
+  const normalizedAt = range?.normalizedAt || new Date().toISOString();
+  const anchorUnix = range?.anchorUnix ?? unixSecondsFromIso(anchorIso);
+  await pool.query(`
+    UPDATE homepage_listings
+    SET
+      detail_listed_at_raw = $1,
+      detail_listed_at_earliest_unix = $2,
+      detail_listed_at_latest_unix = $3,
+      detail_listed_at_anchor_unix = $4,
+      detail_listed_at_language = $5,
+      detail_listed_at_unit = $6,
+      detail_listed_at_value = $7,
+      detail_listed_at_confidence = $8,
+      detail_listed_at_source = $9,
+      detail_listed_at_normalized_at = $10
+    WHERE listing_id = $11
+  `, [
+    String(listedAgo || '').trim(),
+    range?.earliestUnix ?? null,
+    range?.latestUnix ?? null,
+    anchorUnix,
+    range?.language || '',
+    range?.unit || '',
+    range?.value ?? null,
+    range?.confidence || 'unparsed',
+    range?.source || 'detail_listed_ago:first_seen_at',
+    normalizedAt,
+    String(listingId),
+  ]);
+}
+
+async function normalizeHomepageListingListedTime(pool, listingId) {
+  const row = await queryOne(pool, `
+    SELECT listing_id, detail_listed_ago, first_seen_at, last_seen_at
+    FROM homepage_listings
+    WHERE listing_id = $1
+  `, [String(listingId)]);
+  if (!row) return { status: 'missing', listingId: String(listingId) };
+
+  const listedAgo = String(row.detail_listed_ago || '').trim();
+  if (!listedAgo) {
+    return { status: 'skipped', reason: 'empty_detail_listed_ago', listingId: row.listing_id };
+  }
+
+  const anchorIso = row.first_seen_at || row.last_seen_at || '';
+  const range = listedAgoToUnixRange(listedAgo, anchorIso);
+  await writeListedTimeNormalization(pool, row.listing_id, listedAgo, anchorIso, range);
+  return {
+    status: range ? 'normalized' : 'unparsed',
+    listingId: row.listing_id,
+    listedAgo,
+    range,
+  };
+}
 async function getHomepageListingFromClient(client, listingId) {
   const row = await queryOne(client, `
     SELECT *
@@ -544,6 +605,87 @@ function createMarketplaceHomepageListingsPostgresStore(options = {}) {
       return claimed;
     },
 
+    async markHomepageListingProcessed(listingId, detailRecord = {}, options = {}) {
+      const completedAt = options.completedAt || options.completed_at || nowIso();
+      const listingContent = detailRecord.listingContent || {};
+      const detailJson = serializeJson(detailRecord);
+      await pool.query(`
+        UPDATE homepage_listings
+        SET
+          detail_status = 'done',
+          detail_last_error = '',
+          detail_completed_at = $1,
+          claimed_by = '',
+          detail_title = $2,
+          detail_price = $3,
+          detail_location = $4,
+          detail_condition = $5,
+          detail_listed_ago = $6,
+          detail_seller_name = $7,
+          detail_json = $8,
+          screenshot_path = $9,
+          snapshot_path = $10
+        WHERE listing_id = $11
+      `, [
+        completedAt,
+        String(detailRecord.title || listingContent.title || '').trim(),
+        String(listingContent.price || '').trim(),
+        String(listingContent.location || '').trim(),
+        String(listingContent.condition || '').trim(),
+        String(listingContent.listedAgo || '').trim(),
+        String(listingContent.sellerName || '').trim(),
+        detailJson,
+        String(detailRecord.screenshotPath || '').trim(),
+        String(detailRecord.snapshotPath || '').trim(),
+        String(listingId),
+      ]);
+
+      await normalizeHomepageListingListedTime(pool, listingId);
+      return this.getHomepageListing(listingId);
+    },
+
+    async markHomepageListingInactive(listingId, status, detailRecord = {}, reason = '', options = {}) {
+      const inactiveStatus = status === 'pending_sale' ? 'pending_sale' : 'sold';
+      const completedAt = options.completedAt || options.completed_at || nowIso();
+      const listingContent = detailRecord.listingContent || {};
+      const detailLastError = reason || listingContent.availabilityReason || inactiveStatus;
+      const detailJson = serializeJson(detailRecord);
+      await pool.query(`
+        UPDATE homepage_listings
+        SET
+          detail_status = $1,
+          detail_last_error = $2,
+          detail_completed_at = $3,
+          claimed_by = '',
+          detail_title = $4,
+          detail_price = $5,
+          detail_location = $6,
+          detail_condition = $7,
+          detail_listed_ago = $8,
+          detail_seller_name = $9,
+          detail_json = $10,
+          screenshot_path = $11,
+          snapshot_path = $12
+        WHERE listing_id = $13
+      `, [
+        inactiveStatus,
+        String(detailLastError || '').trim(),
+        completedAt,
+        String(detailRecord.title || listingContent.title || '').trim(),
+        String(listingContent.price || '').trim(),
+        String(listingContent.location || '').trim(),
+        String(listingContent.condition || '').trim(),
+        String(listingContent.listedAgo || '').trim(),
+        String(listingContent.sellerName || '').trim(),
+        detailJson,
+        String(detailRecord.screenshotPath || '').trim(),
+        String(detailRecord.snapshotPath || '').trim(),
+        String(listingId),
+      ]);
+
+      await normalizeHomepageListingListedTime(pool, listingId);
+      return this.getHomepageListing(listingId);
+    },
     async markHomepageListingFailed(listingId, error, options = {}) {
       const completedAt = options.completedAt || options.completed_at || nowIso();
       await pool.query(`
@@ -713,4 +855,5 @@ module.exports = {
   extractListingId,
   normalizeHomepageListingRow,
   summarizeHomepageListingComparable,
+  normalizeHomepageListingListedTime,
 };
