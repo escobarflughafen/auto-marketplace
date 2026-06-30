@@ -201,6 +201,36 @@ test('scans PostgreSQL purchase history listing cursors', async () => {
   assert.equal(result.scanned, 0);
 });
 
+test('merges PostgreSQL purchase history documents by upserting source row data', async () => {
+  const store = createMarketplacePurchaseHistoryPostgresStore({ pool: createFakePool(() => []) });
+  const calls = [];
+  store.getPurchaseHistoryDocument = async (documentId) => ({ document_id: documentId, row_count: documentId === 'source-doc' ? 2 : 3 });
+  store.listPurchaseHistoryRows = async (documentId) => {
+    calls.push(['list', documentId]);
+    return [
+      { record_id: 'trade-001', data: { record_id: 'trade-001', title: 'Nikon FM2 updated' } },
+      { record_id: 'trade-002', data: { record_id: 'trade-002', title: 'Pentax 67 105mm' } },
+    ];
+  };
+  store.upsertPurchaseHistoryRows = async (documentId, rows, options) => {
+    calls.push(['upsert', documentId, rows, options.reason]);
+    return { inserted: 1, updated: 1, total: rows.length };
+  };
+
+  const result = await store.mergePurchaseHistoryDocuments({ sourceDocumentId: 'source-doc', targetDocumentId: 'target-doc', reason: 'manual merge' });
+  assert.equal(result.source.document_id, 'source-doc');
+  assert.equal(result.target.document_id, 'target-doc');
+  assert.deepEqual([result.inserted, result.updated, result.total], [1, 1, 2]);
+  assert.deepEqual(calls, [
+    ['list', 'source-doc'],
+    ['upsert', 'target-doc', [
+      { record_id: 'trade-001', title: 'Nikon FM2 updated' },
+      { record_id: 'trade-002', title: 'Pentax 67 105mm' },
+    ], 'manual merge'],
+  ]);
+  await assert.rejects(() => store.mergePurchaseHistoryDocuments({ sourceDocumentId: 'target-doc', targetDocumentId: 'target-doc' }), /Cannot merge/);
+});
+
 test('lists, counts, randomizes, and updates PostgreSQL purchase history match queue', async () => {
   const queueRow = {
     document_id: 'doc-1', record_id: 'trade-001', listing_id: 'listing-1', status: 'queued',

@@ -590,6 +590,20 @@ function createMarketplacePurchaseHistoryPostgresStore(options = {}) {
       return rows.map(normalizePurchaseHistoryRow);
     },
 
+    async mergePurchaseHistoryDocuments(options = {}) {
+      const sourceDocumentId = String(options.sourceDocumentId || options.source_document_id || '').trim();
+      const targetDocumentId = String(options.targetDocumentId || options.target_document_id || '').trim();
+      if (!sourceDocumentId || !targetDocumentId) throw new Error('mergePurchaseHistoryDocuments requires sourceDocumentId and targetDocumentId');
+      if (sourceDocumentId === targetDocumentId) throw new Error('Cannot merge a purchase history document into itself');
+      const source = await this.getPurchaseHistoryDocument(sourceDocumentId);
+      const target = await this.getPurchaseHistoryDocument(targetDocumentId);
+      if (!source) throw new Error(`Unknown source purchase history document: ${sourceDocumentId}`);
+      if (!target) throw new Error(`Unknown target purchase history document: ${targetDocumentId}`);
+      const sourceRows = (await this.listPurchaseHistoryRows(sourceDocumentId)).map((row) => row.data);
+      const result = await this.upsertPurchaseHistoryRows(targetDocumentId, sourceRows, options);
+      return { source, target: await this.getPurchaseHistoryDocument(targetDocumentId), inserted: result.inserted, updated: result.updated, total: result.total };
+    },
+
     async listPurchaseHistoryListingLinks(options = {}) {
       const documentId = String(options.documentId || options.document_id || '').trim();
       const recordId = String(options.recordId || options.record_id || '').trim();
