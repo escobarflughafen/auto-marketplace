@@ -41,7 +41,7 @@ function createProject() {
   return { projectDir, migrationDir };
 }
 
-function createDockerRunner({ running = true, ready = true, tableCount = 3 } = {}) {
+function createDockerRunner({ running = true, ready = true, tableCount = 3, appFiles = true, appEnv = true, appReachable = true } = {}) {
   return (cmd, args) => {
     assert.equal(cmd, 'docker');
     if (args[0] === 'inspect') {
@@ -65,6 +65,26 @@ function createDockerRunner({ running = true, ready = true, tableCount = 3 } = {
         stderr: '',
       };
     }
+    if (args[0] === 'exec' && args.includes('node')) {
+      const script = args[args.indexOf('-e') + 1] || '';
+      if (script.includes('fs.existsSync')) {
+        const files = JSON.parse(args.at(-1));
+        const status = Object.fromEntries(files.map((file) => [file, Boolean(appFiles)]));
+        return { status: 0, stdout: `${JSON.stringify(status)}\n`, stderr: '' };
+      }
+      if (script.includes('process.env[key]')) {
+        const keys = JSON.parse(args.at(-1));
+        const status = Object.fromEntries(keys.map((key) => [key, Boolean(appEnv)]));
+        return { status: 0, stdout: `${JSON.stringify(status)}\n`, stderr: '' };
+      }
+      if (script.includes('urlText')) {
+        return {
+          status: 0,
+          stdout: `${JSON.stringify(appReachable ? { ok: true, status: 'connect' } : { ok: false, status: 'timeout' })}\n`,
+          stderr: '',
+        };
+      }
+    }
     return { status: 1, stdout: '', stderr: `unexpected docker args: ${args.join(' ')}` };
   };
 }
@@ -75,6 +95,7 @@ test('parseArgs reads status options', () => {
     envFile: '.postgres-migration.env',
     migrationName: 'prod-a',
     postgresContainer: '',
+    appContainer: 'auto-browser',
     json: true,
     strict: true,
   });
@@ -115,6 +136,8 @@ test('buildStatusReport summarizes a ready shadow migration without leaking pass
   assert.equal(report.postgres.container, 'marketplace-postgres');
   assert.equal(report.postgres.ready, true);
   assert.equal(report.postgres.tableCount, 3);
+  assert.equal(report.app.container, 'auto-browser');
+  assert.equal(report.app.postgresReachable, true);
   assert.equal(report.migration.manifestRows, 2);
   assert.ok(report.checks.every((item) => item.ok));
   assert.doesNotMatch(JSON.stringify(report), /secret-value/);
@@ -123,13 +146,16 @@ test('buildStatusReport summarizes a ready shadow migration without leaking pass
 test('buildStatusReport reports failed readiness gates in strict-readable checks', () => {
   const { projectDir } = createProject();
   fs.writeFileSync(path.join(projectDir, 'artifacts', 'postgres-migration', 'prod-new', 'shadow-compare.json'), JSON.stringify({ ok: false, probeCount: 2, failed: 1 }));
-  const report = buildStatusReport({ projectDir }, createDockerRunner({ ready: false, tableCount: 0 }));
+  const report = buildStatusReport({ projectDir }, createDockerRunner({ ready: false, tableCount: 0, appFiles: false, appEnv: false, appReachable: false }));
   const failed = report.checks.filter((item) => !item.ok).map((item) => item.name);
 
   assert.equal(report.ok, false);
   assert.ok(failed.includes('postgres_ready'));
   assert.ok(failed.includes('shadow_compare'));
   assert.ok(failed.includes('postgres_loaded_tables'));
+  assert.ok(failed.includes('app_postgres_runtime_files'));
+  assert.ok(failed.includes('app_postgres_env'));
+  assert.ok(failed.includes('app_postgres_reachable'));
 });
 
 test('latestMigrationName returns empty when no migration directory exists', () => {

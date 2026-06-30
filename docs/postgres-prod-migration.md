@@ -84,7 +84,7 @@ npm run marketplace:postgres:status -- --json
 npm run marketplace:postgres:status -- --strict
 ```
 
-The status command checks local migration files, the PostgreSQL container, `pg_isready`, loaded public tables, `verify-output.txt`, and `shadow-compare.json`. In `--strict` mode it exits nonzero until all checks pass. It does not print the generated PostgreSQL password.
+The status command checks local migration files, the PostgreSQL container, `pg_isready`, loaded public tables, `verify-output.txt`, `shadow-compare.json`, and the live app container's PostgreSQL runtime readiness. The app-runtime checks are intentionally redacted: they report whether required files and environment keys exist and whether the app can connect to its configured PostgreSQL URL, but they do not print database URLs or passwords. In `--strict` mode it exits nonzero until both the loaded database and app runtime are ready.
 
 ## Production Shadow Migration Script
 
@@ -136,4 +136,4 @@ The inventory classifies every export from `scripts/marketplace-homepage-db.js` 
 
 ## Current Limitation
 
-The repository now includes PostgreSQL migration artifacts and a listing read adapter, but the production app still opens SQLite by default and all write-heavy paths remain SQLite-first. Production will continue reading/writing SQLite until the PostgreSQL service is loaded, shadow reads are verified, write-path adapters are implemented, and deployment configuration is explicitly cut over.
+The repository now includes PostgreSQL migration artifacts and a listing read adapter, but the production app still opens SQLite by default and all write-heavy paths remain SQLite-first. Production will continue reading/writing SQLite until the PostgreSQL service is loaded, shadow reads are verified, the app container is deployed with the PostgreSQL runtime files, runtime PostgreSQL environment is configured, app-to-PostgreSQL networking is reachable, write-path adapters are implemented, and deployment configuration is explicitly cut over.

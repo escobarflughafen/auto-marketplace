@@ -4,7 +4,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 function usage() {
-  process.stdout.write(`Usage:\n  node scripts/postgres-migration-status.js [options]\n\nOptions:\n  --project-dir DIR          Project dir. Default: current directory.\n  --env-file FILE            PostgreSQL env file. Default: .postgres-migration.env\n  --migration-name NAME      Artifact directory under artifacts/postgres-migration. Default: latest.\n  --postgres-container NAME  PostgreSQL container override.\n  --json                     Print JSON report.\n  --strict                   Exit nonzero unless all readiness checks pass.\n  -h, --help                 Show this help.\n`);
+  process.stdout.write(`Usage:\n  node scripts/postgres-migration-status.js [options]\n\nOptions:\n  --project-dir DIR          Project dir. Default: current directory.\n  --env-file FILE            PostgreSQL env file. Default: .postgres-migration.env\n  --migration-name NAME      Artifact directory under artifacts/postgres-migration. Default: latest.\n  --postgres-container NAME  PostgreSQL container override.\n  --app-container NAME       App container to audit. Default: auto-browser.\n  --json                     Print JSON report.\n  --strict                   Exit nonzero unless all readiness checks pass.\n  -h, --help                 Show this help.\n`);
 }
 
 function parseArgs(argv) {
@@ -13,6 +13,7 @@ function parseArgs(argv) {
     envFile: '.postgres-migration.env',
     migrationName: '',
     postgresContainer: '',
+    appContainer: 'auto-browser',
     json: false,
     strict: false,
   };
@@ -30,6 +31,9 @@ function parseArgs(argv) {
         break;
       case '--postgres-container':
         options.postgresContainer = argv[++index] || '';
+        break;
+      case '--app-container':
+        options.appContainer = argv[++index] || '';
         break;
       case '--json':
         options.json = true;
@@ -123,6 +127,77 @@ function postgresTableCount(containerName, user, database, runner = spawnSync) {
   return { ok: Number.isFinite(count), count: Number.isFinite(count) ? count : null };
 }
 
+function appRuntimeFiles(containerName, runner = spawnSync) {
+  if (!containerName) return { ok: false, files: {}, error: 'missing container name' };
+  const files = [
+    '/app/scripts/remote-worker-postgres-store.js',
+    '/app/scripts/marketplace-postgres-reader.js',
+    '/app/scripts/marketplace-query-builders.js',
+    '/app/scripts/postgres-price-sql.js',
+    '/app/scripts/postgres-migration-status.js',
+    '/app/scripts/postgres-cutover-inventory.js',
+  ];
+  const script = "const fs=require('fs'); const files=JSON.parse(process.argv[1]); console.log(JSON.stringify(Object.fromEntries(files.map((file)=>[file,fs.existsSync(file)]))));";
+  const result = runDocker(['exec', containerName, 'node', '-e', script, JSON.stringify(files)], runner);
+  if (!result.ok) return { ok: false, files: {}, error: result.stderr || result.error || 'docker exec failed' };
+  try {
+    const fileStatus = JSON.parse(result.stdout || '{}');
+    return { ok: Object.values(fileStatus).every(Boolean), files: fileStatus };
+  } catch (error) {
+    return { ok: false, files: {}, error: error.message };
+  }
+}
+
+function appPostgresEnvStatus(containerName, runner = spawnSync) {
+  if (!containerName) return { ok: false, keys: {}, error: 'missing container name' };
+  const keys = [
+    'MARKETPLACE_POSTGRES_URL',
+    'DATABASE_URL',
+    'MARKETPLACE_REMOTE_WORKER_POSTGRES_URL',
+    'MARKETPLACE_REMOTE_WORKER_STORE',
+    'MARKETPLACE_REMOTE_WORKER_POSTGRES',
+    'MARKETPLACE_DB_DIALECT',
+  ];
+  const script = "const keys=JSON.parse(process.argv[1]); console.log(JSON.stringify(Object.fromEntries(keys.map((key)=>[key,Boolean(process.env[key])]))));";
+  const result = runDocker(['exec', containerName, 'node', '-e', script, JSON.stringify(keys)], runner);
+  if (!result.ok) return { ok: false, keys: {}, error: result.stderr || result.error || 'docker exec failed' };
+  try {
+    const keyStatus = JSON.parse(result.stdout || '{}');
+    const hasConnection = Boolean(keyStatus.MARKETPLACE_POSTGRES_URL || keyStatus.DATABASE_URL || keyStatus.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL);
+    const remoteWorkerPostgres = keyStatus.MARKETPLACE_REMOTE_WORKER_STORE || keyStatus.MARKETPLACE_REMOTE_WORKER_POSTGRES;
+    return { ok: hasConnection && remoteWorkerPostgres, keys: keyStatus };
+  } catch (error) {
+    return { ok: false, keys: {}, error: error.message };
+  }
+}
+
+function appPostgresReachability(containerName, runner = spawnSync) {
+  if (!containerName) return { ok: false, status: 'missing_container_name' };
+  const script = [
+    "const net = require('net');",
+    "const urlText = process.env.MARKETPLACE_REMOTE_WORKER_POSTGRES_URL || process.env.MARKETPLACE_POSTGRES_URL || process.env.DATABASE_URL || '';",
+    "if (!urlText) { console.log(JSON.stringify({ ok: false, status: 'missing_postgres_url' })); process.exit(0); }",
+    "let parsed;",
+    "try { parsed = new URL(urlText); } catch { console.log(JSON.stringify({ ok: false, status: 'invalid_postgres_url' })); process.exit(0); }",
+    "const port = Number.parseInt(parsed.port || '5432', 10);",
+    "const socket = net.createConnection({ host: parsed.hostname, port, timeout: 2000 });",
+    "let done = false;",
+    "function finish(ok, status) { if (done) return; done = true; console.log(JSON.stringify({ ok, status })); socket.destroy(); }",
+    "socket.on('connect', () => finish(true, 'connect'));",
+    "socket.on('timeout', () => finish(false, 'timeout'));",
+    "socket.on('error', (error) => finish(false, error.code || 'error'));",
+  ].join('\n');
+  const result = runDocker(['exec', containerName, 'node', '-e', script], runner);
+  if (!result.ok) return { ok: false, status: 'docker_exec_failed', error: result.stderr || result.error || '' };
+  try {
+    const parsed = JSON.parse(result.stdout || '{}');
+    return { ok: parsed.ok === true, status: parsed.status || '' };
+  } catch (error) {
+    return { ok: false, status: 'invalid_probe_output', error: error.message };
+  }
+}
+
+
 function verifyOutputStatus(filePath) {
   if (!fs.existsSync(filePath)) return { exists: false, ok: false, mismatches: null };
   const text = fs.readFileSync(filePath, 'utf8');
@@ -149,6 +224,7 @@ function buildStatusReport(options = {}, runner = spawnSync) {
   const envFile = path.isAbsolute(envFileOption) ? envFileOption : path.join(projectDir, envFileOption);
   const env = readEnvFile(envFile);
   const postgresContainer = options.postgresContainer || env.MARKETPLACE_POSTGRES_CONTAINER || 'marketplace-postgres';
+  const appContainer = options.appContainer || 'auto-browser';
   const postgresUser = env.MARKETPLACE_POSTGRES_USER || 'marketplace';
   const postgresDb = env.MARKETPLACE_POSTGRES_DB || 'marketplace';
   const migrationRoot = path.join(projectDir, 'artifacts', 'postgres-migration');
@@ -161,8 +237,12 @@ function buildStatusReport(options = {}, runner = spawnSync) {
   const verify = verifyOutputStatus(verifyPath);
   const compare = shadowCompareStatus(comparePath);
   const container = inspectContainer(postgresContainer, runner);
+  const appContainerStatus = inspectContainer(appContainer, runner);
   const ready = pgIsReady(postgresContainer, postgresUser, postgresDb, runner);
   const tableCount = postgresTableCount(postgresContainer, postgresUser, postgresDb, runner);
+  const appFiles = appRuntimeFiles(appContainer, runner);
+  const appEnv = appPostgresEnvStatus(appContainer, runner);
+  const appReachability = appPostgresReachability(appContainer, runner);
   const requiredArtifactFiles = ['001_schema.sql', '002_load.sql', '003_verify.sql'];
   const artifactFiles = Object.fromEntries(requiredArtifactFiles.map((file) => [file, Boolean(migrationDir && fs.existsSync(path.join(migrationDir, file)))]));
 
@@ -176,6 +256,11 @@ function buildStatusReport(options = {}, runner = spawnSync) {
     check('postgres_container_exists', container.exists, { container: postgresContainer, error: container.error || '' }),
     check('postgres_container_running', container.running, { health: container.health || '' }),
     check('postgres_ready', ready.ok, { output: ready.output || '' }),
+    check('app_container_exists', appContainerStatus.exists, { container: appContainer, error: appContainerStatus.error || '' }),
+    check('app_container_running', appContainerStatus.running, { health: appContainerStatus.health || '' }),
+    check('app_postgres_runtime_files', appFiles.ok, appFiles),
+    check('app_postgres_env', appEnv.ok, appEnv),
+    check('app_postgres_reachable', appReachability.ok, appReachability),
     check('migration_dir', Boolean(migrationDir && fs.existsSync(migrationDir)), { migrationName, path: migrationDir }),
     check('manifest', Boolean(manifest && !manifest.error), { path: manifestPath, tableCount: manifest?.tables?.length ?? null }),
     check('artifact_files', Object.values(artifactFiles).every(Boolean), { files: artifactFiles }),
@@ -197,6 +282,15 @@ function buildStatusReport(options = {}, runner = spawnSync) {
       health: container.health || '',
       ready: ready.ok,
       tableCount: tableCount.count,
+    },
+    app: {
+      container: appContainer,
+      running: appContainerStatus.running,
+      health: appContainerStatus.health || '',
+      postgresRuntimeFilesReady: appFiles.ok,
+      postgresEnvReady: appEnv.ok,
+      postgresReachable: appReachability.ok,
+      postgresReachabilityStatus: appReachability.status || '',
     },
     migration: {
       name: migrationName,
@@ -248,5 +342,8 @@ module.exports = {
   latestMigrationName,
   verifyOutputStatus,
   shadowCompareStatus,
+  appRuntimeFiles,
+  appPostgresEnvStatus,
+  appPostgresReachability,
   buildStatusReport,
 };
