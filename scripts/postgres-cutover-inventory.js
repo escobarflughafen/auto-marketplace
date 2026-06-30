@@ -29,6 +29,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'getWorkflowRun',
   'getWorkflowRunLive',
   'listWorkflowRuns',
+  'listWorkerListingEvents',
+  'getWorkerListingEventStats',
 ]);
 
 const READ_NAME_PATTERNS = [
