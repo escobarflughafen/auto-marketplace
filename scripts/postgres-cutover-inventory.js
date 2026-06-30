@@ -78,6 +78,8 @@ const COVERED_POSTGRES_EXPORTS = new Set([
   'getSearchTitleBagKeyword',
   'pickRandomSearchTitleBagKeyword',
   'getSearchTitleBagCounts',
+  'getDatabaseMaintenanceReport',
+  'runDatabaseMaintenance',
   'listListingMedia',
   'listWorkerListingEvents',
   'getWorkerListingEventStats',
