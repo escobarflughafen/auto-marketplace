@@ -63,12 +63,11 @@ module.exports = {
 
   assert.equal(inventory.ok, false);
   assert.equal(inventory.counts.total, 8);
-  assert.equal(inventory.counts.covered, 3);
-  assert.equal(inventory.counts.gaps, 5);
+  assert.equal(inventory.counts.covered, 4);
+  assert.equal(inventory.counts.gaps, 4);
   assert.deepEqual(inventory.nextRequiredGaps, [
     'getHomepageListing',
     'upsertHomepageListing',
-    'appendListingEvent',
     'runTransaction',
     'openMarketplaceHomepageDatabase',
   ]);
@@ -82,5 +81,5 @@ test('buildInventory against current DB module records existing cutover gaps', (
   assert.ok(inventory.counts.gaps > 40);
   assert.ok(inventory.nextRequiredGaps.includes('openMarketplaceHomepageDatabase'));
   assert.ok(inventory.nextRequiredGaps.includes('upsertHomepageListing'));
-  assert.ok(inventory.nextRequiredGaps.includes('appendListingEvent'));
+  assert.ok(!inventory.nextRequiredGaps.includes('appendListingEvent'));
 });

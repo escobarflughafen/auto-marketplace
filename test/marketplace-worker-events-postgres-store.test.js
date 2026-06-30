@@ -94,6 +94,104 @@ test('normalizes PostgreSQL listing event rows to existing worker event shape', 
   });
 });
 
+test('appendListingEvent writes PostgreSQL row and updates worker stats cache', async () => {
+  const pool = createFakePool((sql, params) => {
+    if (/INSERT INTO listing_events/.test(sql)) {
+      assert.deepEqual(params, [
+        'event-new-1',
+        'run-1',
+        'listing-1',
+        'detail_capture_succeeded',
+        '2026-05-08T00:00:20.000Z',
+        'worker-a',
+        'https://example.test/listing-1',
+        3,
+        'done',
+        JSON.stringify({ title: 'Camera' }, null, 2),
+        'content-hash-1',
+        '/tmp/new.png',
+        '/tmp/new.md',
+        '',
+      ]);
+      return [];
+    }
+    if (/INSERT INTO worker_event_stats_cache/.test(sql)) {
+      assert.deepEqual(params, [
+        'run-1',
+        'listing',
+        'detail_capture_succeeded',
+        'done',
+        1,
+        '2026-05-08T00:00:20.000Z',
+      ]);
+      return [];
+    }
+    if (/WHERE e\.event_id = \$1/.test(sql)) {
+      assert.deepEqual(params, ['event-new-1']);
+      return [{
+        ...listingEventRow,
+        event_id: 'event-new-1',
+        event_type: 'detail_capture_succeeded',
+        status: 'done',
+      }];
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplaceWorkerEventsPostgresStore({ pool });
+  const event = await store.appendListingEvent({
+    eventId: 'event-new-1',
+    workflowRunId: 'run-1',
+    listingId: 'listing-1',
+    eventType: 'detail_capture_succeeded',
+    eventAt: '2026-05-08T00:00:20.000Z',
+    workerId: 'worker-a',
+    sourceUrl: 'https://example.test/listing-1',
+    attempt: 3,
+    status: 'done',
+    content: { title: 'Camera' },
+    contentHash: 'content-hash-1',
+    screenshotPath: '/tmp/new.png',
+    snapshotPath: '/tmp/new.md',
+  });
+
+  assert.equal(event.event_id, 'event-new-1');
+  assert.equal(event.event_type, 'detail_capture_succeeded');
+  assert.equal(pool.calls.length, 3);
+});
+
+test('appendListingEvent rejects events without listing ids before querying', async () => {
+  const store = createMarketplaceWorkerEventsPostgresStore({ pool: createFakePool(() => []) });
+  await assert.rejects(() => store.appendListingEvent({ eventType: 'detail_capture_started' }), /requires listingId/);
+  assert.equal(store.pool.calls.length, 0);
+});
+
+test('listing event read helpers use PostgreSQL listing filters', async () => {
+  const pool = createFakePool((sql, params) => {
+    if (/WHERE e\.event_id = \$1/.test(sql)) {
+      assert.deepEqual(params, ['event-1']);
+      return [listingEventRow];
+    }
+    if (/WHERE e\.listing_id = \$1\s+ORDER BY e\.event_at DESC\s+LIMIT \$2/.test(sql)) {
+      assert.deepEqual(params, ['listing-1', 200]);
+      return [listingEventRow, { ...listingEventRow, event_id: 'event-2' }];
+    }
+    if (/AND e\.event_type = \$2/.test(sql)) {
+      assert.deepEqual(params, ['listing-1', 'detail_capture_succeeded']);
+      return [{ ...listingEventRow, event_id: 'event-success', event_type: 'detail_capture_succeeded' }];
+    }
+    throw new Error('unexpected SQL: ' + sql);
+  });
+  const store = createMarketplaceWorkerEventsPostgresStore({ pool });
+
+  const event = await store.getListingEvent('event-1');
+  const events = await store.getListingEvents('listing-1', { limit: 500 });
+  const latest = await store.getLatestListingEvent('listing-1', { eventType: 'detail_capture_succeeded' });
+
+  assert.equal(event.event_id, 'event-1');
+  assert.deepEqual(events.map((row) => row.event_id), ['event-1', 'event-2']);
+  assert.equal(latest.event_id, 'event-success');
+});
+
 test('listWorkerListingEvents builds PostgreSQL worker/run and category filters', async () => {
   const pool = createFakePool((sql) => {
     assert.match(sql, /FROM listing_events e/);

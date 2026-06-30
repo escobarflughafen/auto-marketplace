@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { createMarketplaceWorkflowEventsPostgresStore } = require('./marketplace-workflow-events-postgres-store');
 
 const COLLECTOR_OBSERVED_EVENT_TYPE = 'listing_observed';
@@ -22,6 +23,17 @@ function parseJsonObject(value) {
   } catch {
     return {};
   }
+}
+
+function serializeJson(value) {
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function hashContent(value) {
+  return crypto
+    .createHash('sha256')
+    .update(serializeJson(value))
+    .digest('hex');
 }
 
 function integerValue(value, fallback = 0) {
@@ -150,6 +162,16 @@ function boundedLimit(value, fallback = 50) {
   return Math.max(1, Math.min(limit, 200));
 }
 
+function buildListingEventId(eventAt, listingId, eventType) {
+  const entropy = crypto.randomBytes(8).toString('hex');
+  return [
+    String(eventAt || new Date().toISOString()).replace(/[^0-9A-Za-z]/g, ''),
+    String(listingId || 'unknown'),
+    String(eventType || 'event'),
+    entropy,
+  ].join('-');
+}
+
 function placeholder(params, value) {
   params.push(value);
   return `$${params.length}`;
@@ -239,6 +261,29 @@ async function queryRows(pool, sql, params = []) {
 async function queryOne(pool, sql, params = []) {
   const rows = await queryRows(pool, sql, params);
   return rows[0] || null;
+}
+
+async function incrementWorkerEventStatsCache(pool, options = {}) {
+  const workerId = String(options.workerId || options.worker_id || '').trim();
+  const eventScope = normalizeKeyword(options.eventScope || options.event_scope || '').toLowerCase();
+  const eventType = normalizeKeyword(options.eventType || options.event_type || '');
+  if (!workerId || !eventScope || !eventType) return;
+  const status = String(options.status || '').trim();
+  const count = Number.isFinite(options.count) ? Math.max(1, Math.floor(options.count)) : 1;
+  const updatedAt = options.updatedAt || options.updated_at || new Date().toISOString();
+  await pool.query(`
+    INSERT INTO worker_event_stats_cache (
+      worker_id,
+      event_scope,
+      event_type,
+      status,
+      count,
+      updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT(worker_id, event_scope, event_type, status) DO UPDATE SET
+      count = worker_event_stats_cache.count + excluded.count,
+      updated_at = excluded.updated_at
+  `, [workerId, eventScope, eventType, status, count, updatedAt]);
 }
 
 function listingEventSelectSql() {
@@ -368,6 +413,97 @@ function createMarketplaceWorkerEventsPostgresStore(options = {}) {
   return {
     dialect: 'postgres',
     pool,
+
+    async appendListingEvent(event = {}) {
+      const eventAt = event.eventAt || event.event_at || new Date().toISOString();
+      const listingId = String(event.listingId || event.listing_id || '').trim();
+      if (!listingId) throw new Error('appendListingEvent requires listingId');
+
+      const eventType = normalizeKeyword(event.eventType || event.event_type || 'detail_capture_event');
+      const content = event.content || event.contentJson || {};
+      const eventId = String(event.eventId || event.event_id || buildListingEventId(eventAt, listingId, eventType));
+      const workflowRunId = String(event.workflowRunId || event.workflow_run_id || '').trim();
+      const workerId = String(event.workerId || event.worker_id || '').trim();
+      const status = String(event.status || '').trim();
+
+      await pool.query(`
+        INSERT INTO listing_events (
+          event_id,
+          workflow_run_id,
+          listing_id,
+          event_type,
+          event_at,
+          worker_id,
+          source_url,
+          attempt,
+          status,
+          content_json,
+          content_hash,
+          screenshot_path,
+          snapshot_path,
+          error
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `, [
+        eventId,
+        workflowRunId,
+        listingId,
+        eventType,
+        eventAt,
+        workerId,
+        String(event.sourceUrl || event.source_url || '').trim(),
+        Number.isFinite(event.attempt) ? event.attempt : 0,
+        status,
+        serializeJson(content),
+        String(event.contentHash || event.content_hash || hashContent(content)).trim(),
+        String(event.screenshotPath || event.screenshot_path || '').trim(),
+        String(event.snapshotPath || event.snapshot_path || '').trim(),
+        String(event.error || '').trim(),
+      ]);
+
+      await incrementWorkerEventStatsCache(pool, {
+        workerId: workflowRunId || workerId,
+        eventScope: 'listing',
+        eventType,
+        status,
+        updatedAt: eventAt,
+      });
+
+      return this.getListingEvent(eventId);
+    },
+
+    async getListingEvent(eventId) {
+      const row = await queryOne(pool, `
+        ${listingEventSelectSql()}
+        WHERE e.event_id = $1
+      `, [String(eventId)]);
+      return normalizeListingEventRow(row);
+    },
+
+    async getListingEvents(listingId, options = {}) {
+      const limit = boundedLimit(options.limit, 50);
+      const rows = await queryRows(pool, `
+        ${listingEventSelectSql()}
+        WHERE e.listing_id = $1
+        ORDER BY e.event_at DESC
+        LIMIT $2
+      `, [String(listingId), limit]);
+      return rows.map(normalizeListingEventRow);
+    },
+
+    async getLatestListingEvent(listingId, options = {}) {
+      const eventType = normalizeKeyword(options.eventType || options.event_type || '');
+      const params = [String(listingId)];
+      const eventTypeSql = eventType ? `AND e.event_type = $${params.length + 1}` : '';
+      if (eventType) params.push(eventType);
+      const row = await queryOne(pool, `
+        ${listingEventSelectSql()}
+        WHERE e.listing_id = $1
+          ${eventTypeSql}
+        ORDER BY e.event_at DESC
+        LIMIT 1
+      `, params);
+      return normalizeListingEventRow(row);
+    },
 
     async listWorkerListingEvents(workerId, options = {}) {
       const limit = boundedLimit(options.limit, 50);
@@ -588,5 +724,6 @@ module.exports = {
   collectorOutcomeStatsFromRows,
   isWorkflowReviewEvent,
   buildAuditStatsFromCacheRows,
+  buildListingEventId,
   boundedLimit,
 };
