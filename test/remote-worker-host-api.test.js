@@ -86,18 +86,103 @@ test('parseArgs supports explicit PostgreSQL remote worker store flags', () => {
   const options = parseArgs([
     '--admin-token', 'admin-token',
     '--read-only-token', 'readonly-token',
+    '--db-dialect', 'postgres',
     '--remote-worker-store', 'postgres',
     '--remote-worker-postgres-url', 'postgres://marketplace@example.test/marketplace',
     '--listing-read-store', 'postgres',
     '--listing-read-postgres-url', 'postgres://marketplace-read@example.test/marketplace',
   ]);
 
+  assert.equal(options.dbDialect, 'postgres');
   assert.equal(options.remoteWorkerStoreMode, 'postgres');
   assert.equal(options.remoteWorkerPostgresUrl, 'postgres://marketplace@example.test/marketplace');
   assert.equal(options.listingReadStoreMode, 'postgres');
   assert.equal(options.listingReadPostgresUrl, 'postgres://marketplace-read@example.test/marketplace');
 });
 
+
+test('workflow list API can read from PostgreSQL runtime stores', async () => {
+  const { tempDir, dbPath } = createTempDbPath();
+  const queryRows = {
+    workflow_runs: [{
+      run_id: 'pg-run-1',
+      workflow_id: 'remote-homepage-collector',
+      label: 'PG run',
+      script: 'remote',
+      args_json: '[]',
+      pid: null,
+      status: 'running',
+      started_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+      exited_at: null,
+      exit_code: null,
+      signal: '',
+      os_checked_at: '',
+      os_alive: 1,
+      logs_json: '[]',
+    }],
+    remote_worker_sessions: [{
+      session_id: 'pg-session-1',
+      worker_id: 'pg-worker-1',
+      worker_type: 'collector',
+      strategy: 'feed',
+      worker_version: 'v1',
+      source_id: 'pg-source',
+      status: 'registered',
+      liveness_state: 'online',
+      runtime_state: 'idle',
+      last_local_sequence: 2,
+      last_acked_sequence: 2,
+      pending_event_count: 0,
+      registered_at: '2026-07-01T00:00:00.000Z',
+      last_seen_at: '2026-07-01T00:00:01.000Z',
+      updated_at: '2026-07-01T00:00:01.000Z',
+      ended_at: '',
+      last_error: '',
+      capabilities_json: '{}',
+      active_claim_count: '0',
+      queued_command_count: '0',
+      event_count: '2',
+      latest_event_type: 'heartbeat',
+    }],
+  };
+  const pool = createFakePostgresPool((sql) => {
+    if (/FROM workflow_runs/.test(sql)) return queryRows.workflow_runs;
+    if (/FROM remote_worker_sessions/.test(sql)) return queryRows.remote_worker_sessions;
+    if (/FROM resolve_queue/.test(sql)) return [];
+    return [];
+  });
+  const server = createServer({
+    dbPath,
+    dbDialect: 'postgres',
+    postgresPool: pool,
+    adminToken: 'admin-token',
+    readOnlyToken: 'readonly-token',
+    workerToken: 'worker-token',
+    remoteWorkerStoreMode: 'postgres',
+    listingReadStore: {
+      dialect: 'postgres',
+      async listListings() { return { query: '', parsedQuery: { dialect: 'postgres' }, sort: 'recent', sortDirection: 'desc', limit: 1, offset: 0, total: 0, rows: [] }; },
+      async readListingsResultStats() { return {}; },
+    },
+    remoteWorkerPostgresPool: pool,
+    listingReadPostgresPool: pool,
+    initialDelayMs: 60 * 60 * 1000,
+  });
+  const address = await listen(server);
+  const baseUrl = 'http://' + address.address + ':' + address.port;
+
+  try {
+    const response = await requestJson(baseUrl, '/api/workflows?token=readonly-token&reconcile=0&stats=0&config=0');
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.processes[0].id, 'pg-run-1');
+    assert.equal(response.body.remoteWorkers[0].sessionId, 'pg-session-1');
+    assert.equal(response.body.remoteWorkers[0].workerId, 'pg-worker-1');
+  } finally {
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 test('remote worker v2 API can route session registration through PostgreSQL store', async () => {
   const { tempDir, dbPath } = createTempDbPath();
   const pool = createFakePostgresPool(() => []);

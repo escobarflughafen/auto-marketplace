@@ -32,9 +32,11 @@
     "marketplace:postgres:export": "node scripts/export-marketplace-postgres-migration.js",
     "marketplace:postgres:shadow-compare": "node scripts/compare-marketplace-postgres-shadow.js",
     "marketplace:postgres:status": "node scripts/postgres-migration-status.js",
-    "marketplace:postgres:cutover:inventory": "node scripts/postgres-cutover-inventory.js"
+    "marketplace:postgres:cutover:inventory": "node scripts/postgres-cutover-inventory.js",
+    "marketplace:postgres:app-smoke": "bash ops/postgres-app-smoke.sh"
   },
   "dependencies": {
+    "pg": "^8.22.0",
     "playwright": "^1.58.2",
     "tabulator-tables": "^6.4.0"
   }

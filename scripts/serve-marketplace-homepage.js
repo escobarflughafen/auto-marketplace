@@ -166,6 +166,7 @@ function parseArgs(argv) {
     host: '127.0.0.1',
     port: 3080,
     dbPath: DEFAULT_DB_PATH,
+    dbDialect: process.env.MARKETPLACE_DB_DIALECT || '',
     adminToken: process.env.MARKETPLACE_MONITOR_ADMIN_TOKEN || '',
     readOnlyToken: process.env.MARKETPLACE_MONITOR_READONLY_TOKEN || '',
     workerToken: process.env.MARKETPLACE_REMOTE_WORKER_TOKEN || process.env.MARKETPLACE_WORKER_TOKEN || '',
@@ -188,6 +189,10 @@ function parseArgs(argv) {
         break;
       case '--db-path':
         options.dbPath = readFlagValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--db-dialect':
+        options.dbDialect = readFlagValue(argv, index, arg);
         index += 1;
         break;
       case '--admin-token':
@@ -4460,6 +4465,95 @@ function remoteWorkerAgeSeconds(row = {}) {
   return Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000));
 }
 
+function isPostgresRuntimeDb(db) {
+  return Boolean(db && db.dialect === 'postgres' && db.stores && db.pool);
+}
+
+function remoteWorkerUiRow(row) {
+  const displayState = remoteWorkerHealthState(row);
+  return {
+    sessionId: row.session_id,
+    workerId: row.worker_id,
+    workerType: row.worker_type,
+    strategy: row.strategy,
+    workerVersion: row.worker_version || '',
+    sourceId: row.source_id || '',
+    status: row.status || '',
+    livenessState: row.liveness_state || '',
+    runtimeState: row.runtime_state || '',
+    displayState,
+    standby: displayState === 'standby',
+    lastLocalSequence: row.last_local_sequence || 0,
+    lastAckedSequence: row.last_acked_sequence || 0,
+    pendingEventCount: row.pending_event_count || 0,
+    activeClaimCount: row.active_claim_count || 0,
+    queuedCommandCount: row.queued_command_count || 0,
+    eventCount: row.event_count || 0,
+    latestEventType: row.latest_event_type || '',
+    registeredAt: row.registered_at || '',
+    lastSeenAt: row.last_seen_at || '',
+    lastSeenAgeSeconds: remoteWorkerAgeSeconds(row),
+    updatedAt: row.updated_at || '',
+    endedAt: row.ended_at || '',
+    lastError: row.last_error || '',
+    capabilities: parseSafeJsonObject(row.capabilities_json || '{}'),
+  };
+}
+
+async function listRemoteWorkersForUiAsync(db, options = {}) {
+  if (!isPostgresRuntimeDb(db)) return listRemoteWorkersForUi(db, options);
+  const limit = normalizeBoundedInteger(options.limit, 100, 1, 250);
+  const result = await db.pool.query(`
+    SELECT
+      s.*,
+      (
+        SELECT COUNT(*)
+        FROM remote_worker_claims c
+        WHERE c.session_id = s.session_id
+          AND c.status IN ('claimed', 'renewed')
+          AND c.expires_at > $1
+      ) AS active_claim_count,
+      (
+        SELECT COUNT(*)
+        FROM remote_worker_commands cmd
+        WHERE cmd.status = 'queued'
+          AND (cmd.session_id = '' OR cmd.session_id = s.session_id)
+          AND (cmd.worker_id = '' OR cmd.worker_id = s.worker_id)
+          AND (cmd.worker_type = '' OR cmd.worker_type = s.worker_type)
+          AND (cmd.strategy = '' OR cmd.strategy = s.strategy)
+      ) AS queued_command_count,
+      (
+        SELECT COUNT(*)
+        FROM remote_worker_event_ingest e
+        WHERE e.session_id = s.session_id
+      ) AS event_count,
+      (
+        SELECT e.event_type
+        FROM remote_worker_event_ingest e
+        WHERE e.session_id = s.session_id
+        ORDER BY e.event_at DESC, e.received_at DESC
+        LIMIT 1
+      ) AS latest_event_type
+    FROM remote_worker_sessions s
+    ORDER BY COALESCE(NULLIF(s.last_seen_at, ''), s.registered_at) DESC
+    LIMIT $2
+  `, [new Date().toISOString(), limit]);
+  return (result.rows || []).map(remoteWorkerUiRow);
+}
+
+async function listWorkflowRunsForUiAsync(db, options = {}) {
+  if (!isPostgresRuntimeDb(db)) {
+    return publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), options);
+  }
+  const runs = await db.stores.workflow.listWorkflowRuns({ limit: 50 });
+  return publicWorkflowRunRecords(db, runs, { ...options, includeStats: false });
+}
+
+async function refreshResolveQueueRunStatusesAsync(db) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.refreshResolveQueueRunStatuses();
+  return refreshResolveQueueRunStatuses(db);
+}
+
 function listRemoteWorkersForUi(db, options = {}) {
   const limit = normalizeBoundedInteger(options.limit, 100, 1, 250);
   const rows = db.prepare(`
@@ -4498,36 +4592,7 @@ function listRemoteWorkersForUi(db, options = {}) {
     LIMIT ?
   `).all(new Date().toISOString(), limit);
 
-  return rows.map((row) => {
-    const displayState = remoteWorkerHealthState(row);
-    return {
-      sessionId: row.session_id,
-      workerId: row.worker_id,
-      workerType: row.worker_type,
-      strategy: row.strategy,
-      workerVersion: row.worker_version || '',
-      sourceId: row.source_id || '',
-      status: row.status || '',
-      livenessState: row.liveness_state || '',
-      runtimeState: row.runtime_state || '',
-      displayState,
-      standby: displayState === 'standby',
-      lastLocalSequence: row.last_local_sequence || 0,
-      lastAckedSequence: row.last_acked_sequence || 0,
-      pendingEventCount: row.pending_event_count || 0,
-      activeClaimCount: row.active_claim_count || 0,
-      queuedCommandCount: row.queued_command_count || 0,
-      eventCount: row.event_count || 0,
-      latestEventType: row.latest_event_type || '',
-      registeredAt: row.registered_at || '',
-      lastSeenAt: row.last_seen_at || '',
-      lastSeenAgeSeconds: remoteWorkerAgeSeconds(row),
-      updatedAt: row.updated_at || '',
-      endedAt: row.ended_at || '',
-      lastError: row.last_error || '',
-      capabilities: parseSafeJsonObject(row.capabilities_json || '{}'),
-    };
-  });
+  return rows.map(remoteWorkerUiRow);
 }
 
 function getRemoteWorkerForUi(db, sessionId) {
@@ -5474,7 +5539,8 @@ function createServer(options) {
   if (Number.isFinite(options.port)) {
     serverRuntimeOptions.port = options.port;
   }
-  const { db } = openMarketplaceHomepageDatabase(options.dbPath);
+  const dbOpenOptions = options.dbDialect ? { dbPath: options.dbPath, dialect: options.dbDialect, pool: options.postgresPool, connectionString: options.postgresUrl } : options.dbPath;
+  const { db } = openMarketplaceHomepageDatabase(dbOpenOptions);
   const remoteWorkerStore = createRemoteWorkerApiStore(options, db);
   const listingReadStore = createListingReadStore(options, db);
   const stopPurchaseHistoryMatchScanner = startPurchaseHistoryMatchScanner(db);
@@ -6335,13 +6401,15 @@ function createServer(options) {
       const includeStats = requestUrl.searchParams.get('stats') !== '0';
       const includeConfig = requestUrl.searchParams.get('config') !== '0';
       if (access.canWrite && reconcile) {
-        refreshResolveQueueRunStatuses(db);
+        await refreshResolveQueueRunStatusesAsync(db);
       }
       const payload = {
-        processes: access.canWrite
-          ? listManagedProcesses(db, { reconcile, includeStats })
-          : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats }),
-        remoteWorkers: listRemoteWorkersForUi(db),
+        processes: isPostgresRuntimeDb(db)
+          ? await listWorkflowRunsForUiAsync(db, { includeStats })
+          : access.canWrite
+            ? listManagedProcesses(db, { reconcile, includeStats })
+            : publicWorkflowRunRecords(db, listWorkflowRuns(db, { limit: 50 }), { includeStats }),
+        remoteWorkers: await listRemoteWorkersForUiAsync(db),
       };
       if (includeConfig) {
         payload.workflows = buildWorkflowDefinitions({ port: options.port });
