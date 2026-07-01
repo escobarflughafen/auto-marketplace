@@ -71,5 +71,7 @@ probe() {
 probe "http://127.0.0.1:${HOST_PORT}/healthz"
 probe "http://127.0.0.1:${HOST_PORT}/api/listings?token=${READ_TOKEN}&limit=1"
 probe "http://127.0.0.1:${HOST_PORT}/api/workflows?token=${READ_TOKEN}&reconcile=0&stats=0&config=0"
+probe "http://127.0.0.1:${HOST_PORT}/api/summary?token=${READ_TOKEN}"
+probe "http://127.0.0.1:${HOST_PORT}/api/remote-workers?token=${READ_TOKEN}&limit=5"
 
 echo "postgres_app_smoke ok image=${IMAGE} port=${HOST_PORT}"

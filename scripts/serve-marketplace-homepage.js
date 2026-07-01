@@ -2082,6 +2082,62 @@ function computeSummaryPayload(db, options = {}) {
   };
 }
 
+async function countListingsWithStore(listingReadStore, query) {
+  try {
+    const result = await listingReadStore.listListings({ query: String(query || '').trim(), limit: 1, offset: 0 });
+    return { total: Number(result.total || 0), error: '' };
+  } catch (error) {
+    return { total: 0, error: error.message || 'Query could not be counted.' };
+  }
+}
+
+async function computePostgresSummaryPayload(db, listingReadStore, options = {}) {
+  const [totalResult, latestResult, queueCounts, resolveQueueCounts, summaryCards, savedQueries] = await Promise.all([
+    db.pool.query('SELECT COUNT(*)::int AS total FROM homepage_listings'),
+    db.pool.query('SELECT MAX(last_seen_at) AS latest_seen_at FROM homepage_listings'),
+    db.stores.listings.getHomepageListingCounts(),
+    db.stores.resolveQueue.getResolveQueueCounts(),
+    db.stores.config.listSummaryQueryCards(),
+    db.stores.config.listSavedQueries(),
+  ]);
+  const includeAll = options.savedQueriesIncludeAll === true;
+  const countedSummaryCards = await Promise.all(summaryCards.map(async (card) => {
+    const counted = await countListingsWithStore(listingReadStore, card.query);
+    return {
+      ...card,
+      value: counted.total,
+      error: counted.error,
+      cache: { cached: false, computedAt: nowIso(), elapsedMs: 0, dataVersion: 'postgres-live' },
+    };
+  }));
+  const countedSavedQueryCards = await Promise.all(savedQueries
+    .filter((item) => includeAll || item.showInOverview === true)
+    .map(async (item) => {
+      const counted = await countListingsWithStore(listingReadStore, item.query);
+      return {
+        id: item.id,
+        label: item.label,
+        query: String(item.query || '').trim(),
+        value: counted.total,
+        showInOverview: item.showInOverview === true,
+        source: 'saved-query',
+        error: counted.error,
+        cache: { cached: false, computedAt: nowIso(), elapsedMs: 0, dataVersion: 'postgres-live' },
+      };
+    }));
+  return {
+    dbPath: 'postgres',
+    totalRows: Number(totalResult.rows?.[0]?.total || 0),
+    latestSeenAt: latestResult.rows?.[0]?.latest_seen_at || null,
+    queueCounts,
+    resolveQueueCounts,
+    summaryCards: countedSummaryCards,
+    savedQueryCards: countedSavedQueryCards,
+    cache: { cached: false, computedAt: nowIso(), elapsedMs: 0, dataVersion: 'postgres-live' },
+    auth: options.auth || {},
+  };
+}
+
 function getSummaryProjection(db, options = {}) {
   const dataVersion = options.dataVersion || getSummaryDataVersion(db);
   const savedQueryScope = options.savedQueriesIncludeAll === true ? 'all' : 'pinned';
@@ -5619,11 +5675,18 @@ function createServer(options) {
 
     if (requestUrl.pathname === '/api/summary') {
       if (access.canWrite) {
-        refreshResolveQueueRunStatuses(db);
+        await refreshResolveQueueRunStatusesAsync(db);
+      }
+      const savedQueriesIncludeAll = requestUrl.searchParams.get('savedQueries') === 'all';
+      if (isPostgresRuntimeDb(db)) {
+        writeJson(response, 200, await computePostgresSummaryPayload(db, listingReadStore, {
+          savedQueriesIncludeAll,
+          auth: authPayloadForAccess(access),
+        }));
+        return;
       }
       const listingsDataVersion = getListingsDataVersion(db);
       const summaryDataVersion = getSummaryDataVersion(db, { listingsDataVersion });
-      const savedQueriesIncludeAll = requestUrl.searchParams.get('savedQueries') === 'all';
       writeJson(response, 200, getSummaryProjection(db, {
         dbPath: options.dbPath,
         dataVersion: summaryDataVersion,
@@ -6424,7 +6487,7 @@ function createServer(options) {
         return;
       }
       writeJson(response, 200, {
-        workers: listRemoteWorkersForUi(db, {
+        workers: await listRemoteWorkersForUiAsync(db, {
           limit: requestUrl.searchParams.get('limit'),
         }),
       });
