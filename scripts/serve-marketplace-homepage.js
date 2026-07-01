@@ -4610,6 +4610,106 @@ async function refreshResolveQueueRunStatusesAsync(db) {
   return refreshResolveQueueRunStatuses(db);
 }
 
+async function listSummaryQueryCardsAsync(db) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.listSummaryQueryCards();
+  return listSummaryQueryCards(db);
+}
+
+async function upsertSummaryQueryCardAsync(db, card) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.upsertSummaryQueryCard(card);
+  return upsertSummaryQueryCard(db, card);
+}
+
+async function deleteSummaryQueryCardAsync(db, cardId) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.deleteSummaryQueryCard(cardId);
+  return deleteSummaryQueryCard(db, cardId);
+}
+
+async function listSavedQueriesAsync(db) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.listSavedQueries();
+  return listSavedQueries(db);
+}
+
+async function upsertSavedQueryAsync(db, query) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.upsertSavedQuery(query);
+  return upsertSavedQuery(db, query);
+}
+
+async function setSavedQueryOverviewAsync(db, queryId, showInOverview) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.setSavedQueryOverview(queryId, showInOverview);
+  return setSavedQueryOverview(db, queryId, showInOverview);
+}
+
+async function deleteSavedQueryAsync(db, queryId) {
+  if (isPostgresRuntimeDb(db)) return db.stores.config.deleteSavedQuery(queryId);
+  return deleteSavedQuery(db, queryId);
+}
+
+async function listBacklogCandidatesAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.listings.listBacklogCandidates(options);
+  return listBacklogCandidates(db, options);
+}
+
+async function listResolveQueueItemsAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.listResolveQueueItems(options);
+  return listResolveQueueItems(db, options);
+}
+
+async function listListingResolverAssignmentsAsync(db, listingIds = []) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.listListingResolverAssignments(listingIds);
+  return listListingResolverAssignments(db, listingIds);
+}
+
+async function listResolveQueueEventsAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.listResolveQueueEvents(options);
+  return listResolveQueueEvents(db, options);
+}
+
+async function getResolveQueueCountsAsync(db) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.getResolveQueueCounts();
+  return getResolveQueueCounts(db);
+}
+
+async function addResolveQueueItemsAsync(db, listingIds = [], options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.addResolveQueueItems(listingIds, options);
+  return addResolveQueueItems(db, listingIds, options);
+}
+
+async function clearResolveQueueItemsAsync(db, listingIds = [], options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.clearResolveQueueItems(listingIds, options);
+  return clearResolveQueueItems(db, listingIds, options);
+}
+
+async function markResolveQueueDispatchedAsync(db, listingIds = [], workflowRunId = '', options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.resolveQueue.markResolveQueueDispatched(listingIds, workflowRunId, options);
+  return markResolveQueueDispatched(db, listingIds, workflowRunId, options);
+}
+
+async function listPurchaseHistoryMatchQueueAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.purchaseHistory.listPurchaseHistoryMatchQueue(options);
+  return listPurchaseHistoryMatchQueue(db, options);
+}
+
+async function listRandomPurchaseHistoryMatchesAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.purchaseHistory.listRandomPurchaseHistoryMatches(options);
+  return listRandomPurchaseHistoryMatches(db, options);
+}
+
+async function countPurchaseHistoryMatchQueueAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.purchaseHistory.countPurchaseHistoryMatchQueue(options);
+  return countPurchaseHistoryMatchQueue(db, options);
+}
+
+async function updatePurchaseHistoryMatchQueueStatusAsync(db, match = {}, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.purchaseHistory.updatePurchaseHistoryMatchQueueStatus(match, options);
+  return updatePurchaseHistoryMatchQueueStatus(db, match, options);
+}
+
+async function scanPurchaseHistoryListingMatchesAsync(db, options = {}) {
+  if (isPostgresRuntimeDb(db)) return db.stores.purchaseHistory.scanPurchaseHistoryListingMatches(options);
+  return scanPurchaseHistoryListingMatches(db, options);
+}
+
 function listRemoteWorkersForUi(db, options = {}) {
   const limit = normalizeBoundedInteger(options.limit, 100, 1, 250);
   const rows = db.prepare(`
@@ -5567,7 +5667,7 @@ function startPurchaseHistoryMatchScanner(db, options = {}) {
   return scheduler.scheduleEvery('history-match-scan', intervalMs, async () => {
     const startedAt = process.hrtime.bigint();
     try {
-      const result = scanPurchaseHistoryListingMatches(db, {
+      const result = await scanPurchaseHistoryListingMatchesAsync(db, {
         limit: HISTORY_MATCH_SCAN_BATCH_SIZE,
         actor: 'history-watch-scheduler',
       });
@@ -5707,8 +5807,10 @@ function createServer(options) {
         const body = await readRequestJson(request);
         const label = String(body.label || body.name || '').trim();
         const query = String(body.query || '').trim();
-        const counted = countListingsForSummaryQueryCached(db, query, { source: 'summary-card' });
-        const card = upsertSummaryQueryCard(db, {
+        const counted = isPostgresRuntimeDb(db)
+          ? await countListingsWithStore(listingReadStore, query)
+          : countListingsForSummaryQueryCached(db, query, { source: 'summary-card' });
+        const card = await upsertSummaryQueryCardAsync(db, {
           cardId: body.cardId || body.card_id,
           label,
           query,
@@ -5718,12 +5820,12 @@ function createServer(options) {
           card: {
             ...card,
             value: counted.total,
-            error: '',
+            error: counted.error || '',
             cache: {
               cached: counted.cached === true,
-              computedAt: counted.computedAt,
-              elapsedMs: counted.elapsedMs,
-              dataVersion: counted.dataVersion,
+              computedAt: counted.computedAt || nowIso(),
+              elapsedMs: counted.elapsedMs || 0,
+              dataVersion: counted.dataVersion || (isPostgresRuntimeDb(db) ? 'postgres-live' : ''),
             },
           },
         });
@@ -5740,7 +5842,7 @@ function createServer(options) {
         return;
       }
       const cardId = decodeURIComponent(summaryCardMatch[1]);
-      const deleted = deleteSummaryQueryCard(db, cardId);
+      const deleted = await deleteSummaryQueryCardAsync(db, cardId);
       if (!deleted) {
         writeJson(response, 404, { error: `Unknown summary card: ${cardId}` });
         return;
@@ -5822,7 +5924,7 @@ function createServer(options) {
 
     if (requestUrl.pathname === '/api/saved-queries' && request.method === 'GET') {
       writeJson(response, 200, {
-        queries: listSavedQueries(db),
+        queries: await listSavedQueriesAsync(db),
       });
       return;
     }
@@ -5834,7 +5936,7 @@ function createServer(options) {
       }
       try {
         const body = await readRequestJson(request);
-        const savedQuery = upsertSavedQuery(db, {
+        const savedQuery = await upsertSavedQueryAsync(db, {
           id: body.id || body.queryId || body.query_id,
           label: body.label || body.name,
           query: body.query,
@@ -5856,7 +5958,7 @@ function createServer(options) {
       try {
         const body = await readRequestJson(request);
         const queryId = decodeURIComponent(savedQueryMatch[1]);
-        const updated = setSavedQueryOverview(db, queryId, body.showInOverview ?? body.show_in_overview);
+        const updated = await setSavedQueryOverviewAsync(db, queryId, body.showInOverview ?? body.show_in_overview);
         if (!updated) {
           writeJson(response, 404, { error: `Unknown saved query: ${queryId}` });
           return;
@@ -5874,7 +5976,7 @@ function createServer(options) {
         return;
       }
       const queryId = decodeURIComponent(savedQueryMatch[1]);
-      const deleted = deleteSavedQuery(db, queryId);
+      const deleted = await deleteSavedQueryAsync(db, queryId);
       if (!deleted) {
         writeJson(response, 404, { error: `Unknown saved query: ${queryId}` });
         return;
@@ -6011,12 +6113,12 @@ function createServer(options) {
           ...purchaseHistoryPayload(db, access, body.documentId || body.document_id || ''),
           listingLink: result,
           backlog: {
-            rows: listBacklogCandidates(db, {
+            rows: await listBacklogCandidatesAsync(db, {
               statusFilter: 'all',
               sourceFilter: 'manual',
               limit: 25,
             }),
-            resolveQueueCounts: getResolveQueueCounts(db),
+            resolveQueueCounts: await getResolveQueueCountsAsync(db),
           },
         });
       } catch (error) {
@@ -6201,12 +6303,12 @@ function createServer(options) {
         writeJson(response, 201, {
           manualListing: result,
           backlog: {
-            rows: listBacklogCandidates(db, {
+            rows: await listBacklogCandidatesAsync(db, {
               statusFilter: 'all',
               sourceFilter: 'manual',
               limit: 25,
             }),
-            resolveQueueCounts: getResolveQueueCounts(db),
+            resolveQueueCounts: await getResolveQueueCountsAsync(db),
           },
         });
       } catch (error) {
@@ -6239,10 +6341,10 @@ function createServer(options) {
           ...(maxAttempts !== undefined ? { maxAttempts } : {}),
         };
         if (access.canWrite) {
-          refreshResolveQueueRunStatuses(db);
+          await refreshResolveQueueRunStatusesAsync(db);
         }
         const startedAt = process.hrtime.bigint();
-        const rows = listBacklogCandidates(db, options);
+        const rows = await listBacklogCandidatesAsync(db, options);
         const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
         writeJson(response, 200, {
           options,
@@ -6251,7 +6353,7 @@ function createServer(options) {
             elapsedMs,
             returnedRows: rows.length,
           },
-          resolveQueueCounts: getResolveQueueCounts(db),
+          resolveQueueCounts: await getResolveQueueCountsAsync(db),
         });
       } catch (error) {
         writeJson(response, error.statusCode || 400, { error: error.message });
@@ -6276,26 +6378,26 @@ function createServer(options) {
 
     if (requestUrl.pathname === '/api/listings/resolver-status' && request.method === 'GET') {
       if (access.canWrite) {
-        refreshResolveQueueRunStatuses(db);
+        await refreshResolveQueueRunStatusesAsync(db);
       }
       const listingIds = [
         ...requestUrl.searchParams.getAll('listingId'),
         ...String(requestUrl.searchParams.get('listingIds') || '').split(','),
       ];
       writeJson(response, 200, {
-        items: listListingResolverAssignments(db, normalizeListingIds(listingIds)),
+        items: await listListingResolverAssignmentsAsync(db, normalizeListingIds(listingIds)),
       });
       return;
     }
 
     if (requestUrl.pathname === '/api/resolve-queue' && request.method === 'GET') {
       if (access.canWrite) {
-        refreshResolveQueueRunStatuses(db);
+        await refreshResolveQueueRunStatusesAsync(db);
       }
       writeJson(response, 200, {
-        items: listResolveQueueItems(db),
-        counts: getResolveQueueCounts(db),
-        events: listResolveQueueEvents(db, { limit: 30 }),
+        items: await listResolveQueueItemsAsync(db),
+        counts: await getResolveQueueCountsAsync(db),
+        events: await listResolveQueueEventsAsync(db, { limit: 30 }),
       });
       return;
     }
@@ -6307,12 +6409,12 @@ function createServer(options) {
       }
       try {
         const body = await readRequestJson(request);
-        const result = addResolveQueueItems(db, normalizeListingIds(body.listingIds || body.listingId), {
+        const result = await addResolveQueueItemsAsync(db, normalizeListingIds(body.listingIds || body.listingId), {
           actor: 'viewer',
         });
         writeJson(response, 201, {
           ...result,
-          events: listResolveQueueEvents(db, { limit: 30 }),
+          events: await listResolveQueueEventsAsync(db, { limit: 30 }),
         });
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });
@@ -6327,12 +6429,12 @@ function createServer(options) {
       }
       try {
         const body = await readRequestJson(request);
-        const result = clearResolveQueueItems(db, normalizeListingIds(body.listingIds || body.listingId), {
+        const result = await clearResolveQueueItemsAsync(db, normalizeListingIds(body.listingIds || body.listingId), {
           actor: 'viewer',
         });
         writeJson(response, 200, {
           ...result,
-          events: listResolveQueueEvents(db, { limit: 30 }),
+          events: await listResolveQueueEventsAsync(db, { limit: 30 }),
         });
       } catch (error) {
         writeJson(response, error.statusCode || 500, { error: error.message });
@@ -6366,10 +6468,10 @@ function createServer(options) {
       const filters = { status, listingId, documentId, recordId, resolvedOnly };
       writeJson(response, 200, {
         status,
-        total: countPurchaseHistoryMatchQueue(db, filters),
+        total: await countPurchaseHistoryMatchQueueAsync(db, filters),
         limit,
         offset,
-        items: listPurchaseHistoryMatchQueue(db, { ...filters, limit, offset }).map(enrichMatchQueueItemPaths),
+        items: (await listPurchaseHistoryMatchQueueAsync(db, { ...filters, limit, offset })).map(enrichMatchQueueItemPaths),
       });
       return;
     }
@@ -6384,9 +6486,9 @@ function createServer(options) {
       writeJson(response, 200, {
         statuses,
         resolvedOnly,
-        total: countPurchaseHistoryMatchQueue(db, { status: statuses.length === 1 ? statuses[0] : 'queued', resolvedOnly }),
+        total: await countPurchaseHistoryMatchQueueAsync(db, { status: statuses.length === 1 ? statuses[0] : 'queued', resolvedOnly }),
         limit,
-        items: listRandomPurchaseHistoryMatches(db, { statuses, limit, resolvedOnly }).map(enrichMatchQueueItemPaths),
+        items: (await listRandomPurchaseHistoryMatchesAsync(db, { statuses, limit, resolvedOnly })).map(enrichMatchQueueItemPaths),
       });
       return;
     }
@@ -6407,7 +6509,7 @@ function createServer(options) {
           body.reason,
           body.customReason,
         ].filter(Boolean).join(': ');
-        updatePurchaseHistoryMatchQueueStatus(db, {
+        await updatePurchaseHistoryMatchQueueStatusAsync(db, {
           documentId: body.documentId || body.document_id,
           recordId: body.recordId || body.record_id,
           listingId: body.listingId || body.listing_id,
@@ -6423,10 +6525,10 @@ function createServer(options) {
         writeJson(response, 200, {
           ok: true,
           status: responseStatus,
-          total: countPurchaseHistoryMatchQueue(db, { status: responseStatus }),
+          total: await countPurchaseHistoryMatchQueueAsync(db, { status: responseStatus }),
           limit,
           offset,
-          items: listPurchaseHistoryMatchQueue(db, { status: responseStatus, limit, offset }).map(enrichMatchQueueItemPaths),
+          items: (await listPurchaseHistoryMatchQueueAsync(db, { status: responseStatus, limit, offset })).map(enrichMatchQueueItemPaths),
         });
       } catch (error) {
         writeJson(response, error.statusCode || 400, { error: error.message });
@@ -6439,14 +6541,14 @@ function createServer(options) {
         writeAuthError(response, access);
         return;
       }
-      const result = scanPurchaseHistoryListingMatches(db, {
+      const result = await scanPurchaseHistoryListingMatchesAsync(db, {
         limit: HISTORY_MATCH_SCAN_BATCH_SIZE,
         actor: 'history-watch-manual',
       });
       writeJson(response, 200, {
         ...result,
-        total: countPurchaseHistoryMatchQueue(db, { status: 'queued' }),
-        items: listPurchaseHistoryMatchQueue(db, { status: 'queued', limit: 200 }).map(enrichMatchQueueItemPaths),
+        total: await countPurchaseHistoryMatchQueueAsync(db, { status: 'queued' }),
+        items: (await listPurchaseHistoryMatchQueueAsync(db, { status: 'queued', limit: 200 })).map(enrichMatchQueueItemPaths),
       });
       return;
     }
